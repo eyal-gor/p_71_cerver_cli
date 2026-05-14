@@ -21,6 +21,7 @@ func Run(args []string) error {
 	cli := fs.String("cli", "claude", "CLI to run: claude | codex | grok")
 	on := fs.String("on", "", "Compute name or id to run on (default: first local relay)")
 	bill := fs.String("bill", "", "Billing mode: subscription | api (alias: sub | api)")
+	model := fs.String("model", "", "Model override (e.g. sonnet, opus, gpt-5-codex). Empty = CLI's local default.")
 	timeoutSec := fs.Int("timeout", 180, "Max seconds to wait for the reply")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -81,6 +82,9 @@ func Run(args []string) error {
 
 	// 3. Create the session.
 	metadata := map[string]any{"cli_tool": *cli}
+	if *model != "" {
+		metadata["cli_model"] = *model
+	}
 	if len(envInject) > 0 {
 		metadata["env"] = envInject
 	}

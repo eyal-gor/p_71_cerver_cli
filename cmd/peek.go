@@ -61,12 +61,19 @@ func Peek(args []string) error {
 	if m, ok := s.Metadata["cli_tool"].(string); ok {
 		cliTool = m
 	}
+	cliModel := ""
+	if m, ok := s.Metadata["cli_model"].(string); ok {
+		cliModel = m
+	}
 
 	fmt.Printf("session  %s\n", s.SessionID)
 	fmt.Printf("status   %s\n", statusDot(s.Status))
 	fmt.Printf("compute  %s\n", s.ComputeID)
 	if cliTool != "" {
 		fmt.Printf("cli      %s\n", cliTool)
+	}
+	if cliModel != "" {
+		fmt.Printf("model    %s\n", cliModel)
 	}
 	if lastReplyAt != "" {
 		fmt.Printf("last     %s\n", humanTime(lastReplyAt))

@@ -46,11 +46,15 @@ func Sessions(args []string) error {
 	}
 
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "SESSION\tNAME\tCLI\tSTATUS\tUPDATED")
+	fmt.Fprintln(w, "SESSION\tNAME\tCLI\tMODEL\tSTATUS\tUPDATED")
 	for _, s := range list {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
+		model := s.CliModel()
+		if model == "" {
+			model = "—"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\n",
 			shortID(s.SessionID), truncate(s.SessionName, 24),
-			s.CliTool(), s.Status, humanTime(s.UpdatedAt))
+			s.CliTool(), truncate(model, 24), s.Status, humanTime(s.UpdatedAt))
 	}
 	return w.Flush()
 }

@@ -110,6 +110,18 @@ func (m SessionSummary) CliTool() string {
 	return ""
 }
 
+// CliModel reads .metadata.cli_model. The relay PATCHes this at run
+// time with the actual model the CLI used (observed from its result
+// event). A user-supplied --model override at session-create lives in
+// the same key, but gets overwritten by the observed value once the
+// CLI emits its first result.
+func (m SessionSummary) CliModel() string {
+	if v, ok := m.Metadata["cli_model"].(string); ok {
+		return v
+	}
+	return ""
+}
+
 // ChangeCompute moves an existing session to a new compute. The new
 // agent inherits the transcript and the same session_id is preserved;
 // the old agent on the source compute is terminated.

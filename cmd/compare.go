@@ -23,6 +23,7 @@ func Compare(args []string) error {
 	clisFlag := fs.String("clis", "claude,codex", "Comma-separated CLIs (subset of claude,codex,grok)")
 	on := fs.String("on", "", "Compute to run on (default: first local relay)")
 	billFlag := fs.String("bill", "", "Billing override. Global: `api` or `sub`. Per-CLI: `claude=sub,codex=api`")
+	modelsFlag := fs.String("models", "", "Model override. Global: `sonnet`. Per-CLI: `claude=opus,codex=gpt-5-codex`. Empty = each CLI's local default.")
 	timeoutSec := fs.Int("timeout", 180, "Max seconds to wait for replies")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -40,6 +41,7 @@ func Compare(args []string) error {
 	if err != nil {
 		return err
 	}
+	modelPerCLI := parseModelsFlag(*modelsFlag, clis)
 
 	ctx, cancel := context.WithTimeout(context.Background(),
 		time.Duration(*timeoutSec)*time.Second+15*time.Second)
@@ -87,10 +89,11 @@ func Compare(args []string) error {
 	for _, c := range clis {
 		c := c
 		mode := billPerCLI[c]
+		model := modelPerCLI[c]
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			r := runOneCLI(ctx, inf, gw, c, computeID, prompt, mode, *timeoutSec)
+			r := runOneCLI(ctx, inf, gw, c, computeID, prompt, mode, model, *timeoutSec)
 			results <- r
 		}()
 	}
@@ -116,7 +119,7 @@ func Compare(args []string) error {
 }
 
 func runOneCLI(ctx context.Context, inf *infisical.Client, gw *gateway.Client,
-	cli, computeID, prompt, mode string, timeoutSec int) (out struct {
+	cli, computeID, prompt, mode, model string, timeoutSec int) (out struct {
 	cli, reply string
 	usage      *gateway.Usage
 	elapsed    int
@@ -141,6 +144,9 @@ func runOneCLI(ctx context.Context, inf *infisical.Client, gw *gateway.Client,
 	}
 
 	metadata := map[string]any{"cli_tool": cli}
+	if model != "" {
+		metadata["cli_model"] = model
+	}
 	if len(envInject) > 0 {
 		metadata["env"] = envInject
 	}
@@ -233,4 +239,34 @@ func normalizeMode(s string) (string, error) {
 	default:
 		return "", fmt.Errorf("unknown billing mode %q (use subscription / sub / api)", s)
 	}
+}
+
+// parseModelsFlag accepts either a global model ("sonnet") applied to
+// every CLI or per-CLI ("claude=opus,codex=gpt-5-codex"). Returns a
+// {cli: model} map for every CLI in `clis`, with empty string when no
+// override is requested for that CLI — relay treats empty as "use the
+// CLI's local default."
+func parseModelsFlag(raw string, clis []string) map[string]string {
+	out := map[string]string{}
+	for _, c := range clis {
+		out[c] = ""
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return out
+	}
+	if !strings.Contains(raw, "=") {
+		for _, c := range clis {
+			out[c] = raw
+		}
+		return out
+	}
+	for _, kv := range strings.Split(raw, ",") {
+		parts := strings.SplitN(kv, "=", 2)
+		if len(parts) != 2 {
+			continue
+		}
+		out[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
+	}
+	return out
 }
