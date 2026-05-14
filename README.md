@@ -15,10 +15,12 @@ Coming in v0.2: `login` (interactive `~/.cerver/infisical.env` bootstrap), `sess
 For now (until goreleaser + Homebrew tap land):
 
 ```bash
-go install github.com/eyal-gor/p_71_cerver_cli@latest
+go install github.com/eyal-gor/p_71_cerver_cli/cmd/cerver@latest
 # or, in a clone:
-go build -o cerver . && mv cerver /usr/local/bin/
+go build -o cerver ./cmd/cerver && mv cerver /usr/local/bin/
 ```
+
+Both produce a binary called `cerver` on your `$PATH`.
 
 You'll also need `~/.cerver/infisical.env` (created by the cerver relay installer, or by hand) with these keys:
 
