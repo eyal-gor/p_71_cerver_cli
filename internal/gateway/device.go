@@ -59,6 +59,33 @@ func (c *Client) StartDeviceAuth(ctx context.Context, machineName string) (*Devi
 	return &out, nil
 }
 
+// RevokeKey deletes the supplied api_key on the gateway. Used by
+// `cerver logout` to ensure that wiping the local env file actually
+// invalidates the credential (otherwise the key stays usable by
+// anyone who copied it). The endpoint matches by prefix so we pass
+// the full key; only that exact row is deleted.
+func (c *Client) RevokeKey(ctx context.Context, apiKey string) error {
+	// DELETE returns either 200 (revoked) or 404 (already gone). We
+	// treat 404 as success since the desired state is "key doesn't
+	// exist anymore", and that's true either way.
+	url := c.BaseURL + "/v2/auth/keys/" + apiKey
+	req, err := http.NewRequestWithContext(ctx, "DELETE", url, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("revoke: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == 404 || (resp.StatusCode >= 200 && resp.StatusCode < 300) {
+		return nil
+	}
+	raw, _ := io.ReadAll(resp.Body)
+	return fmt.Errorf("revoke: HTTP %d: %s", resp.StatusCode, string(raw))
+}
+
 // PollDeviceAuth checks the status of an in-flight device login.
 // Returns Status="approved" with AccessToken set when the user has
 // completed approval in the browser. Returns Error="authorization_

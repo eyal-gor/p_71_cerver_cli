@@ -24,7 +24,8 @@ const helpText = `cerver — run AI agents on any compute, from your terminal
 usage: cerver <command> [flags] [args]
 
 commands:
-  login      Bootstrap ~/.cerver/cerver.env with your API key (email login).
+  login      Sign in (device-code flow) and write ~/.cerver/cerver.env.
+  logout     Revoke the local key server-side and delete cerver.env.
   run        Send a single prompt to one CLI on one compute.
   chat       Multi-turn conversation; resume with: cerver chat <sid>
   compare    Run the same prompt across multiple CLIs in parallel.
@@ -78,6 +79,8 @@ func main() {
 	switch cmdName {
 	case "login":
 		err = cmd.Login(args)
+	case "logout":
+		err = cmd.Logout(args)
 	case "run":
 		err = cmd.Run(args)
 	case "chat":
