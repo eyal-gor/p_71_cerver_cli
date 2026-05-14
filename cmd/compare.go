@@ -45,14 +45,26 @@ func Compare(args []string) error {
 		time.Duration(*timeoutSec)*time.Second+15*time.Second)
 	defer cancel()
 
-	icfg, err := infisical.LoadConfig()
+	cerverTok, err := infisical.LoadCerverToken(ctx)
 	if err != nil {
 		return err
 	}
-	inf := infisical.New(icfg)
-	cerverTok, err := inf.Get(ctx, "CERVER_API_TOKEN")
-	if err != nil {
-		return err
+	if cerverTok == "" {
+		return errors.New("no cerver credentials found — run cerver.ai/install.sh first")
+	}
+	// Lazy Infisical handle for the `api` billing path (vendor keys).
+	// Nil here means we won't need Infisical for any of the CLIs picked;
+	// runOneCLI initializes it on demand only when mode == "api".
+	var inf *infisical.Client
+	for _, m := range billPerCLI {
+		if m == "api" {
+			icfg, err := infisical.LoadConfig()
+			if err != nil {
+				return fmt.Errorf("--bill api needs Infisical for vendor keys: %w", err)
+			}
+			inf = infisical.New(icfg)
+			break
+		}
 	}
 	gw := gateway.New(cerverTok)
 

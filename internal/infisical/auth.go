@@ -69,6 +69,59 @@ func LoadConfig() (*Config, error) {
 	return cfg, nil
 }
 
+// LoadCerverToken returns the user's CERVER_API_KEY using the simplest
+// credential source available, in order:
+//
+//  1. ~/.cerver/cerver.env (CERVER_API_KEY=...). This is the file the
+//     cerver-relay installer writes after the email-login flow — every
+//     user who ran `curl … cerver.ai/install.sh | bash` has it.
+//  2. Infisical UA via ~/.cerver/infisical.env, fetching CERVER_API_TOKEN.
+//     The power-user / pre-existing path; preserved so existing setups
+//     keep working.
+//
+// Returns empty string + nil error if neither source has a token (caller
+// can surface a "run cerver-relay's installer first" hint).
+func LoadCerverToken(ctx context.Context) (string, error) {
+	if tok := readCerverEnv(); tok != "" {
+		return tok, nil
+	}
+	cfg, err := LoadConfig()
+	if err != nil {
+		return "", err
+	}
+	return New(cfg).Get(ctx, "CERVER_API_TOKEN")
+}
+
+// readCerverEnv parses ~/.cerver/cerver.env for CERVER_API_KEY or
+// CERVER_API_TOKEN. Either name wins — both have been used by install
+// scripts at different times.
+func readCerverEnv() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	f, err := os.Open(filepath.Join(home, ".cerver", "cerver.env"))
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	s := bufio.NewScanner(f)
+	for s.Scan() {
+		line := strings.TrimSpace(s.Text())
+		for _, key := range []string{"CERVER_API_KEY=", "CERVER_API_TOKEN="} {
+			if strings.HasPrefix(line, key) {
+				v := strings.TrimSpace(line[len(key):])
+				// Strip optional surrounding quotes.
+				v = strings.Trim(v, `"'`)
+				if v != "" {
+					return v
+				}
+			}
+		}
+	}
+	return ""
+}
+
 // Client exchanges UA creds for an access token and fetches secrets.
 // Cache the access token for the process lifetime — Infisical tokens
 // live ~2h, plenty for any one CLI invocation.

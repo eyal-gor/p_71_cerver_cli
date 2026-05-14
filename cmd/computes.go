@@ -24,14 +24,12 @@ func Computes(args []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	icfg, err := infisical.LoadConfig()
+	tok, err := infisical.LoadCerverToken(ctx)
 	if err != nil {
 		return err
 	}
-	inf := infisical.New(icfg)
-	tok, err := inf.Get(ctx, "CERVER_API_TOKEN")
-	if err != nil {
-		return err
+	if tok == "" {
+		return fmt.Errorf("no cerver credentials found — run cerver.ai/install.sh first")
 	}
 	gw := gateway.New(tok)
 

@@ -39,22 +39,27 @@ func Run(args []string) error {
 		time.Duration(*timeoutSec)*time.Second+10*time.Second)
 	defer cancel()
 
-	// 1. Unlock cerver token (and api key if mode==api).
-	icfg, err := infisical.LoadConfig()
-	if err != nil {
-		return err
-	}
-	inf := infisical.New(icfg)
-	cerverTok, err := inf.Get(ctx, "CERVER_API_TOKEN")
+	// 1. Unlock cerver token — prefers ~/.cerver/cerver.env (set by the
+	// relay's email-login installer), falls back to Infisical UA. Vanilla
+	// runs work without Infisical configured.
+	cerverTok, err := infisical.LoadCerverToken(ctx)
 	if err != nil {
 		return err
 	}
 	if cerverTok == "" {
-		return errors.New("CERVER_API_TOKEN not in Infisical")
+		return errors.New("no cerver credentials found — run `curl https://cerver.ai/install.sh | bash` first")
 	}
 
+	// Vendor API keys (for --bill api) still require Infisical. Only
+	// initialize the Infisical client lazily on that path so users
+	// without a vault never trip over it.
 	envInject := map[string]string{}
 	if mode == "api" {
+		icfg, err := infisical.LoadConfig()
+		if err != nil {
+			return fmt.Errorf("--bill api needs Infisical for the vendor key: %w", err)
+		}
+		inf := infisical.New(icfg)
 		keyName := apiKeyEnvFor(*cli)
 		v, err := inf.Get(ctx, keyName)
 		if err != nil {
