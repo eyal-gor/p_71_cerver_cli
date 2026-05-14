@@ -1,8 +1,12 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"time"
 )
 
@@ -63,6 +67,94 @@ func (c *Client) GetSession(ctx context.Context, sessionID string) (*Session, er
 		return nil, err
 	}
 	return &s, nil
+}
+
+// SessionSummary is the slim shape returned in the list view — we don't
+// pull full transcripts here, just enough to render `cerver sessions`.
+type SessionSummary struct {
+	SessionID    string         `json:"sessionId"`
+	SessionName  string         `json:"sessionName"`
+	Status       string         `json:"status"`
+	ComputeID    string         `json:"computeId"`
+	CreatedAt    string         `json:"createdAt"`
+	UpdatedAt    string         `json:"updatedAt"`
+	Workload     string         `json:"workload"`
+	Metadata     map[string]any `json:"metadata"`
+}
+
+type sessionsListResp struct {
+	Sessions []SessionSummary `json:"sessions"`
+}
+
+// ListSessions returns the most recent sessions for the authenticated
+// account, newest first. `limit` caps the page size (gateway typically
+// honors up to 50).
+func (c *Client) ListSessions(ctx context.Context, limit int) ([]SessionSummary, error) {
+	if limit <= 0 {
+		limit = 20
+	}
+	var resp sessionsListResp
+	path := fmt.Sprintf("/v2/sessions?limit=%d", limit)
+	if err := c.Do(ctx, "GET", path, nil, &resp); err != nil {
+		return nil, err
+	}
+	return resp.Sessions, nil
+}
+
+// CliTool reads .metadata.cli_tool — used by the sessions list view so
+// users can tell at a glance which CLI was running.
+func (m SessionSummary) CliTool() string {
+	if v, ok := m.Metadata["cli_tool"].(string); ok {
+		return v
+	}
+	return ""
+}
+
+// ChangeCompute moves an existing session to a new compute. The new
+// agent inherits the transcript and the same session_id is preserved;
+// the old agent on the source compute is terminated.
+func (c *Client) ChangeCompute(ctx context.Context, sessionID, computeID string) error {
+	body := map[string]any{"compute_priority": []string{computeID}}
+	return c.Do(ctx, "POST", "/v2/sessions/"+sessionID+"/change-compute", body, nil)
+}
+
+// LoginResp is the shape of /v2/auth/login. `api_key` is the bearer
+// token to stash in ~/.cerver/cerver.env; `is_new` tells the caller
+// whether this email created a fresh account.
+type LoginResp struct {
+	APIKey string `json:"api_key"`
+	IsNew  bool   `json:"is_new"`
+}
+
+// Login (unauthenticated) — POST email, get back an API key.
+// Note: this is the only Client method that doesn't require c.Token.
+func (c *Client) Login(ctx context.Context, email string) (*LoginResp, error) {
+	// We can't reuse Do() because it would inject an Authorization
+	// header from c.Token (empty here). Hand-roll a small POST.
+	body, _ := json.Marshal(map[string]string{"email": email})
+	req, err := http.NewRequestWithContext(ctx, "POST", c.BaseURL+"/v2/auth/login",
+		bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("login: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 300 {
+		raw, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("login: HTTP %d: %s", resp.StatusCode, string(raw))
+	}
+	var out LoginResp
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, fmt.Errorf("login decode: %w", err)
+	}
+	if out.APIKey == "" {
+		return nil, fmt.Errorf("login returned no api_key")
+	}
+	return &out, nil
 }
 
 // LastAssistantText pulls the most recent assistant text entry (skips

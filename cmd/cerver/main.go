@@ -24,9 +24,14 @@ const helpText = `cerver — run AI agents on any compute, from your terminal
 usage: cerver <command> [flags] [args]
 
 commands:
+  login      Bootstrap ~/.cerver/cerver.env with your API key (email login).
   run        Send a single prompt to one CLI on one compute.
   compare    Run the same prompt across multiple CLIs in parallel.
   computes   List the computes registered to your account.
+  sessions   List recent sessions.
+  show       Print a session's full transcript (--follow to stream).
+  peek       One-screen snapshot of a session (status + last reply).
+  move       Move a live session to a different compute.
   help       Show this message.
 
 examples:
@@ -67,12 +72,22 @@ func main() {
 
 	var err error
 	switch cmdName {
+	case "login":
+		err = cmd.Login(args)
 	case "run":
 		err = cmd.Run(args)
 	case "compare":
 		err = cmd.Compare(args)
 	case "computes":
 		err = cmd.Computes(args)
+	case "sessions":
+		err = cmd.Sessions(args)
+	case "show":
+		err = cmd.Show(args)
+	case "peek":
+		err = cmd.Peek(args)
+	case "move":
+		err = cmd.Move(args)
 	case "help", "-h", "--help":
 		fmt.Print(helpText)
 		return
