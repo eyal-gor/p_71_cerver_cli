@@ -33,6 +33,7 @@ commands:
   show       Print a session's full transcript (--follow to stream).
   peek       One-screen snapshot of a session (status + last reply).
   move       Move a live session to a different compute.
+  billing    Show this month's cerver bill — service + database fees.
   suggestions Manage the cerver suggestion box:
                list (default) | new "summary"
   help       Show this message.
@@ -93,6 +94,8 @@ func main() {
 		err = cmd.Peek(args)
 	case "move":
 		err = cmd.Move(args)
+	case "billing", "bill":
+		err = cmd.Billing(args)
 	case "suggestions", "suggest":
 		err = cmd.Suggestions(args)
 	case "help", "-h", "--help":
