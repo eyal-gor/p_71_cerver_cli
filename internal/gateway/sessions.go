@@ -232,12 +232,21 @@ type Usage struct {
 // look into..." before doing real work) had their actual answer
 // truncated. The cursor-based version preserves that fix.
 func (c *Client) WaitForReply(ctx context.Context, sessionID string, timeout time.Duration, stable time.Duration) (*Session, error) {
+	return c.WaitForReplyFromCursor(ctx, sessionID, 0, timeout, stable)
+}
+
+// WaitForReplyFromCursor is the same as WaitForReply but starts the
+// transcript cursor at `startCursor`. Used by chat to resume an
+// existing session — without this the loop would return immediately
+// after seeing the *previous* turn's assistant reply, because that's
+// the most recent text in the transcript at the moment status flips
+// back to "ready" between turns.
+func (c *Client) WaitForReplyFromCursor(ctx context.Context, sessionID string, startCursor int, timeout time.Duration, stable time.Duration) (*Session, error) {
 	start := time.Now()
-	var lastReply string
 	stableSince := time.Time{}
 
 	merged := &Session{SessionID: sessionID}
-	cursor := 0
+	cursor := startCursor
 
 	for {
 		if time.Since(start) > timeout {
@@ -280,11 +289,13 @@ func (c *Client) WaitForReply(ctx context.Context, sessionID string, timeout tim
 			return merged, nil
 		}
 
-		// Fallback: text hasn't changed for `stable` — treat as done.
-		// Triggers when cerver leaves status="running" but the agent
-		// has actually stopped emitting.
-		if reply != lastReply {
-			lastReply = reply
+		// Fallback: nothing new for `stable` seconds — treat as done.
+		// "Nothing new" = no transcript entries appended on this poll.
+		// Previously this checked text-changes only, so a tool-using
+		// agent (codex doing several rg/grep calls between text turns)
+		// triggered the timeout in the middle of its investigation.
+		// Any transcript activity (tool_use included) counts as alive.
+		if len(s.Transcript) > 0 {
 			stableSince = time.Now()
 			continue
 		}

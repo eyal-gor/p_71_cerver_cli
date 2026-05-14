@@ -26,6 +26,7 @@ usage: cerver <command> [flags] [args]
 commands:
   login      Bootstrap ~/.cerver/cerver.env with your API key (email login).
   run        Send a single prompt to one CLI on one compute.
+  chat       Multi-turn conversation; resume with: cerver chat <sid>
   compare    Run the same prompt across multiple CLIs in parallel.
   computes   List the computes registered to your account.
   sessions   List recent sessions.
@@ -78,6 +79,8 @@ func main() {
 		err = cmd.Login(args)
 	case "run":
 		err = cmd.Run(args)
+	case "chat":
+		err = cmd.Chat(args)
 	case "compare":
 		err = cmd.Compare(args)
 	case "computes":
