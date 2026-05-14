@@ -45,13 +45,18 @@ func (c *Client) SendInput(ctx context.Context, sessionID, content string) error
 
 // Session is the GET /v2/sessions/:id response, slimmed to fields the
 // CLI actually reads. There's more in the wire JSON; we ignore the rest.
+//
+// When fetched with `?since=N`, Transcript only contains entries after
+// index N and TranscriptTotal reflects the server's full count. With no
+// cursor, TranscriptTotal == len(Transcript) (both = full count).
 type Session struct {
-	SessionID    string                   `json:"sessionId"`
-	Status       string                   `json:"status"`
-	ComputeID    string                   `json:"computeId"`
-	Metadata     map[string]any           `json:"metadata"`
-	Transcript   []TranscriptEntry        `json:"transcript"`
-	Metrics      map[string]any           `json:"metrics"`
+	SessionID       string            `json:"sessionId"`
+	Status          string            `json:"status"`
+	ComputeID       string            `json:"computeId"`
+	Metadata        map[string]any    `json:"metadata"`
+	Transcript      []TranscriptEntry `json:"transcript"`
+	Metrics         map[string]any    `json:"metrics"`
+	TranscriptTotal int               `json:"transcriptTotal,omitempty"`
 }
 
 type TranscriptEntry struct {
@@ -64,6 +69,22 @@ type TranscriptEntry struct {
 func (c *Client) GetSession(ctx context.Context, sessionID string) (*Session, error) {
 	var s Session
 	if err := c.Do(ctx, "GET", "/v2/sessions/"+sessionID, nil, &s); err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
+// GetSessionSince fetches only the transcript entries after `sinceIdx`.
+// Server still returns the full session header (status, metadata,
+// metrics). Used by WaitForReply during polling — slashes Neon data
+// egress from ~5MB/poll on long sessions to a few KB.
+//
+// On the first poll, pass sinceIdx=0 to get the full transcript. Then
+// use the returned `TranscriptTotal` as the cursor for subsequent calls.
+func (c *Client) GetSessionSince(ctx context.Context, sessionID string, sinceIdx int) (*Session, error) {
+	var s Session
+	path := fmt.Sprintf("/v2/sessions/%s?since=%d", sessionID, sinceIdx)
+	if err := c.Do(ctx, "GET", path, nil, &s); err != nil {
 		return nil, err
 	}
 	return &s, nil
@@ -199,33 +220,64 @@ type Usage struct {
 //     so we don't hang forever just because cerver didn't transition
 //     the status field.
 //
+// Uses a transcript cursor (?since=N) so each poll only downloads the
+// transcript entries added since the previous poll, not the entire
+// session. On long-running sessions this drops the per-poll payload
+// from megabytes to a few KB — the difference between a $87 Neon
+// egress bill and a $3 one. Maintains a local merged transcript so
+// LastAssistantText / IsDone see the full picture.
+//
 // The previous CLI exited on FIRST assistant text — which meant
 // multi-turn agents (codex with tool calls, or claude that says "I'll
 // look into..." before doing real work) had their actual answer
-// truncated. This helper is the fix.
+// truncated. The cursor-based version preserves that fix.
 func (c *Client) WaitForReply(ctx context.Context, sessionID string, timeout time.Duration, stable time.Duration) (*Session, error) {
 	start := time.Now()
 	var lastReply string
 	stableSince := time.Time{}
 
+	merged := &Session{SessionID: sessionID}
+	cursor := 0
+
 	for {
 		if time.Since(start) > timeout {
 			return nil, fmt.Errorf("no reply within %s", timeout)
 		}
-		time.Sleep(2 * time.Second)
+		// 3s is the cost/responsiveness sweet spot. Cursor reads make the
+		// per-poll payload tiny, so we're no longer paying the data-egress
+		// penalty that pushed earlier versions to want shorter intervals;
+		// at the same time, sub-second polling buys nothing on a
+		// network-bound agent that takes seconds per turn.
+		time.Sleep(3 * time.Second)
 
-		s, err := c.GetSession(ctx, sessionID)
+		s, err := c.GetSessionSince(ctx, sessionID, cursor)
 		if err != nil {
 			continue // transient — keep trying
 		}
-		reply := s.LastAssistantText()
+		// Merge: header fields always come from the latest response;
+		// transcript entries are appended (gateway returns only new ones).
+		merged.Status = s.Status
+		merged.ComputeID = s.ComputeID
+		merged.Metadata = s.Metadata
+		merged.Metrics = s.Metrics
+		merged.Transcript = append(merged.Transcript, s.Transcript...)
+		// Advance the cursor. If the gateway echoed transcriptTotal,
+		// trust it; otherwise fall back to our local count.
+		if s.TranscriptTotal > 0 {
+			cursor = s.TranscriptTotal
+		} else {
+			cursor = len(merged.Transcript)
+		}
+		merged.TranscriptTotal = cursor
+
+		reply := merged.LastAssistantText()
 		if reply == "" {
 			continue
 		}
 
 		// Happy path: status flipped off "running" and we have text.
-		if s.Status != "running" {
-			return s, nil
+		if merged.Status != "running" {
+			return merged, nil
 		}
 
 		// Fallback: text hasn't changed for `stable` — treat as done.
@@ -237,7 +289,7 @@ func (c *Client) WaitForReply(ctx context.Context, sessionID string, timeout tim
 			continue
 		}
 		if !stableSince.IsZero() && time.Since(stableSince) > stable {
-			return s, nil
+			return merged, nil
 		}
 	}
 }
