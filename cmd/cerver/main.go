@@ -32,6 +32,8 @@ commands:
   show       Print a session's full transcript (--follow to stream).
   peek       One-screen snapshot of a session (status + last reply).
   move       Move a live session to a different compute.
+  suggestions Manage the cerver suggestion box:
+               list (default) | new "summary"
   help       Show this message.
 
 examples:
@@ -88,6 +90,8 @@ func main() {
 		err = cmd.Peek(args)
 	case "move":
 		err = cmd.Move(args)
+	case "suggestions", "suggest":
+		err = cmd.Suggestions(args)
 	case "help", "-h", "--help":
 		fmt.Print(helpText)
 		return
