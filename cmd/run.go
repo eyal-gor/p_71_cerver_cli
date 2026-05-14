@@ -96,24 +96,18 @@ func Run(args []string) error {
 		return err
 	}
 
-	// 5. Poll for the assistant reply.
+	// 5. Wait for the agent to finish emitting (not just the first text).
 	start := time.Now()
-	for {
-		if time.Since(start) > time.Duration(*timeoutSec)*time.Second {
-			return fmt.Errorf("no reply within %ds", *timeoutSec)
-		}
-		time.Sleep(2 * time.Second)
-		s, err := gw.GetSession(ctx, sessionID)
-		if err != nil {
-			continue // transient — keep trying
-		}
-		if reply := s.LastAssistantText(); reply != "" {
-			elapsed := int(time.Since(start).Seconds())
-			fmt.Println(output.Header(*cli, elapsed, mode, s.Usage()))
-			fmt.Println(reply)
-			return nil
-		}
+	s, err := gw.WaitForReply(ctx, sessionID,
+		time.Duration(*timeoutSec)*time.Second,
+		8*time.Second)
+	if err != nil {
+		return err
 	}
+	elapsed := int(time.Since(start).Seconds())
+	fmt.Println(output.Header(*cli, elapsed, mode, s.Usage()))
+	fmt.Println(s.LastAssistantText())
+	return nil
 }
 
 // pickCompute resolves --on to a compute_id. Empty means "first

@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"time"
 )
 
 // SessionCreate builds and POSTs a /v2/sessions request. Returns the
@@ -82,6 +83,59 @@ type Usage struct {
 	InputTokens  int `json:"input_tokens"`
 	OutputTokens int `json:"output_tokens"`
 	Turns        int `json:"turns"`
+}
+
+// WaitForReply polls the session until the agent is done emitting and
+// returns the final Session snapshot. Two stop conditions:
+//
+//  1. Status is no longer "running" AND we have at least one assistant
+//     text entry. This is the happy path — agent finished cleanly.
+//  2. Fallback: the latest assistant text has been stable for `stable`
+//     seconds. Catches cases where status updates lag or never flip,
+//     so we don't hang forever just because cerver didn't transition
+//     the status field.
+//
+// The previous CLI exited on FIRST assistant text — which meant
+// multi-turn agents (codex with tool calls, or claude that says "I'll
+// look into..." before doing real work) had their actual answer
+// truncated. This helper is the fix.
+func (c *Client) WaitForReply(ctx context.Context, sessionID string, timeout time.Duration, stable time.Duration) (*Session, error) {
+	start := time.Now()
+	var lastReply string
+	stableSince := time.Time{}
+
+	for {
+		if time.Since(start) > timeout {
+			return nil, fmt.Errorf("no reply within %s", timeout)
+		}
+		time.Sleep(2 * time.Second)
+
+		s, err := c.GetSession(ctx, sessionID)
+		if err != nil {
+			continue // transient — keep trying
+		}
+		reply := s.LastAssistantText()
+		if reply == "" {
+			continue
+		}
+
+		// Happy path: status flipped off "running" and we have text.
+		if s.Status != "running" {
+			return s, nil
+		}
+
+		// Fallback: text hasn't changed for `stable` — treat as done.
+		// Triggers when cerver leaves status="running" but the agent
+		// has actually stopped emitting.
+		if reply != lastReply {
+			lastReply = reply
+			stableSince = time.Now()
+			continue
+		}
+		if !stableSince.IsZero() && time.Since(stableSince) > stable {
+			return s, nil
+		}
+	}
 }
 
 func (s *Session) Usage() *Usage {

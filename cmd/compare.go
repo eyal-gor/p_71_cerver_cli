@@ -149,23 +149,17 @@ func runOneCLI(ctx context.Context, inf *infisical.Client, gw *gateway.Client,
 		return
 	}
 	start := time.Now()
-	for {
-		if time.Since(start) > time.Duration(timeoutSec)*time.Second {
-			out.err = fmt.Errorf("no reply within %ds", timeoutSec)
-			return
-		}
-		time.Sleep(2 * time.Second)
-		s, err := gw.GetSession(ctx, sid)
-		if err != nil {
-			continue
-		}
-		if reply := s.LastAssistantText(); reply != "" {
-			out.reply = reply
-			out.usage = s.Usage()
-			out.elapsed = int(time.Since(start).Seconds())
-			return
-		}
+	s, err := gw.WaitForReply(ctx, sid,
+		time.Duration(timeoutSec)*time.Second,
+		8*time.Second)
+	if err != nil {
+		out.err = err
+		return
 	}
+	out.reply = s.LastAssistantText()
+	out.usage = s.Usage()
+	out.elapsed = int(time.Since(start).Seconds())
+	return
 }
 
 // parseBillFlag accepts either a global value ("api" / "sub") or a
