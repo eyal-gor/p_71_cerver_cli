@@ -101,6 +101,11 @@ type SessionSummary struct {
 	UpdatedAt    string         `json:"updatedAt"`
 	Workload     string         `json:"workload"`
 	Metadata     map[string]any `json:"metadata"`
+	// MessageCount is a denormalized count of transcript entries,
+	// computed server-side via jsonb_array_length. Avoids shipping the
+	// full transcript on list responses. Zero for older gateway builds
+	// that don't yet emit this field.
+	MessageCount int `json:"messageCount"`
 }
 
 type sessionsListResp struct {
