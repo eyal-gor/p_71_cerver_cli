@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -218,12 +219,11 @@ type Usage struct {
 // WaitForReply polls the session until the agent is done emitting and
 // returns the final Session snapshot. Two stop conditions:
 //
-//  1. Status is no longer "running" AND we have at least one assistant
-//     text entry. This is the happy path — agent finished cleanly.
-//  2. Fallback: the latest assistant text has been stable for `stable`
-//     seconds. Catches cases where status updates lag or never flip,
-//     so we don't hang forever just because cerver didn't transition
-//     the status field.
+//  1. The transcript has an assistant text entry, and no new transcript
+//     entries have landed for `stable` seconds. This is the happy path
+//     for tool-using agents: interim assistant text, tool calls, tool
+//     results, and the final answer all count as activity.
+//  2. Timeout: no stable reply arrived within `timeout`.
 //
 // Uses a transcript cursor (?since=N) so each poll only downloads the
 // transcript entries added since the previous poll, not the entire
@@ -232,10 +232,10 @@ type Usage struct {
 // egress bill and a $3 one. Maintains a local merged transcript so
 // LastAssistantText / IsDone see the full picture.
 //
-// The previous CLI exited on FIRST assistant text — which meant
-// multi-turn agents (codex with tool calls, or claude that says "I'll
-// look into..." before doing real work) had their actual answer
-// truncated. The cursor-based version preserves that fix.
+// Do not trust status alone for readiness. Some relay/provider paths can
+// flip a session back to "ready" while a CLI is still emitting tool-use
+// progress, so returning on "status != running" truncates Codex runs at
+// the preamble. Transcript quiescence is the safer completion signal.
 func (c *Client) WaitForReply(ctx context.Context, sessionID string, timeout time.Duration, stable time.Duration) (*Session, error) {
 	return c.WaitForReplyFromCursor(ctx, sessionID, 0, timeout, stable)
 }
@@ -289,12 +289,11 @@ func (c *Client) WaitForReplyFromCursor(ctx context.Context, sessionID string, s
 			continue
 		}
 
-		// Happy path: status flipped off "running" and we have text.
-		if merged.Status != "running" {
-			return merged, nil
-		}
-
-		// Fallback: nothing new for `stable` seconds — treat as done.
+		// Nothing new for `stable` seconds after at least one assistant
+		// text entry — treat as done. We intentionally do not return just
+		// because status is no longer "running": Codex can append several
+		// progress/tool-use entries while the session header already says
+		// "ready".
 		// "Nothing new" = no transcript entries appended on this poll.
 		// Previously this checked text-changes only, so a tool-using
 		// agent (codex doing several rg/grep calls between text turns)
@@ -304,10 +303,52 @@ func (c *Client) WaitForReplyFromCursor(ctx context.Context, sessionID string, s
 			stableSince = time.Now()
 			continue
 		}
-		if !stableSince.IsZero() && time.Since(stableSince) > stable {
+		quietWindow := stable
+		if looksLikeProgressReply(reply) {
+			// Research/tool runs often begin with "I'll check..." and then
+			// spend 20-40s in CLI-internal work before the next transcript
+			// append. Treat those preambles as not-final unless they stay
+			// quiet for a much longer window. If that longer window expires,
+			// fail loudly instead of presenting the preamble as the answer.
+			quietWindow = 90 * time.Second
+		}
+		if !stableSince.IsZero() && time.Since(stableSince) > quietWindow {
+			if looksLikeProgressReply(reply) {
+				return nil, fmt.Errorf("only progress text was captured; no final assistant answer after %s", quietWindow)
+			}
 			return merged, nil
 		}
 	}
+}
+
+func looksLikeProgressReply(reply string) bool {
+	text := strings.ToLower(strings.TrimSpace(reply))
+	if text == "" {
+		return false
+	}
+	progressStarts := []string{
+		"i'll ",
+		"i’ll ",
+		"i'm ",
+		"i’m ",
+		"i am ",
+		"let me ",
+		"checking ",
+	}
+	for _, prefix := range progressStarts {
+		if strings.HasPrefix(text, prefix) {
+			return strings.Contains(text, "check") ||
+				strings.Contains(text, "look") ||
+				strings.Contains(text, "search") ||
+				strings.Contains(text, "run ") ||
+				strings.Contains(text, "fetch") ||
+				strings.Contains(text, "pull") ||
+				strings.Contains(text, "rerun") ||
+				strings.Contains(text, "extract") ||
+				strings.Contains(text, "ground")
+		}
+	}
+	return strings.Contains(text, "i have enough to answer, but")
 }
 
 func (s *Session) Usage() *Usage {
