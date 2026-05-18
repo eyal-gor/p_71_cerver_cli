@@ -130,7 +130,11 @@ func Chat(args []string) error {
 	if fs.NArg() > 0 {
 		probe, err := gw.GetSession(ctx, sessionID)
 		if err == nil {
-			cursor = len(probe.Transcript)
+			if probe.TranscriptTotal > 0 {
+				cursor = probe.TranscriptTotal
+			} else {
+				cursor = len(probe.Transcript)
+			}
 		}
 	}
 

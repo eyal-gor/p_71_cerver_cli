@@ -74,7 +74,7 @@ cerver run "X"
   ├─ Fetch CERVER_API_TOKEN (and ANTHROPIC_API_KEY / OPENAI_API_KEY / XAI_API_KEY if --bill api)
   ├─ POST gateway.cerver.ai/v2/sessions  { cli_tool, compute_id, task, metadata.env }
   ├─ POST /v2/sessions/<id>/input        { content: prompt, role: user }
-  ├─ Poll /v2/sessions/<id> every 2s     until an assistant text entry lands
+  ├─ Poll /v2/sessions/<id>?since=N      until an assistant text entry lands
   └─ Print  ==== <cli> (Ns · mode · ...) ====
             <reply>
 ```

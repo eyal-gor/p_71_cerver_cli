@@ -41,7 +41,7 @@ func Peek(args []string) error {
 	if err != nil {
 		return err
 	}
-	s, err := gw.GetSession(ctx, id)
+	s, err := gw.GetSessionTail(ctx, id, 20)
 	if err != nil {
 		return err
 	}

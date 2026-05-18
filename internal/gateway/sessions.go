@@ -75,6 +75,26 @@ func (c *Client) GetSession(ctx context.Context, sessionID string) (*Session, er
 	return &s, nil
 }
 
+func (c *Client) GetSessionFull(ctx context.Context, sessionID string) (*Session, error) {
+	var s Session
+	if err := c.Do(ctx, "GET", "/v2/sessions/"+sessionID+"?full=1", nil, &s); err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
+func (c *Client) GetSessionTail(ctx context.Context, sessionID string, tail int) (*Session, error) {
+	if tail < 0 {
+		tail = 0
+	}
+	var s Session
+	path := fmt.Sprintf("/v2/sessions/%s?tail=%d", sessionID, tail)
+	if err := c.Do(ctx, "GET", path, nil, &s); err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
 // GetSessionSince fetches only the transcript entries after `sinceIdx`.
 // Server still returns the full session header (status, metadata,
 // metrics). Used by WaitForReply during polling — slashes Neon data

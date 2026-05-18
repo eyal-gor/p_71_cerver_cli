@@ -44,15 +44,18 @@ func Show(args []string) error {
 		return err
 	}
 
-	// Initial dump.
-	s, err := gw.GetSession(ctx, id)
+	// Initial dump. Full transcript is now an explicit expensive read;
+	// --tail uses the cheap SQL-side tail projection.
+	var s *gateway.Session
+	if *tailN > 0 {
+		s, err = gw.GetSessionTail(ctx, id, *tailN)
+	} else {
+		s, err = gw.GetSessionFull(ctx, id)
+	}
 	if err != nil {
 		return err
 	}
 	entries := s.Transcript
-	if *tailN > 0 && len(entries) > *tailN {
-		entries = entries[len(entries)-*tailN:]
-	}
 	for _, e := range entries {
 		printEntry(e)
 	}
@@ -64,22 +67,29 @@ func Show(args []string) error {
 	// transcript length as our cursor — cerver only appends, so the
 	// length is a stable monotonic cursor across polls.
 	cursor := len(s.Transcript)
+	if s.TranscriptTotal > 0 {
+		cursor = s.TranscriptTotal
+	}
 	for {
 		time.Sleep(2 * time.Second)
-		s, err := gw.GetSession(ctx, id)
+		s, err := gw.GetSessionSince(ctx, id, cursor)
 		if err != nil {
 			continue // transient
 		}
-		for i := cursor; i < len(s.Transcript); i++ {
-			printEntry(s.Transcript[i])
+		for _, e := range s.Transcript {
+			printEntry(e)
 		}
-		cursor = len(s.Transcript)
+		if s.TranscriptTotal > cursor {
+			cursor = s.TranscriptTotal
+		} else {
+			cursor += len(s.Transcript)
+		}
 		if s.Status != "running" && cursor > 0 {
 			// One more tick to flush, then exit cleanly.
 			time.Sleep(2 * time.Second)
-			s, _ := gw.GetSession(ctx, id)
-			for i := cursor; i < len(s.Transcript); i++ {
-				printEntry(s.Transcript[i])
+			s, _ := gw.GetSessionSince(ctx, id, cursor)
+			for _, e := range s.Transcript {
+				printEntry(e)
 			}
 			return nil
 		}
