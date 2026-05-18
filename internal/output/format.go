@@ -38,18 +38,22 @@ func Cost(cli string, u *gateway.Usage) float64 {
 	return (float64(u.InputTokens)*r.InputPerMTok + float64(u.OutputTokens)*r.OutputPerMTok) / 1_000_000
 }
 
-// Header builds the "==== claude (3s · subscription · ... ) ====" line
-// the user sees above each reply. cliBillingMode is "subscription" or
-// "api"; if "" the section is omitted.
+// Header builds the "==== claude (3s · billing=subscription · ... ) ===="
+// line the user sees above each reply. billingMode is "subscription" or
+// "api"; if "" the billing section is omitted (run with no --bill resolved
+// to a default still passes the resolved value).
+//
+// The billing tag is rendered as `billing=subscription` / `billing=apikey`
+// so it's unambiguous in a side-by-side compare — a glance tells you
+// which CLI is on the user's OAuth subscription vs. which is per-token
+// billed to a vendor api key.
 func Header(cli string, elapsedSec int, billingMode string, u *gateway.Usage) string {
 	parts := []string{fmt.Sprintf("%ds", elapsedSec)}
-	if billingMode != "" {
-		switch billingMode {
-		case "subscription":
-			parts = append(parts, "subscription · local OAuth")
-		case "api":
-			parts = append(parts, "api · "+apiKeyEnvFor(cli))
-		}
+	switch billingMode {
+	case "subscription":
+		parts = append(parts, "billing=subscription · local OAuth")
+	case "api":
+		parts = append(parts, "billing=apikey · "+apiKeyEnvFor(cli))
 	}
 	if u != nil && (u.InputTokens > 0 || u.OutputTokens > 0) {
 		parts = append(parts, fmt.Sprintf("%d in / %d out", u.InputTokens, u.OutputTokens))
