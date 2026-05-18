@@ -14,27 +14,71 @@ import (
 	"github.com/eyal-gor/p_71_cerver_cli/internal/output"
 )
 
-// Compare runs the same prompt through N CLIs in parallel and prints
-// the answers side-by-side. Default fanout: claude + codex (skips
-// grok unless explicitly requested, since it's api-only and would
-// surprise users without a key).
+// Compare runs the same prompt across N CLI/compute pairs in parallel
+// and prints the answers side-by-side.
+//
+// Usage:
+//
+//	cerver compare "<prompt>" <cli> <compute> [<cli> <compute> …]
+//
+// Example:
+//
+//	cerver compare "explain Raft leader election" \
+//	  claude mac-mini \
+//	  codex mac-mini \
+//	  grok  provider_vercel
+//
+// Positional after the prompt is a flat sequence of (cli, compute)
+// pairs. Each pair gets its own goroutine, its own session, its own
+// compute — so users can route, say, codex to a beefier box than
+// claude in the same run. Repeating the same CLI is allowed (e.g.
+// `claude mac-mini claude macbook` for an A/B on the same model).
+// Compute query strings go through the same resolver as `--on` did
+// before: nickname, prefix, compute_id, or compute_label match.
+//
+// `--bill` and `--models` still take global or per-CLI csv values —
+// they're rarely changed, so we keep them as flags rather than packing
+// more positionals.
 func Compare(args []string) error {
 	fs := flag.NewFlagSet("compare", flag.ContinueOnError)
-	clisFlag := fs.String("clis", "claude,codex", "Comma-separated CLIs (subset of claude,codex,grok)")
-	on := fs.String("on", "", "Compute. Global: `mac-mini`. Per-CLI: `claude=macbook,codex=mac-mini,grok=provider_vercel`. Empty = first ready local relay.")
 	billFlag := fs.String("bill", "", "Billing override. Global: `api` or `sub`. Per-CLI: `claude=sub,codex=api`")
 	modelsFlag := fs.String("models", "", "Model override. Global: `sonnet`. Per-CLI: `claude=opus,codex=gpt-5-codex`. Empty = each CLI's local default.")
 	timeoutSec := fs.Int("timeout", 180, "Max seconds to wait for replies")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	prompt := strings.TrimSpace(strings.Join(fs.Args(), " "))
-	if prompt == "" {
-		return errors.New("usage: cerver compare [flags] \"your prompt\"")
+
+	rest := fs.Args()
+	if len(rest) < 1 {
+		return errors.New(`usage: cerver compare "<prompt>" <cli> <compute> [<cli> <compute> …]`)
 	}
-	clis := strings.Split(*clisFlag, ",")
-	for i, c := range clis {
-		clis[i] = strings.TrimSpace(c)
+	prompt := strings.TrimSpace(rest[0])
+	if prompt == "" {
+		return errors.New("compare: prompt is empty")
+	}
+
+	pairs := rest[1:]
+	if len(pairs) == 0 {
+		return errors.New("compare: specify at least one <cli> <compute> pair (e.g. `claude mac-mini`)")
+	}
+	if len(pairs)%2 != 0 {
+		return fmt.Errorf("compare: uneven trailing args — must be <cli> <compute> pairs, got %d tokens after the prompt", len(pairs))
+	}
+
+	// Order matters: output preserves the order pairs appeared on the
+	// command line, so `claude codex grok` and `grok claude codex` give
+	// the same answers but rendered top-to-bottom in the user's order.
+	type entry struct{ cli, computeQuery string }
+	entries := make([]entry, 0, len(pairs)/2)
+	clis := make([]string, 0, len(pairs)/2)
+	for i := 0; i < len(pairs); i += 2 {
+		cli := strings.TrimSpace(pairs[i])
+		cq := strings.TrimSpace(pairs[i+1])
+		if cli == "" || cq == "" {
+			return fmt.Errorf("compare: blank cli or compute in pair %d", i/2+1)
+		}
+		entries = append(entries, entry{cli, cq})
+		clis = append(clis, cli)
 	}
 
 	billPerCLI, err := parseBillFlag(*billFlag, clis)
@@ -70,49 +114,80 @@ func Compare(args []string) error {
 	}
 	gw := gateway.New(cerverTok)
 
-	computePerCLI, err := resolveComputeFlag(ctx, gw, *on, clis)
-	if err != nil {
-		return err
+	// Resolve each pair's compute query → compute_id once, cache repeats
+	// so two pairs on the same machine don't double-hit /v2/computes.
+	// The map is keyed by position (we may have the same cli twice with
+	// different computes), so we track resolved IDs in a parallel slice.
+	resolvedComputeIDs := make([]string, len(entries))
+	cache := map[string]string{}
+	for i, e := range entries {
+		if hit, ok := cache[e.computeQuery]; ok {
+			resolvedComputeIDs[i] = hit
+			continue
+		}
+		id, err := pickCompute(ctx, gw, e.computeQuery)
+		if err != nil {
+			return fmt.Errorf("compute for %s=%q: %w", e.cli, e.computeQuery, err)
+		}
+		cache[e.computeQuery] = id
+		resolvedComputeIDs[i] = id
 	}
 
+	// One result per entry. Indexed by position so duplicate CLIs
+	// (e.g. `claude mac-mini claude macbook`) each get their own row.
 	type result struct {
+		idx     int
 		cli     string
+		compute string
 		reply   string
 		usage   *gateway.Usage
 		elapsed int
 		mode    string
 		err     error
 	}
-	results := make(chan result, len(clis))
+	results := make(chan result, len(entries))
 	var wg sync.WaitGroup
 
-	for _, c := range clis {
-		c := c
-		mode := billPerCLI[c]
-		model := modelPerCLI[c]
-		computeID := computePerCLI[c]
+	for i, e := range entries {
+		i, e := i, e
+		mode := billPerCLI[e.cli]
+		model := modelPerCLI[e.cli]
+		computeID := resolvedComputeIDs[i]
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			r := runOneCLI(ctx, inf, gw, c, computeID, prompt, mode, model, *timeoutSec)
-			results <- r
+			r := runOneCLI(ctx, inf, gw, e.cli, computeID, prompt, mode, model, *timeoutSec)
+			results <- result{
+				idx:     i,
+				cli:     e.cli,
+				compute: e.computeQuery,
+				reply:   r.reply,
+				usage:   r.usage,
+				elapsed: r.elapsed,
+				mode:    r.mode,
+				err:     r.err,
+			}
 		}()
 	}
 	wg.Wait()
 	close(results)
 
-	// Drain into a stable order matching the user's --clis arg.
-	resMap := map[string]result{}
+	// Drain into a stable order matching the user's pair sequence on
+	// the command line. Index-based ordering also covers the duplicate-
+	// CLI case where map-by-name would collapse rows.
+	ordered := make([]result, len(entries))
 	for r := range results {
-		resMap[r.cli] = r
+		ordered[r.idx] = r
 	}
-	for _, c := range clis {
-		r := resMap[c]
+	for _, r := range ordered {
+		// Header takes the bare cli name (apiKeyEnvFor + Cost look it
+		// up internally), so the compute label rides on a second line.
 		if r.err != nil {
-			fmt.Printf("==== %s (error) ====\n%s\n\n", c, r.err)
+			fmt.Printf("==== %s @ %s (error) ====\n%s\n\n", r.cli, r.compute, r.err)
 			continue
 		}
-		fmt.Println(output.Header(c, r.elapsed, r.mode, r.usage))
+		fmt.Println(output.Header(r.cli, r.elapsed, r.mode, r.usage))
+		fmt.Printf("  on %s\n", r.compute)
 		fmt.Println(r.reply)
 		fmt.Println()
 	}
@@ -181,79 +256,6 @@ func runOneCLI(ctx context.Context, inf *infisical.Client, gw *gateway.Client,
 	return
 }
 
-// resolveComputeFlag accepts either a global compute query
-// ("mac-mini") or a per-CLI csv
-// ("claude=macbook,codex=mac-mini,grok=provider_vercel"). Returns a
-// fully resolved {cli: compute_id} map for every CLI in `clis`. CLIs
-// not named in the per-CLI form fall back to pickCompute's default
-// (first ready local-relay compute) — same behavior as a bare --on.
-//
-// Resolution happens in one place so the per-CLI goroutines below see
-// concrete compute_ids and don't each pay a /v2/computes round trip.
-func resolveComputeFlag(ctx context.Context, gw *gateway.Client, raw string, clis []string) (map[string]string, error) {
-	out := map[string]string{}
-	raw = strings.TrimSpace(raw)
-
-	if raw == "" || !strings.Contains(raw, "=") {
-		// Single value (or empty) — resolve once, apply to every CLI.
-		// pickCompute owns the empty-string-means-default branch.
-		id, err := pickCompute(ctx, gw, raw)
-		if err != nil {
-			return nil, err
-		}
-		for _, c := range clis {
-			out[c] = id
-		}
-		return out, nil
-	}
-
-	// Per-CLI: parse explicit entries, then fill any CLI not named with
-	// the auto-picked default. Cache per query so two entries pointing
-	// at the same compute don't double-call the API.
-	cache := map[string]string{}
-	resolveOne := func(q string) (string, error) {
-		if hit, ok := cache[q]; ok {
-			return hit, nil
-		}
-		id, err := pickCompute(ctx, gw, q)
-		if err != nil {
-			return "", err
-		}
-		cache[q] = id
-		return id, nil
-	}
-
-	for _, kv := range strings.Split(raw, ",") {
-		parts := strings.SplitN(kv, "=", 2)
-		if len(parts) != 2 {
-			return nil, fmt.Errorf("invalid --on entry %q (use cli=compute)", kv)
-		}
-		cli := strings.TrimSpace(parts[0])
-		query := strings.TrimSpace(parts[1])
-		id, err := resolveOne(query)
-		if err != nil {
-			return nil, fmt.Errorf("--on %s=%s: %w", cli, query, err)
-		}
-		out[cli] = id
-	}
-
-	// Fill in defaults for unnamed CLIs.
-	var defaultID string
-	for _, c := range clis {
-		if _, ok := out[c]; ok {
-			continue
-		}
-		if defaultID == "" {
-			id, err := resolveOne("")
-			if err != nil {
-				return nil, err
-			}
-			defaultID = id
-		}
-		out[c] = defaultID
-	}
-	return out, nil
-}
 
 // parseBillFlag accepts either a global value ("api" / "sub") or a
 // per-CLI csv ("claude=sub,codex=api"). Returns a fully resolved

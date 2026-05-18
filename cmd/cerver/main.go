@@ -2,7 +2,7 @@
 //
 // Subcommands (v1):
 //   cerver run [--cli claude|codex|grok] [--on <compute>] [--bill api|sub] "prompt"
-//   cerver compare [--clis claude,codex] [--on <compute>] [--bill ...] "prompt"
+//   cerver compare "prompt" <cli> <compute> [<cli> <compute> …]
 //   cerver computes [--json]
 //
 // Reads UA creds from ~/.cerver/infisical.env. Fetches CERVER_API_TOKEN
@@ -42,8 +42,16 @@ commands:
 examples:
   cerver run "what's the time zone of UTC+3?"
   cerver run --cli codex --bill api "summarize today's commits"
-  cerver compare "explain Raft leader election"
-  cerver compare --clis claude,codex,grok --bill claude=sub,codex=api,grok=api "..."
+
+  cerver compare "explain Raft leader election" \
+    claude mac-mini \
+    codex  mac-mini \
+    grok   provider_vercel
+
+  cerver compare "fix the failing test" \
+    claude mac-mini \
+    claude macbook        # A/B the same CLI on two boxes
+
   cerver computes
   cerver computes --json
 
