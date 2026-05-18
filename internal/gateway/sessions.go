@@ -26,9 +26,40 @@ type SessionCreateResp struct {
 	SessionID string `json:"session_id"`
 }
 
+// isAgentCapError returns true when the gateway/relay rejected a session
+// create because the per-relay agent pool is full. The relay caps active
+// agents at MAX_AGENTS and a burst of parallel `cerver compare` calls
+// can briefly exceed it before previous one-shot agents finish cleaning
+// up. The right user experience is to wait a beat and retry, not to
+// surface a raw HTTP 500.
+func isAgentCapError(err error) bool {
+	if err == nil {
+		return false
+	}
+	return strings.Contains(err.Error(), "Maximum number of agents")
+}
+
 func (c *Client) CreateSession(ctx context.Context, req SessionCreate) (string, error) {
 	var resp SessionCreateResp
-	if err := c.Do(ctx, "POST", "/v2/sessions", req, &resp); err != nil {
+	// Retry with backoff if we hit the relay's MAX_AGENTS cap. 4 total
+	// attempts, 1s/2s/4s sleeps — by the third retry the previous burst
+	// of one-shot agents has almost always finished and freed slots. If
+	// we still 500 after the last try, surface the error (the cap is
+	// genuinely saturated or something else is wrong — let the user see).
+	backoffs := []time.Duration{1 * time.Second, 2 * time.Second, 4 * time.Second}
+	var err error
+	for attempt := 0; ; attempt++ {
+		err = c.Do(ctx, "POST", "/v2/sessions", req, &resp)
+		if err == nil || !isAgentCapError(err) || attempt >= len(backoffs) {
+			break
+		}
+		select {
+		case <-time.After(backoffs[attempt]):
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+	if err != nil {
 		return "", err
 	}
 	if resp.SessionID == "" {
