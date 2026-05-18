@@ -219,7 +219,12 @@ func runOneCLI(ctx context.Context, inf *infisical.Client, gw *gateway.Client,
 		envInject[keyName] = v
 	}
 
-	metadata := map[string]any{"cli_tool": cli}
+	// `complete_on_exit` tells the relay to close the agent record when
+	// the CLI process ends instead of parking it in `paused` for a
+	// possible --resume. `cerver compare` is one-shot by design, so a
+	// next compare against the same (cli, compute) pair shouldn't land
+	// on a stale paused agent and resume into its half-written JSONL.
+	metadata := map[string]any{"cli_tool": cli, "complete_on_exit": true}
 	if model != "" {
 		metadata["cli_model"] = model
 	}

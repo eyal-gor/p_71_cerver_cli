@@ -81,7 +81,10 @@ func Run(args []string) error {
 	}
 
 	// 3. Create the session.
-	metadata := map[string]any{"cli_tool": *cli}
+	// `complete_on_exit` flags this as a one-shot — relay disposes of
+	// the agent when the CLI ends instead of leaving it paused for an
+	// implicit --resume. Same rationale as `cerver compare`.
+	metadata := map[string]any{"cli_tool": *cli, "complete_on_exit": true}
 	if *model != "" {
 		metadata["cli_model"] = *model
 	}
