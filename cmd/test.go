@@ -15,7 +15,6 @@ import (
 
 	"github.com/eyal-gor/p_71_cerver_cli/internal/gateway"
 	"github.com/eyal-gor/p_71_cerver_cli/internal/infisical"
-	"github.com/eyal-gor/p_71_cerver_cli/internal/output"
 )
 
 // TestSpec describes one cerver test — a prompt to run against a list
@@ -345,21 +344,7 @@ func runTest(ctx context.Context, gw *gateway.Client, t TestSpec, defaultTimeout
 		inf = infisical.New(icfg)
 	}
 
-	fmt.Printf("==== test %s · %s ====\n", t.ID, t.Name)
-	fmt.Printf("clis: %s · compute: %s · timeout: %ds\n", strings.Join(clis, ","), computeID, timeoutSec)
-	// Show the prompt so the user can see what they're testing.
-	// Multi-line prompts get an indented block; single-line stays
-	// inline. Truncate long prompts to keep the header readable.
-	promptLines := strings.Split(strings.TrimSpace(t.Prompt), "\n")
-	if len(promptLines) == 1 && len(promptLines[0]) <= 200 {
-		fmt.Printf("prompt: %s\n\n", promptLines[0])
-	} else {
-		fmt.Println("prompt:")
-		for _, line := range promptLines {
-			fmt.Printf("  %s\n", line)
-		}
-		fmt.Println()
-	}
+	printTestHeader(t, clis, computeID, timeoutSec)
 
 	// Preflight every CLI in parallel — auth check + provider-API
 	// reachability. A failed preflight short-circuits the test for
@@ -371,7 +356,7 @@ func runTest(ctx context.Context, gw *gateway.Client, t TestSpec, defaultTimeout
 			inf = infisical.New(icfg)
 		}
 	}
-	fmt.Println("Preflight:")
+	printPhaseHeader("Preflight")
 	preflights := make(map[string]PreflightResult, len(clis))
 	{
 		type slot struct {
@@ -394,11 +379,11 @@ func runTest(ctx context.Context, gw *gateway.Client, t TestSpec, defaultTimeout
 			preflights[s.cli] = s.pf
 		}
 	}
-	// Print preflight in the requested CLI order, not goroutine order.
 	for _, c := range clis {
-		fmt.Println(formatPreflight(preflights[c]))
+		printPreflightRow(preflights[c])
 	}
 	fmt.Println()
+	printPhaseHeader("Running")
 
 	type slot struct {
 		idx int
@@ -437,11 +422,11 @@ func runTest(ctx context.Context, gw *gateway.Client, t TestSpec, defaultTimeout
 				remainingMu.Lock()
 				delete(remaining, cli)
 				remainingMu.Unlock()
-				fmt.Printf("← %s skipped (preflight)\n", cli)
+				printDoneLine(cli, 0, "skipped")
 				results <- slot{idx: i, cli: cli, res: res}
 				return
 			}
-			fmt.Printf("→ %s spawning… (%s)\n", cli, mode)
+			printSpawnLine(cli, mode)
 			r := runOneCLI(ctx, inf, gw, cli, computeID, t.Prompt, mode, "", timeoutSec)
 			res := TestResult{CLI: cli, Mode: r.mode, Elapsed: r.elapsed}
 			if r.err != nil {
@@ -459,7 +444,7 @@ func runTest(ctx context.Context, gw *gateway.Client, t TestSpec, defaultTimeout
 			} else if !res.Pass {
 				tag = "FAIL"
 			}
-			fmt.Printf("← %s done (%ds, %s)\n", cli, res.Elapsed, tag)
+			printDoneLine(cli, res.Elapsed, tag)
 			results <- slot{idx: i, cli: cli, res: res}
 		}()
 	}
@@ -486,7 +471,7 @@ func runTest(ctx context.Context, gw *gateway.Client, t TestSpec, defaultTimeout
 				}
 				remainingMu.Unlock()
 				sort.Strings(names)
-				fmt.Printf("… waiting on: %s\n", strings.Join(names, ", "))
+				printWaitingLine(names)
 			}
 		}
 	}()
@@ -500,34 +485,25 @@ func runTest(ctx context.Context, gw *gateway.Client, t TestSpec, defaultTimeout
 		ordered[s.idx] = s.res
 	}
 
+	fmt.Println()
+	printPhaseHeader("Results")
+	fmt.Println()
 	overallOK := true
+	passed := 0
 	for _, r := range ordered {
-		usage := (*gateway.Usage)(nil) // archive shape, no per-run usage yet
-		fmt.Println(output.Header(r.CLI, r.Elapsed, r.Mode, usage))
-		if r.Error != "" {
-			fmt.Printf("  ERROR: %s\n", r.Error)
+		if r.Pass {
+			passed++
 		} else {
-			fmt.Println(r.Reply)
-		}
-		status := "PASS"
-		attr := ""
-		if !r.Pass {
-			status = "FAIL"
-			attr = " — " + r.FailWhy
 			overallOK = false
 		}
-		fmt.Printf("  → %s%s\n\n", status, attr)
+		printResultPanel(r, 64)
 	}
 
 	if err := archiveRun(t, ordered, overallOK); err != nil {
 		fmt.Fprintf(os.Stderr, "archive: %v\n", err)
 	}
 
-	overall := "PASS"
-	if !overallOK {
-		overall = "FAIL"
-	}
-	fmt.Printf("test %s overall: %s\n", t.ID, overall)
+	printSummary(t.ID, passed, len(ordered))
 	return overallOK, nil
 }
 
