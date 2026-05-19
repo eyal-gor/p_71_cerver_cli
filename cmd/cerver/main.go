@@ -44,6 +44,12 @@ commands:
                  cerver test               # list tests
                  cerver test 01            # run by id-prefix match
                  cerver test --all         # run every test
+  update     Reinstall cerver from the latest commit on main. Uses
+               `go install` and lands the new binary in the same
+               directory the current one runs from.
+                 cerver update             # upgrade in place
+                 cerver update --verbose   # stream go output
+                 cerver update --dry-run   # show what'd happen
   help       Show this message.
 
 examples:
@@ -118,6 +124,8 @@ func main() {
 		err = cmd.Suggestions(args)
 	case "test":
 		err = cmd.Test(args)
+	case "update", "self-update":
+		err = cmd.Update(args)
 	case "help", "-h", "--help":
 		fmt.Print(helpText)
 		return
