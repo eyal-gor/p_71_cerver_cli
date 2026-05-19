@@ -37,6 +37,13 @@ commands:
   billing    Show this month's cerver bill — service + database fees.
   suggestions Manage the cerver suggestion box:
                list (default) | new "summary"
+  test       Run a saved test (one prompt across all three CLIs) and
+               check the responses against simple expectations.
+               Tests live as JSON files in ~/.cerver/tests/. First
+               invocation seeds a starter test ("01_rate_limiter").
+                 cerver test               # list tests
+                 cerver test 01            # run by id-prefix match
+                 cerver test --all         # run every test
   help       Show this message.
 
 examples:
@@ -109,6 +116,8 @@ func main() {
 		err = cmd.Billing(args)
 	case "suggestions", "suggest":
 		err = cmd.Suggestions(args)
+	case "test":
+		err = cmd.Test(args)
 	case "help", "-h", "--help":
 		fmt.Print(helpText)
 		return
