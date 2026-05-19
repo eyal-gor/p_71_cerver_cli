@@ -64,7 +64,17 @@ func Update(args []string) error {
 	// Force GOBIN to the same dir as the running binary. Otherwise
 	// `go install` writes to $GOBIN or $GOPATH/bin, which often isn't
 	// on PATH at all.
-	env := append(os.Environ(), "GOBIN="+installDir)
+	//
+	// GOPROXY=direct bypasses proxy.golang.org's module cache —
+	// otherwise `@latest` can resolve to a commit hours old (the
+	// proxy lags fresh pushes by anything from minutes to hours).
+	// GOFLAGS=-mod=mod keeps the install honest about fetching the
+	// real module head rather than reusing a stale local cache.
+	env := append(os.Environ(),
+		"GOBIN="+installDir,
+		"GOPROXY=direct",
+		"GOFLAGS=-mod=mod",
+	)
 	cmd.Env = env
 	if *verbose {
 		cmd.Stdout = os.Stdout
