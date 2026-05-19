@@ -356,7 +356,11 @@ func runTest(ctx context.Context, gw *gateway.Client, t TestSpec, defaultTimeout
 			inf = infisical.New(icfg)
 		}
 	}
-	printPhaseHeader("Preflight")
+	// Preflight runs both checks concurrently per CLI, but we render
+	// them in two separate phase blocks so the user can see at a
+	// glance which one passed / failed. Health = "can we reach the
+	// provider's server?" — purely a network probe. Auth = "are we
+	// signed in / do we have an API key?" — independent of network.
 	preflights := make(map[string]PreflightResult, len(clis))
 	{
 		type slot struct {
@@ -379,8 +383,14 @@ func runTest(ctx context.Context, gw *gateway.Client, t TestSpec, defaultTimeout
 			preflights[s.cli] = s.pf
 		}
 	}
+	printPhaseHeader("Health")
 	for _, c := range clis {
-		printPreflightRow(preflights[c])
+		printHealthRow(preflights[c])
+	}
+	fmt.Println()
+	printPhaseHeader("Auth")
+	for _, c := range clis {
+		printAuthRow(preflights[c])
 	}
 	fmt.Println()
 	printPhaseHeader("Running")

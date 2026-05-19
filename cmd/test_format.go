@@ -101,18 +101,26 @@ func printPhaseHeader(name string) {
 	fmt.Printf("%s %s\n", cyan(chevron), bold(name))
 }
 
-// printPreflightRow renders one CLI's preflight summary in aligned
-// columns. Long auth detail strings are truncated so the columns
-// don't break across CLIs with different-length auth labels.
-func printPreflightRow(pf PreflightResult) {
+// printHealthRow renders one CLI's health-check result. Health is
+// "can we reach the provider's API server" — purely a network probe,
+// independent of whether the user is signed in.
+func printHealthRow(pf PreflightResult) {
 	icon := green(checkMark)
-	if !pf.Pass() {
+	if !pf.HealthOK {
 		icon = red(crossMark)
 	}
-	auth := truncFit(pf.AuthDetail, 44)
-	health := pf.HealthDetail
-	fmt.Printf("  %s  %-7s  auth: %-44s  health: %s\n",
-		icon, bold(pf.CLI), auth, health)
+	fmt.Printf("  %s  %-7s  %s\n", icon, bold(pf.CLI), pf.HealthDetail)
+}
+
+// printAuthRow renders one CLI's auth-check result. Auth is "are we
+// signed in / do we have a usable API key" — independent of network
+// state. Long auth strings get truncated so the column stays aligned.
+func printAuthRow(pf PreflightResult) {
+	icon := green(checkMark)
+	if !pf.AuthOK {
+		icon = red(crossMark)
+	}
+	fmt.Printf("  %s  %-7s  %s\n", icon, bold(pf.CLI), truncFit(pf.AuthDetail, 60))
 }
 
 // printSpawnLine — emitted as each CLI starts in the "Running" phase.
