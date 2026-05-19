@@ -290,7 +290,20 @@ func runTest(ctx context.Context, gw *gateway.Client, t TestSpec, defaultTimeout
 	}
 
 	fmt.Printf("==== test %s · %s ====\n", t.ID, t.Name)
-	fmt.Printf("clis: %s · compute: %s · timeout: %ds\n\n", strings.Join(clis, ","), computeID, timeoutSec)
+	fmt.Printf("clis: %s · compute: %s · timeout: %ds\n", strings.Join(clis, ","), computeID, timeoutSec)
+	// Show the prompt so the user can see what they're testing.
+	// Multi-line prompts get an indented block; single-line stays
+	// inline. Truncate long prompts to keep the header readable.
+	promptLines := strings.Split(strings.TrimSpace(t.Prompt), "\n")
+	if len(promptLines) == 1 && len(promptLines[0]) <= 200 {
+		fmt.Printf("prompt: %s\n\n", promptLines[0])
+	} else {
+		fmt.Println("prompt:")
+		for _, line := range promptLines {
+			fmt.Printf("  %s\n", line)
+		}
+		fmt.Println()
+	}
 
 	// Preflight every CLI in parallel — auth check + provider-API
 	// reachability. A failed preflight short-circuits the test for
