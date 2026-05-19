@@ -166,20 +166,13 @@ func ensureTestsDir() (string, error) {
 	if err := os.MkdirAll(filepath.Join(dir, "runs"), 0o755); err != nil {
 		return "", err
 	}
-	// Seed a starter test on first use. Skips silently if any *.json
-	// already exists (so deletions don't reseed every run).
-	entries, _ := os.ReadDir(dir)
-	hasTest := false
-	for _, e := range entries {
-		if !e.IsDir() && strings.HasSuffix(e.Name(), ".json") {
-			hasTest = true
-			break
-		}
-	}
-	if !hasTest {
-		if err := writeSeedTest(dir); err != nil {
-			return "", err
-		}
+	// Seed starter tests on first use. Self-healing: any seed file
+	// that doesn't exist gets created; existing files (and any user-
+	// added ones) are never touched. This way adding a new seed in a
+	// CLI release lands automatically without making users nuke their
+	// tests directory.
+	if err := writeSeedTest(dir); err != nil {
+		return "", err
 	}
 	return dir, nil
 }
@@ -221,12 +214,19 @@ func writeSeedTest(dir string) error {
 		},
 	}
 	for _, t := range seeds {
+		target := filepath.Join(dir, t.ID+".json")
+		if _, err := os.Stat(target); err == nil {
+			// Already there — never overwrite a user's edits.
+			continue
+		} else if !os.IsNotExist(err) {
+			return err
+		}
 		body, err := json.MarshalIndent(t, "", "  ")
 		if err != nil {
 			return err
 		}
 		body = append(body, '\n')
-		if err := os.WriteFile(filepath.Join(dir, t.ID+".json"), body, 0o644); err != nil {
+		if err := os.WriteFile(target, body, 0o644); err != nil {
 			return err
 		}
 	}
