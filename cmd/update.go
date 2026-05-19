@@ -45,7 +45,7 @@ func Update(args []string) error {
 	}
 	installDir := filepath.Dir(exe)
 
-	goBin, err := exec.LookPath("go")
+	goBin, err := findGo()
 	if err != nil {
 		return errors.New(
 			"Go isn't on PATH. Install Go from https://go.dev/dl/ or download a prebuilt cerver binary from " +
@@ -94,4 +94,30 @@ func Update(args []string) error {
 	fmt.Println()
 	fmt.Println("Verify with: cerver help")
 	return nil
+}
+
+// findGo locates the `go` binary even when PATH is sparse — common
+// when this verb is launched from a TUI subprocess or a launchd job
+// whose environment doesn't include /opt/homebrew/bin or asdf shims.
+// Falls back through well-known install locations after exec.LookPath
+// gives up. Returns the first executable hit.
+func findGo() (string, error) {
+	if p, err := exec.LookPath("go"); err == nil {
+		return p, nil
+	}
+	candidates := []string{
+		"/opt/homebrew/bin/go",   // Homebrew on Apple Silicon
+		"/usr/local/bin/go",      // Homebrew on Intel Macs / generic
+		"/usr/local/go/bin/go",   // Official go.dev installer
+		"/usr/lib/go/bin/go",     // Some Linux distros
+		os.ExpandEnv("$HOME/go/bin/go"),
+		os.ExpandEnv("$HOME/.asdf/shims/go"),
+		os.ExpandEnv("$HOME/.local/bin/go"),
+	}
+	for _, p := range candidates {
+		if info, err := os.Stat(p); err == nil && !info.IsDir() && info.Mode()&0o111 != 0 {
+			return p, nil
+		}
+	}
+	return "", errors.New("go binary not found")
 }
