@@ -488,6 +488,10 @@ func runTest(ctx context.Context, gw *gateway.Client, t TestSpec, defaultTimeout
 	fmt.Println()
 	printPhaseHeader("Results")
 	fmt.Println()
+	// Compact table first — pass/fail + timings at a glance — then
+	// full response bodies for the cases worth reading. Failures
+	// surface in the table with a fail-reason follow-up line.
+	printResultTable(preflights, ordered)
 	overallOK := true
 	passed := 0
 	for _, r := range ordered {

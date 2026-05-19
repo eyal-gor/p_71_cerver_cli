@@ -134,6 +134,160 @@ func printWaitingLine(names []string) {
 	fmt.Printf("  %s  waiting on: %s\n", dim(pendingMark), dim(strings.Join(names, ", ")))
 }
 
+// printResultTable — compact at-a-glance summary of every CLI's
+// auth, health, runtime, and verdict. Renders before the response
+// bodies so the user sees pass/fail status without scrolling past
+// long responses first.
+//
+// Layout (UTF-8 box-drawing in TTY mode, ASCII fallback otherwise):
+//
+//   ┌─────────┬──────────────┬──────┬──────────┬──────┬──────────┐
+//   │ CLI     │ Mode         │ Auth │ Health   │ Time │ Verdict  │
+//   ├─────────┼──────────────┼──────┼──────────┼──────┼──────────┤
+//   │ claude  │ subscription │  ✓   │ 200·80ms │ 21s  │ ✓ PASS   │
+//   │ codex   │ subscription │  ✓   │ 421·35ms │ 20s  │ ✓ PASS   │
+//   │ grok    │ api          │  ✓   │ 421·184ms│ 21s  │ ✓ PASS   │
+//   └─────────┴──────────────┴──────┴──────────┴──────┴──────────┘
+//
+// Failure rows show a follow-up line with the fail reason. Healthy
+// rows stay one-line.
+func printResultTable(prefs map[string]PreflightResult, results []TestResult) {
+	// Pick characters based on ANSI/UTF-8 availability.
+	var (
+		tl, tr, bl, br, mh, mv, mc string
+	)
+	if useANSI {
+		tl, tr, bl, br = "┌", "┐", "└", "┘"
+		mh, mv = "─", "│"
+		mc = "┼"
+	} else {
+		tl, tr, bl, br = "+", "+", "+", "+"
+		mh, mv = "-", "|"
+		mc = "+"
+	}
+	// Column widths chosen so claude/codex/grok and subscription/api
+	// fit naturally without truncation. Health column sized for the
+	// "HTTP <code> · <ms>ms" format.
+	w := []int{8, 14, 6, 12, 6, 10}
+	headers := []string{"CLI", "Mode", "Auth", "Health", "Time", "Verdict"}
+
+	makeRow := func(parts []string, color func(string) string) string {
+		cells := make([]string, len(parts))
+		for i, p := range parts {
+			cells[i] = " " + padRight(p, w[i]-1)
+		}
+		row := mv + strings.Join(cells, mv) + mv
+		if color != nil {
+			return color(row)
+		}
+		return row
+	}
+	border := func(left, mid, right string) string {
+		segs := make([]string, len(w))
+		for i, ww := range w {
+			segs[i] = strings.Repeat(mh, ww)
+		}
+		return left + strings.Join(segs, mid) + right
+	}
+
+	// Top + header + separator
+	fmt.Println(dim(border(tl, intersectionDownTop(useANSI), tr)))
+	fmt.Println(makeRow(headers, bold))
+	fmt.Println(dim(border(intersectionLeft(useANSI), mc, intersectionRight(useANSI))))
+
+	// Body rows
+	for _, r := range results {
+		pf := prefs[r.CLI]
+		authIcon := green(checkMark)
+		if !pf.AuthOK {
+			authIcon = red(crossMark)
+		}
+		healthCell := "—"
+		if pf.HealthDetail != "" {
+			// Compact: strip "HTTP " prefix and " · " spacing to fit
+			h := strings.TrimPrefix(pf.HealthDetail, "HTTP ")
+			h = strings.ReplaceAll(h, " · ", "·")
+			healthCell = truncFit(h, w[3]-2)
+		}
+		timeCell := fmt.Sprintf("%ds", r.Elapsed)
+		verdict := green(checkMark + " PASS")
+		if !r.Pass {
+			verdict = red(crossMark + " FAIL")
+		}
+		fmt.Println(makeRow([]string{
+			r.CLI,
+			r.Mode,
+			" " + authIcon,
+			healthCell,
+			timeCell,
+			verdict,
+		}, nil))
+		// Show the fail reason as an indented follow-up under the row
+		// when there is one. Keeps the table grid clean while still
+		// surfacing actionable detail.
+		if !r.Pass && r.FailWhy != "" {
+			fmt.Printf("  %s %s: %s\n", red(crossMark), bold(r.CLI), dim(r.FailWhy))
+		}
+	}
+	fmt.Println(dim(border(bl, intersectionUpBottom(useANSI), br)))
+	fmt.Println()
+}
+
+// padRight pads a string with spaces to a fixed visible width. ANSI
+// codes are zero-width visually but inflate len(s) — so the function
+// computes the un-escaped length and pads accordingly. Crude (only
+// strips well-formed CSI sequences) but enough for our color uses.
+func padRight(s string, width int) string {
+	visible := 0
+	inEscape := false
+	for _, r := range s {
+		if r == 0x1b {
+			inEscape = true
+			continue
+		}
+		if inEscape {
+			if r == 'm' {
+				inEscape = false
+			}
+			continue
+		}
+		visible++
+	}
+	if visible >= width {
+		return s
+	}
+	return s + strings.Repeat(" ", width-visible)
+}
+
+// Box-drawing intersection characters — tee shapes for the table's
+// top/bottom row borders meeting the header separator. Helpers wrap
+// the lookup so we can fall back to "+" in ASCII mode without ifs
+// peppered throughout the table rendering.
+func intersectionDownTop(ansi bool) string {
+	if ansi {
+		return "┬"
+	}
+	return "+"
+}
+func intersectionUpBottom(ansi bool) string {
+	if ansi {
+		return "┴"
+	}
+	return "+"
+}
+func intersectionLeft(ansi bool) string {
+	if ansi {
+		return "├"
+	}
+	return "+"
+}
+func intersectionRight(ansi bool) string {
+	if ansi {
+		return "┤"
+	}
+	return "+"
+}
+
 // printResultPanel — the per-CLI output block. Bar at top with the
 // summary line; reply body; bar at bottom carrying the verdict.
 func printResultPanel(r TestResult, width int) {
