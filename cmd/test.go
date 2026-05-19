@@ -54,14 +54,21 @@ type ExpectClause struct {
 }
 
 // TestResult is one CLI's result for one test.
+//
+// Transient distinguishes "the provider was overloaded" (HTTP 529 from
+// Anthropic, the equivalent from OpenAI) from "the test actually
+// failed". Transient runs don't count as hard failures — they're
+// provider weather, not a regression — but they're still reported so
+// you can retry intentionally.
 type TestResult struct {
-	CLI     string `json:"cli"`
-	Reply   string `json:"reply"`
-	Elapsed int    `json:"elapsed_seconds"`
-	Mode    string `json:"mode"`
-	Error   string `json:"error,omitempty"`
-	Pass    bool   `json:"pass"`
-	FailWhy string `json:"fail_why,omitempty"`
+	CLI       string `json:"cli"`
+	Reply     string `json:"reply"`
+	Elapsed   int    `json:"elapsed_seconds"`
+	Mode      string `json:"mode"`
+	Error     string `json:"error,omitempty"`
+	Pass      bool   `json:"pass"`
+	FailWhy   string `json:"fail_why,omitempty"`
+	Transient bool   `json:"transient,omitempty"`
 }
 
 // TestRun is the on-disk archive for one execution of one test.
@@ -88,6 +95,11 @@ func Test(args []string) error {
 	all := fs.Bool("all", false, "Run every test in ~/.cerver/tests/")
 	listOnly := fs.Bool("list", false, "List tests, don't run anything")
 	timeoutSec := fs.Int("timeout", 180, "Max seconds to wait for any single CLI reply")
+	// Per-invocation compute target. Accepts a compute id (`comp_...`),
+	// a label prefix (`macmini`, `air`), or a provider name (`vercel`,
+	// `e2b`). Overrides whatever's in the test JSON's `compute` field;
+	// the JSON stays portable across machines.
+	onCompute := fs.String("on", "", "Override compute: id, label prefix, or provider")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -136,6 +148,13 @@ func Test(args []string) error {
 	for i, t := range targets {
 		if i > 0 {
 			fmt.Println()
+		}
+		// --on overrides the JSON's compute field for this invocation
+		// only — the test file stays portable. pickCompute resolves
+		// labels/prefixes/provider names the same way `cerver run --on`
+		// does, so `--on macmini` works against any computes list.
+		if *onCompute != "" {
+			t.Compute = *onCompute
 		}
 		ok, err := runTest(ctx, gw, t, *timeoutSec)
 		if err != nil {
@@ -460,14 +479,19 @@ func runTest(ctx context.Context, gw *gateway.Client, t TestSpec, defaultTimeout
 			} else {
 				res.Reply = r.reply
 			}
-			res.Pass, res.FailWhy = evalExpect(res, t.Expect)
+			res.Pass, res.Transient, res.FailWhy = evalExpect(res, t.Expect)
 			remainingMu.Lock()
 			delete(remaining, cli)
 			remainingMu.Unlock()
 			tag := "ok"
-			if res.Error != "" {
+			switch {
+			case res.Pass:
+				tag = "ok"
+			case res.Transient:
+				tag = "OVERLOAD"
+			case res.Error != "":
 				tag = "ERR"
-			} else if !res.Pass {
+			default:
 				tag = "FAIL"
 			}
 			printDoneLine(cli, res.Elapsed, tag)
@@ -520,10 +544,16 @@ func runTest(ctx context.Context, gw *gateway.Client, t TestSpec, defaultTimeout
 	printResultTable(preflights, ordered)
 	overallOK := true
 	passed := 0
+	transient := 0
 	for _, r := range ordered {
-		if r.Pass {
+		switch {
+		case r.Pass:
 			passed++
-		} else {
+		case r.Transient:
+			// Provider weather — surface it but don't fail the suite.
+			// A retry is the right move; the test itself is fine.
+			transient++
+		default:
 			overallOK = false
 		}
 		printResultPanel(r, 64)
@@ -533,19 +563,34 @@ func runTest(ctx context.Context, gw *gateway.Client, t TestSpec, defaultTimeout
 		fmt.Fprintf(os.Stderr, "archive: %v\n", err)
 	}
 
-	printSummary(t.ID, passed, len(ordered))
+	printSummary(t.ID, passed, transient, len(ordered))
 	return overallOK, nil
 }
 
 // evalExpect applies the test's pass/fail rules to one CLI's response.
 // Errors propagate as automatic fails. MinChars and AnyMentions stack
-// (AND) — must satisfy both.
-func evalExpect(r TestResult, ec ExpectClause) (bool, string) {
+// (AND) — must satisfy both. Returns (pass, transient, why):
+//
+//   pass=true             — response satisfied every expectation
+//   pass=false, trans=true — provider-side overload (HTTP 529 or
+//                            equivalent), reported separately from
+//                            a real failure so the suite's overall
+//                            verdict isn't poisoned by provider weather
+//   pass=false, trans=false — genuine failure (missing tokens, empty
+//                            reply, non-overload CLI error)
+func evalExpect(r TestResult, ec ExpectClause) (bool, bool, string) {
+	// Overload first: a 529 in either the error stream or the partial
+	// reply means the provider rejected us before our prompt could be
+	// evaluated. Don't surface this as a normal failure — the user can
+	// retry in a few minutes and the test will probably pass.
+	if isOverload(r.Error) || isOverload(r.Reply) {
+		return false, true, "provider overloaded (529) — retry"
+	}
 	if r.Error != "" {
-		return false, "cli error"
+		return false, false, "cli error"
 	}
 	if ec.MinChars > 0 && len(r.Reply) < ec.MinChars {
-		return false, fmt.Sprintf("reply %d chars < min %d", len(r.Reply), ec.MinChars)
+		return false, false, fmt.Sprintf("reply %d chars < min %d", len(r.Reply), ec.MinChars)
 	}
 	if len(ec.AnyMentions) > 0 {
 		lower := strings.ToLower(r.Reply)
@@ -557,10 +602,35 @@ func evalExpect(r TestResult, ec ExpectClause) (bool, string) {
 			}
 		}
 		if !hit {
-			return false, fmt.Sprintf("none of %v in reply", ec.AnyMentions)
+			return false, false, fmt.Sprintf("none of %v in reply", ec.AnyMentions)
 		}
 	}
-	return true, ""
+	return true, false, ""
+}
+
+// isOverload returns true when text indicates a transient provider
+// overload — Anthropic emits HTTP 529 with `{"type":"overloaded_error",
+// "message":"Overloaded"}`, and OpenAI/codex shows the same code on
+// capacity events. We match on the code and on the body text so we
+// catch both the raw HTTP surfacing and the CLI's stringified version.
+func isOverload(text string) bool {
+	if text == "" {
+		return false
+	}
+	lower := strings.ToLower(text)
+	switch {
+	case strings.Contains(lower, "api error: 529"):
+		return true
+	case strings.Contains(lower, "529 overload"):
+		return true
+	case strings.Contains(lower, "overloaded_error"):
+		return true
+	// Generic "Overloaded" only counts when paired with an HTTP-ish
+	// signal — avoids false-positives on a model explaining the word.
+	case strings.Contains(lower, "overloaded") && strings.Contains(lower, "529"):
+		return true
+	}
+	return false
 }
 
 func archiveRun(t TestSpec, results []TestResult, ok bool) error {
