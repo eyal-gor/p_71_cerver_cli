@@ -292,6 +292,51 @@ func runTest(ctx context.Context, gw *gateway.Client, t TestSpec, defaultTimeout
 	fmt.Printf("==== test %s · %s ====\n", t.ID, t.Name)
 	fmt.Printf("clis: %s · compute: %s · timeout: %ds\n\n", strings.Join(clis, ","), computeID, timeoutSec)
 
+	// Preflight every CLI in parallel — auth check + provider-API
+	// reachability. A failed preflight short-circuits the test for
+	// that CLI (no 90s wait for a CLI we already know can't run).
+	// The grok-via-claude path uses Infisical, so we make sure inf
+	// is loaded if grok is in the mix (already handled above) before
+	// preflight runs.
+	if inf == nil {
+		for _, c := range clis {
+			if c == "grok" {
+				if icfg, err := infisical.LoadConfig(); err == nil {
+					inf = infisical.New(icfg)
+				}
+				break
+			}
+		}
+	}
+	fmt.Println("Preflight:")
+	preflights := make(map[string]PreflightResult, len(clis))
+	{
+		type slot struct {
+			cli string
+			pf  PreflightResult
+		}
+		ch := make(chan slot, len(clis))
+		var pwg sync.WaitGroup
+		for _, c := range clis {
+			c := c
+			pwg.Add(1)
+			go func() {
+				defer pwg.Done()
+				ch <- slot{cli: c, pf: preflightCheck(ctx, c, inf)}
+			}()
+		}
+		pwg.Wait()
+		close(ch)
+		for s := range ch {
+			preflights[s.cli] = s.pf
+		}
+	}
+	// Print preflight in the requested CLI order, not goroutine order.
+	for _, c := range clis {
+		fmt.Println(formatPreflight(preflights[c]))
+	}
+	fmt.Println()
+
 	type slot struct {
 		idx int
 		cli string
@@ -316,6 +361,26 @@ func runTest(ctx context.Context, gw *gateway.Client, t TestSpec, defaultTimeout
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			// Short-circuit on failed preflight — saves the 90s
+			// timeout when we already know the CLI can't run.
+			if pf := preflights[cli]; !pf.Pass() {
+				reason := pf.AuthDetail
+				if !pf.HealthOK {
+					reason = pf.HealthDetail
+				}
+				res := TestResult{
+					CLI: cli, Mode: mode,
+					Error:   "preflight failed: " + reason,
+					Pass:    false,
+					FailWhy: "preflight failed",
+				}
+				remainingMu.Lock()
+				delete(remaining, cli)
+				remainingMu.Unlock()
+				fmt.Printf("← %s skipped (preflight)\n", cli)
+				results <- slot{idx: i, cli: cli, res: res}
+				return
+			}
 			fmt.Printf("→ %s spawning…\n", cli)
 			r := runOneCLI(ctx, inf, gw, cli, computeID, t.Prompt, mode, "", timeoutSec)
 			res := TestResult{CLI: cli, Mode: r.mode, Elapsed: r.elapsed}
