@@ -189,18 +189,22 @@ func writeSeedTest(dir string) error {
 		MinChars:    200,
 		AnyMentions: []string{"token bucket", "leaky bucket", "sliding window"},
 	}
+	// Seed pair: same prompt, one test per auth mode. Lets the user
+	// confirm each path works independently and diagnose flakes by
+	// comparing the two side-by-side.
+	//
+	// 01 = api mode for all three providers (proves vault keys + the
+	//      api-mode CLI plumbing all work end-to-end). Costs real
+	//      tokens — cheap (~$0.01 per run on this prompt) but real.
+	//
+	// 02 = subscription mode for claude + codex (proves the local
+	//      OAuth path on each user's Max/Plus plan). Grok is omitted
+	//      — it has no subscription path; cerver rejects grok=sub at
+	//      session-create.
 	seeds := []TestSpec{
 		{
-			ID:         "01_rate_limiter",
-			Name:       "Rate limiter algorithm choice (subscription)",
-			Prompt:     prompt,
-			CLIs:       []string{"claude", "codex", "grok"},
-			MaxSeconds: 90,
-			Expect:     expect,
-		},
-		{
-			ID:         "02_rate_limiter_apikey",
-			Name:       "Rate limiter (API-mode — isolates subscription throttling)",
+			ID:         "01_rate_limiter_api",
+			Name:       "Rate limiter — API-key mode (all providers)",
 			Prompt:     prompt,
 			CLIs:       []string{"claude", "codex", "grok"},
 			MaxSeconds: 90,
@@ -208,6 +212,18 @@ func writeSeedTest(dir string) error {
 				"claude": "api",
 				"codex":  "api",
 				"grok":   "api",
+			},
+			Expect: expect,
+		},
+		{
+			ID:         "02_rate_limiter_subscription",
+			Name:       "Rate limiter — subscription mode (claude + codex only)",
+			Prompt:     prompt,
+			CLIs:       []string{"claude", "codex"},
+			MaxSeconds: 90,
+			Billing: map[string]string{
+				"claude": "subscription",
+				"codex":  "subscription",
 			},
 			Expect: expect,
 		},
