@@ -39,11 +39,12 @@ func ansi(code, s string) string {
 	return "\x1b[" + code + "m" + s + "\x1b[0m"
 }
 
-func bold(s string) string  { return ansi("1", s) }
-func dim(s string) string   { return ansi("2", s) }
-func green(s string) string { return ansi("32", s) }
-func red(s string) string   { return ansi("31", s) }
-func cyan(s string) string  { return ansi("36", s) }
+func bold(s string) string   { return ansi("1", s) }
+func dim(s string) string    { return ansi("2", s) }
+func green(s string) string  { return ansi("32", s) }
+func red(s string) string    { return ansi("31", s) }
+func cyan(s string) string   { return ansi("36", s) }
+func yellow(s string) string { return ansi("33", s) }
 
 // box characters — fall back to ASCII when ANSI is off, on the
 // assumption that no-ANSI also means a non-UTF8 capture target.
@@ -54,6 +55,7 @@ var (
 	dotMid      = "·"
 	checkMark   = "✓"
 	crossMark   = "✗"
+	warnMark    = "⚠"
 	arrowRight  = "→"
 	arrowLeft   = "←"
 	pendingMark = "·"
@@ -67,8 +69,12 @@ func init() {
 		boxHThick = "="
 		chevron = ">"
 		dotMid = "·" // keep — UTF-8 middle dot is fine in most pipes
-		checkMark = "PASS"
-		crossMark = "FAIL"
+		// Single-char marks compose with "PASS"/"FAIL"/"OVERLOAD" labels
+		// without doubling up ("FAIL FAIL"). Stay short so column widths
+		// match the UTF-8 path within ±1 char.
+		checkMark = "+"
+		crossMark = "x"
+		warnMark = "!"
 		arrowRight = "->"
 		arrowLeft = "<-"
 		pendingMark = "."
@@ -128,10 +134,18 @@ func printSpawnLine(cli, mode string) {
 	fmt.Printf("  %s  %-7s %s\n", cyan(arrowRight), bold(cli), dim("("+mode+")"))
 }
 
-// printDoneLine — emitted when a CLI finishes. tag is "ok"/"FAIL"/"ERR".
+// printDoneLine — emitted when a CLI finishes. tag is one of
+// "ok" / "FAIL" / "ERR" / "OVERLOAD". OVERLOAD is shown in yellow so
+// it visually distinguishes from a red FAIL — a provider 529 isn't a
+// real failure and shouldn't make the run feel broken.
 func printDoneLine(cli string, elapsed int, tag string) {
-	icon := green(checkMark)
-	if tag == "FAIL" || tag == "ERR" {
+	var icon string
+	switch tag {
+	case "ok":
+		icon = green(checkMark)
+	case "OVERLOAD":
+		icon = yellow(warnMark)
+	default: // FAIL, ERR
 		icon = red(crossMark)
 	}
 	fmt.Printf("  %s  %-7s done in %ds  %s\n", icon, bold(cli), elapsed, dim("("+tag+")"))
@@ -203,7 +217,15 @@ func printResultTable(prefs map[string]PreflightResult, results []TestResult) {
 	fmt.Println(makeRow(headers, bold))
 	fmt.Println(dim(border(intersectionLeft(useANSI), mc, intersectionRight(useANSI))))
 
-	// Body rows
+	// Body rows — first pass renders the table itself. Fail / overload
+	// reason lines are collected and printed AFTER the bottom border
+	// so they don't interrupt the grid. Earlier version printed them
+	// between rows and broke the table visually.
+	type note struct {
+		cli, why string
+		kind     string // "fail" or "overload"
+	}
+	var notes []note
 	for _, r := range results {
 		pf := prefs[r.CLI]
 		authIcon := green(checkMark)
@@ -218,8 +240,15 @@ func printResultTable(prefs map[string]PreflightResult, results []TestResult) {
 			healthCell = truncFit(h, w[3]-2)
 		}
 		timeCell := fmt.Sprintf("%ds", r.Elapsed)
-		verdict := green(checkMark + " PASS")
-		if !r.Pass {
+		var verdict string
+		switch {
+		case r.Pass:
+			verdict = green(checkMark + " PASS")
+		case r.Transient:
+			// Yellow OVERLOAD reads as "not your fault, try again"
+			// rather than the harsh red FAIL.
+			verdict = yellow(warnMark + " OVERLD")
+		default:
 			verdict = red(crossMark + " FAIL")
 		}
 		fmt.Println(makeRow([]string{
@@ -230,14 +259,24 @@ func printResultTable(prefs map[string]PreflightResult, results []TestResult) {
 			timeCell,
 			verdict,
 		}, nil))
-		// Show the fail reason as an indented follow-up under the row
-		// when there is one. Keeps the table grid clean while still
-		// surfacing actionable detail.
 		if !r.Pass && r.FailWhy != "" {
-			fmt.Printf("  %s %s: %s\n", red(crossMark), bold(r.CLI), dim(r.FailWhy))
+			kind := "fail"
+			if r.Transient {
+				kind = "overload"
+			}
+			notes = append(notes, note{cli: r.CLI, why: r.FailWhy, kind: kind})
 		}
 	}
 	fmt.Println(dim(border(bl, intersectionUpBottom(useANSI), br)))
+	// Reason follow-ups go AFTER the table closes — keeps the grid
+	// intact while still surfacing why a row failed or got throttled.
+	for _, n := range notes {
+		icon := red(crossMark)
+		if n.kind == "overload" {
+			icon = yellow(warnMark)
+		}
+		fmt.Printf("  %s %s: %s\n", icon, bold(n.cli), dim(n.why))
+	}
 	fmt.Println()
 }
 
@@ -311,11 +350,19 @@ func printResultPanel(r TestResult, width int) {
 	} else {
 		fmt.Println(r.Reply)
 	}
-	verdict := green(checkMark + " PASS")
-	if !r.Pass {
+	var verdict string
+	switch {
+	case r.Pass:
+		verdict = green(checkMark + " PASS")
+	case r.Transient:
+		verdict = yellow(warnMark + " OVERLOAD")
+		if r.FailWhy != "" {
+			verdict += dim("  (" + r.FailWhy + ")")
+		}
+	default:
 		verdict = red(crossMark + " FAIL")
 		if r.FailWhy != "" {
-			verdict += dim("  ("+r.FailWhy+")")
+			verdict += dim("  (" + r.FailWhy + ")")
 		}
 	}
 	fmt.Println(dim(strings.Repeat(boxH, width)))
@@ -324,18 +371,30 @@ func printResultPanel(r TestResult, width int) {
 }
 
 // printSummary — final verdict bar at the bottom of one test run.
-func printSummary(testID string, passed, total int) {
+// Overloads (provider 529) are reported but don't fail the suite —
+// the test ran, the prompt was valid, the provider was just busy.
+func printSummary(testID string, passed, transient, total int) {
 	width := 64
 	bar := strings.Repeat(boxHThick, width)
-	verdict := green(checkMark + " PASS")
-	if passed < total {
+	hardFail := total - passed - transient
+	var verdict string
+	switch {
+	case hardFail > 0:
 		verdict = red(crossMark + " FAIL")
+	case transient > 0:
+		verdict = yellow(warnMark + " PASS (some overloaded — retry)")
+	default:
+		verdict = green(checkMark + " PASS")
+	}
+	detail := fmt.Sprintf("%d/%d CLIs passed", passed, total)
+	if transient > 0 {
+		detail += fmt.Sprintf(", %d overloaded", transient)
 	}
 	fmt.Println(bold(bar))
 	fmt.Printf(" %s   %s   %s\n",
 		bold("test "+testID),
 		verdict,
-		dim(fmt.Sprintf("%d/%d CLIs passed", passed, total)))
+		dim(detail))
 	fmt.Println(bold(bar))
 }
 
@@ -364,6 +423,84 @@ func wrap(text string, width int) []string {
 		out = append(out, line)
 	}
 	return out
+}
+
+// printSwitchTestHeader — top-of-run frame for multi-step CLI-switch
+// tests. Mirrors printTestHeader's visual idiom but lists the planned
+// CLI sequence ("claude → codex → claude") instead of the parallel set.
+func printSwitchTestHeader(t TestSpec, computeID string, timeoutSec int) {
+	width := 64
+	bar := strings.Repeat(boxHThick, width)
+	fmt.Println(bold(bar))
+	fmt.Printf(" %s  %s\n", bold("test "+t.ID), dim(t.Name))
+	fmt.Println(dim(strings.Repeat(boxH, width)))
+	seq := make([]string, len(t.Steps))
+	for i, s := range t.Steps {
+		seq[i] = s.CLI
+	}
+	fmt.Printf(" %-10s %s\n", dim("Sequence"), strings.Join(seq, "  "+arrowRight+"  "))
+	fmt.Printf(" %-10s %s\n", dim("Compute"), computeID)
+	fmt.Printf(" %-10s %ds\n", dim("Timeout"), timeoutSec)
+	fmt.Printf(" %-10s %d\n", dim("Steps"), len(t.Steps))
+	fmt.Println(bold(bar))
+	fmt.Println()
+}
+
+// printSwitchStepHeader — per-turn banner. Shows the position
+// (step 2/3), the CLI for this turn, an optional label from the spec,
+// and the prompt wrapped for readability.
+func printSwitchStepHeader(idx, total int, step TestStep, mode string) {
+	printPhaseHeader(fmt.Sprintf("Step %d/%d — %s (%s)", idx+1, total, step.CLI, mode))
+	if step.Label != "" {
+		fmt.Printf("  %s %s\n", dim(dotMid), dim(step.Label))
+	}
+	for _, line := range wrap(strings.TrimSpace(step.Prompt), 60) {
+		fmt.Printf("    %s\n", dim("› "+line))
+	}
+	fmt.Println()
+}
+
+// printSwitchStepReply — collapsed per-step result block. Same panel
+// shape as the parallel runner uses, but slightly tighter since we'll
+// often have 3–5 of these stacked in one test.
+func printSwitchStepReply(idx int, step TestStep, r TestResult) {
+	width := 60
+	fmt.Println(dim(strings.Repeat(boxH, width)))
+	header := fmt.Sprintf("step %d · %s · %ds · %s", idx+1, bold(step.CLI), r.Elapsed, r.Mode)
+	fmt.Printf(" %s\n", header)
+	fmt.Println(dim(strings.Repeat(boxH, width)))
+	if r.Error != "" {
+		fmt.Printf(" %s %s\n", red(crossMark), r.Error)
+	} else {
+		fmt.Println(r.Reply)
+	}
+	var verdict string
+	switch {
+	case r.Pass:
+		verdict = green(checkMark + " PASS")
+	case r.Transient:
+		verdict = yellow(warnMark + " OVERLOAD")
+		if r.FailWhy != "" {
+			verdict += dim("  (" + r.FailWhy + ")")
+		}
+	default:
+		verdict = red(crossMark + " FAIL")
+		if r.FailWhy != "" {
+			verdict += dim("  (" + r.FailWhy + ")")
+		}
+	}
+	fmt.Println(dim(strings.Repeat(boxH, width)))
+	fmt.Printf(" %s\n", verdict)
+	fmt.Println()
+}
+
+// printSwitchStepAborted — printed when a hard FAIL ends the chain
+// early. The user otherwise wonders why steps after the failure don't
+// run; this names it.
+func printSwitchStepAborted(after int) {
+	fmt.Printf("  %s remaining steps skipped — step %d failed, later turns depend on its context\n",
+		dim(dotMid), after)
+	fmt.Println()
 }
 
 // truncFit is the cmd-package local helper — distinct from the

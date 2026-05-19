@@ -41,8 +41,31 @@ type TestSpec struct {
 	Billing map[string]string `json:"billing,omitempty"`
 	Expect  ExpectClause      `json:"expect,omitempty"`
 
+	// Steps turns this test into a multi-turn, CLI-switching session.
+	// When set, the runner creates ONE session, runs step[0] with the
+	// step's CLI, then for each subsequent step calls /switch-tool to
+	// continue the same transcript with a different CLI/prompt. Each
+	// step has its own expect rules so cross-CLI continuity can be
+	// asserted ("did codex see what claude just said?").
+	//
+	// `clis` is ignored when `steps` is set — the per-step CLI is
+	// the single source of truth.
+	Steps []TestStep `json:"steps,omitempty"`
+
 	// Internal — set when loaded from disk.
 	path string `json:"-"`
+}
+
+// TestStep is one turn of a multi-turn test. The CLI may change between
+// steps; the session/transcript carries across.
+type TestStep struct {
+	CLI    string       `json:"cli"`
+	Prompt string       `json:"prompt"`
+	Expect ExpectClause `json:"expect,omitempty"`
+	// Optional human-readable label for the step ("recall the number",
+	// "switch to codex and continue", …) so the panel output reads
+	// like a conversation rather than "step 1 / step 2 / step 3".
+	Label string `json:"label,omitempty"`
 }
 
 // ExpectClause holds the per-response checks. AnyMentions is OR'd
@@ -246,6 +269,42 @@ func writeSeedTest(dir string) error {
 			},
 			Expect: expect,
 		},
+		// 03 exercises CLI switching mid-conversation: claude plants a
+		// secret number, codex doubles it from transcript context, and
+		// then we hand it back to claude to recall the original. If any
+		// hop fails to inherit the session, the assertion catches it.
+		// Each step's expect.any_mentions intentionally targets a value
+		// only computable from prior turns — proves continuity, not
+		// just that each CLI individually understands arithmetic.
+		{
+			ID:         "03_cli_switch_continuity",
+			Name:       "CLI switch mid-conversation — claude → codex → claude",
+			MaxSeconds: 120,
+			Billing: map[string]string{
+				"claude": "subscription",
+				"codex":  "subscription",
+			},
+			Steps: []TestStep{
+				{
+					CLI:    "claude",
+					Label:  "plant a value",
+					Prompt: "Remember this number: 47. Reply with just '47 stored.' and nothing else.",
+					Expect: ExpectClause{AnyMentions: []string{"47"}},
+				},
+				{
+					CLI:    "codex",
+					Label:  "switch to codex, transform it",
+					Prompt: "What number did the previous turn store, multiplied by 2? Reply with just the number.",
+					Expect: ExpectClause{AnyMentions: []string{"94"}},
+				},
+				{
+					CLI:    "claude",
+					Label:  "switch back to claude, recall the original",
+					Prompt: "What was the original number I asked you to remember at the very start of this conversation?",
+					Expect: ExpectClause{AnyMentions: []string{"47"}},
+				},
+			},
+		},
 	}
 	for _, t := range seeds {
 		target := filepath.Join(dir, t.ID+".json")
@@ -328,6 +387,14 @@ func printTestList(tests []TestSpec, dir string) {
 }
 
 func runTest(ctx context.Context, gw *gateway.Client, t TestSpec, defaultTimeoutSec int) (bool, error) {
+	// Steps-mode tests are a different shape — one session, multiple
+	// turns, CLI may change between turns. Route them to a dedicated
+	// runner so the fan-out / heartbeat / preflight scaffolding for
+	// parallel single-CLI runs doesn't have to grow another mode.
+	if len(t.Steps) > 0 {
+		return runSwitchTest(ctx, gw, t, defaultTimeoutSec)
+	}
+
 	clis := t.CLIs
 	if len(clis) == 0 {
 		clis = []string{"claude", "codex", "grok"}
@@ -657,4 +724,154 @@ func archiveRun(t TestSpec, results []TestResult, ok bool) error {
 	body = append(body, '\n')
 	fn := fmt.Sprintf("%s-%d.json", t.ID, time.Now().Unix())
 	return os.WriteFile(filepath.Join(runsDir, fn), body, 0o644)
+}
+
+// runSwitchTest runs a multi-step test in a SINGLE session, switching
+// the CLI between turns. Used to verify cross-CLI continuity — does
+// codex see what claude just said via /switch-tool, does the
+// transcript carry across, does the user-message history survive?
+//
+// Differences from the parallel single-CLI runner:
+//   - One session id, threaded through every step.
+//   - Steps run sequentially (a switch can't start before the prior
+//     agent's reply lands).
+//   - Each step has its own expect; the test fails if ANY step fails.
+//   - No preflight phase — preflight signal is already covered by
+//     tests 01/02; here we want to isolate the switch behavior.
+func runSwitchTest(ctx context.Context, gw *gateway.Client, t TestSpec, defaultTimeoutSec int) (bool, error) {
+	timeoutSec := t.MaxSeconds
+	if timeoutSec <= 0 {
+		timeoutSec = defaultTimeoutSec
+	}
+	computeID, err := pickCompute(ctx, gw, t.Compute)
+	if err != nil {
+		return false, fmt.Errorf("compute: %w", err)
+	}
+
+	billingMode := func(cli string) string {
+		if m, ok := t.Billing[cli]; ok {
+			switch strings.ToLower(strings.TrimSpace(m)) {
+			case "api":
+				return "api"
+			case "sub", "subscription":
+				return "subscription"
+			}
+		}
+		if cli == "grok" {
+			return "api"
+		}
+		return "subscription"
+	}
+
+	printSwitchTestHeader(t, computeID, timeoutSec)
+
+	var (
+		sessionID  string
+		allResults []TestResult
+		anyHardFail bool
+	)
+
+	// Threaded cursor for transcript reads — each step waits for new
+	// entries after the prior step's last position.
+	cursor := 0
+
+	for i, step := range t.Steps {
+		mode := billingMode(step.CLI)
+		printSwitchStepHeader(i, len(t.Steps), step, mode)
+		stepStart := time.Now()
+
+		var stepErr error
+		if i == 0 {
+			// First step: create the session under step.CLI.
+			metadata := map[string]any{
+				"cli_tool":         step.CLI,
+				"complete_on_exit": false, // keep the session alive for switching
+			}
+			sessionID, stepErr = gw.CreateSession(ctx, gateway.SessionCreate{
+				SessionType: "coding",
+				Compute:     map[string]any{"compute_id": computeID},
+				Task:        step.Prompt,
+				Workload:    "coding",
+				SessionName: "switch-test-" + t.ID,
+				Metadata:    metadata,
+			})
+			if stepErr == nil {
+				stepErr = gw.SendInput(ctx, sessionID, step.Prompt)
+			}
+		} else {
+			// Subsequent steps: /switch-tool with the new CLI + prompt.
+			// The gateway pauses the prior agent, spawns a new one for
+			// step.CLI, and forwards content as the next user message.
+			stepErr = gw.SwitchTool(ctx, sessionID, step.CLI, step.Prompt)
+		}
+
+		var reply string
+		if stepErr == nil {
+			var s *gateway.Session
+			s, stepErr = gw.WaitForReplyFromCursor(ctx, sessionID, cursor,
+				time.Duration(timeoutSec)*time.Second, 8*time.Second)
+			if stepErr == nil {
+				reply = s.LastAssistantText()
+				// Advance the cursor past everything we just consumed
+				// so the next step's wait only sees fresh entries.
+				if s.TranscriptTotal > 0 {
+					cursor = s.TranscriptTotal
+				} else {
+					cursor += len(s.Transcript)
+				}
+			}
+		}
+
+		res := TestResult{
+			CLI:     step.CLI,
+			Mode:    mode,
+			Reply:   reply,
+			Elapsed: int(time.Since(stepStart).Seconds()),
+		}
+		if stepErr != nil {
+			res.Error = stepErr.Error()
+		}
+		res.Pass, res.Transient, res.FailWhy = evalExpect(res, step.Expect)
+
+		tag := "ok"
+		switch {
+		case res.Pass:
+			tag = "ok"
+		case res.Transient:
+			tag = "OVERLOAD"
+		case res.Error != "":
+			tag = "ERR"
+		default:
+			tag = "FAIL"
+		}
+		printDoneLine(step.CLI, res.Elapsed, tag)
+		printSwitchStepReply(i, step, res)
+
+		allResults = append(allResults, res)
+		if !res.Pass && !res.Transient {
+			anyHardFail = true
+			// Bail early — later steps depend on the prior context;
+			// if claude failed to plant the value, asking codex to
+			// double it is wasted spend and a misleading FAIL signal.
+			fmt.Println()
+			printSwitchStepAborted(i + 1)
+			break
+		}
+	}
+
+	overallOK := !anyHardFail
+	if err := archiveRun(t, allResults, overallOK); err != nil {
+		fmt.Fprintf(os.Stderr, "archive: %v\n", err)
+	}
+	passed := 0
+	transient := 0
+	for _, r := range allResults {
+		if r.Pass {
+			passed++
+		} else if r.Transient {
+			transient++
+		}
+	}
+	printSummary(t.ID, passed, transient, len(t.Steps))
+	return overallOK, nil
 }

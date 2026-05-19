@@ -75,6 +75,24 @@ func (c *Client) SendInput(ctx context.Context, sessionID, content string) error
 		map[string]string{"content": content, "role": "user"}, nil)
 }
 
+// SwitchTool continues the same session with a different CLI. The
+// previous agent (if any) is paused; a new agent under `cliTool` is
+// started with `content` as its next user message. Used by tests that
+// exercise cross-CLI continuity — does claude → codex → grok preserve
+// the conversation context, or does each switch reset?
+//
+// `content` is optional; the gateway treats an empty body as "just
+// swap the tool, wait for the next /input". We always pass content
+// here because the test framework wants the new agent to actually run
+// in response to a prompt, not sit idle.
+func (c *Client) SwitchTool(ctx context.Context, sessionID, cliTool, content string) error {
+	body := map[string]any{"cli_tool": cliTool}
+	if content != "" {
+		body["content"] = content
+	}
+	return c.Do(ctx, "POST", fmt.Sprintf("/v2/sessions/%s/switch-tool", sessionID), body, nil)
+}
+
 // Session is the GET /v2/sessions/:id response, slimmed to fields the
 // CLI actually reads. There's more in the wire JSON; we ignore the rest.
 //
