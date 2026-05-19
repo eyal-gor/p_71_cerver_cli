@@ -298,6 +298,14 @@ func runTest(ctx context.Context, gw *gateway.Client, t TestSpec, defaultTimeout
 		res TestResult
 	}
 	results := make(chan slot, len(clis))
+	// Track which CLIs are still in flight so the heartbeat can show
+	// "waiting on claude, grok" instead of just a spinner. Updated by
+	// goroutines under remainingMu; read by the heartbeat ticker.
+	var remainingMu sync.Mutex
+	remaining := make(map[string]bool, len(clis))
+	for _, c := range clis {
+		remaining[c] = true
+	}
 	var wg sync.WaitGroup
 	for i, cli := range clis {
 		i, cli := i, cli
@@ -308,6 +316,7 @@ func runTest(ctx context.Context, gw *gateway.Client, t TestSpec, defaultTimeout
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			fmt.Printf("→ %s spawning…\n", cli)
 			r := runOneCLI(ctx, inf, gw, cli, computeID, t.Prompt, mode, "", timeoutSec)
 			res := TestResult{CLI: cli, Mode: r.mode, Elapsed: r.elapsed}
 			if r.err != nil {
@@ -316,11 +325,50 @@ func runTest(ctx context.Context, gw *gateway.Client, t TestSpec, defaultTimeout
 				res.Reply = r.reply
 			}
 			res.Pass, res.FailWhy = evalExpect(res, t.Expect)
+			remainingMu.Lock()
+			delete(remaining, cli)
+			remainingMu.Unlock()
+			tag := "ok"
+			if res.Error != "" {
+				tag = "ERR"
+			} else if !res.Pass {
+				tag = "FAIL"
+			}
+			fmt.Printf("← %s done (%ds, %s)\n", cli, res.Elapsed, tag)
 			results <- slot{idx: i, cli: cli, res: res}
 		}()
 	}
+
+	// Heartbeat: every 10s while goroutines run, print what we're
+	// still waiting on. Stops as soon as wg.Wait() returns.
+	heartbeatDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatDone:
+				return
+			case <-ticker.C:
+				remainingMu.Lock()
+				if len(remaining) == 0 {
+					remainingMu.Unlock()
+					return
+				}
+				names := make([]string, 0, len(remaining))
+				for c := range remaining {
+					names = append(names, c)
+				}
+				remainingMu.Unlock()
+				sort.Strings(names)
+				fmt.Printf("… waiting on: %s\n", strings.Join(names, ", "))
+			}
+		}
+	}()
 	wg.Wait()
+	close(heartbeatDone)
 	close(results)
+	fmt.Println()
 
 	ordered := make([]TestResult, len(clis))
 	for s := range results {
