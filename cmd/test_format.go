@@ -109,7 +109,7 @@ func printPreflightRow(pf PreflightResult) {
 	if !pf.Pass() {
 		icon = red(crossMark)
 	}
-	auth := truncate(pf.AuthDetail, 44)
+	auth := truncFit(pf.AuthDetail, 44)
 	health := pf.HealthDetail
 	fmt.Printf("  %s  %-7s  auth: %-44s  health: %s\n",
 		icon, bold(pf.CLI), auth, health)
@@ -204,7 +204,10 @@ func wrap(text string, width int) []string {
 	return out
 }
 
-func truncate(s string, max int) string {
+// truncFit is the cmd-package local helper — distinct from the
+// existing truncate() over in sessions.go which trims display
+// labels in the sessions table (different ellipsis style).
+func truncFit(s string, max int) string {
 	if max <= 1 {
 		return s
 	}
