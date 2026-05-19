@@ -34,7 +34,13 @@ type TestSpec struct {
 	CLIs       []string     `json:"clis,omitempty"`
 	Compute    string       `json:"compute,omitempty"`
 	MaxSeconds int          `json:"max_seconds,omitempty"`
-	Expect     ExpectClause `json:"expect,omitempty"`
+	// Billing per CLI: `{"claude":"api","codex":"sub","grok":"api"}`.
+	// Missing keys fall back to the vendor default (grok=api, others
+	// subscription). Useful for isolating subscription-side throttling
+	// (Anthropic / ChatGPT) by re-running the same prompt in api mode
+	// where rate limits are predictable and paid per token.
+	Billing map[string]string `json:"billing,omitempty"`
+	Expect  ExpectClause      `json:"expect,omitempty"`
 
 	// Internal — set when loaded from disk.
 	path string `json:"-"`
@@ -179,25 +185,52 @@ func ensureTestsDir() (string, error) {
 }
 
 func writeSeedTest(dir string) error {
-	t := TestSpec{
-		ID:   "01_rate_limiter",
-		Name: "Rate limiter algorithm choice",
-		Prompt: "Design a rate-limiting strategy for a public API expecting bursts. " +
-			"Pick ONE algorithm (token bucket, leaky bucket, or sliding window). " +
-			"Justify in ~120 words with one concrete tradeoff you accept.",
-		CLIs:       []string{"claude", "codex", "grok"},
-		MaxSeconds: 90,
-		Expect: ExpectClause{
-			MinChars:    200,
-			AnyMentions: []string{"token bucket", "leaky bucket", "sliding window"},
+	// Seed two starter tests: the same prompt in subscription mode
+	// (default) and in api-mode. Having both lets the user diagnose
+	// flaky timeouts — if the subscription run fails but the api run
+	// passes, the provider's subscription tier is throttling, not
+	// cerver itself.
+	prompt := "Design a rate-limiting strategy for a public API expecting bursts. " +
+		"Pick ONE algorithm (token bucket, leaky bucket, or sliding window). " +
+		"Justify in ~120 words with one concrete tradeoff you accept."
+	expect := ExpectClause{
+		MinChars:    200,
+		AnyMentions: []string{"token bucket", "leaky bucket", "sliding window"},
+	}
+	seeds := []TestSpec{
+		{
+			ID:         "01_rate_limiter",
+			Name:       "Rate limiter algorithm choice (subscription)",
+			Prompt:     prompt,
+			CLIs:       []string{"claude", "codex", "grok"},
+			MaxSeconds: 90,
+			Expect:     expect,
+		},
+		{
+			ID:         "02_rate_limiter_apikey",
+			Name:       "Rate limiter (API-mode — isolates subscription throttling)",
+			Prompt:     prompt,
+			CLIs:       []string{"claude", "codex", "grok"},
+			MaxSeconds: 90,
+			Billing: map[string]string{
+				"claude": "api",
+				"codex":  "api",
+				"grok":   "api",
+			},
+			Expect: expect,
 		},
 	}
-	body, err := json.MarshalIndent(t, "", "  ")
-	if err != nil {
-		return err
+	for _, t := range seeds {
+		body, err := json.MarshalIndent(t, "", "  ")
+		if err != nil {
+			return err
+		}
+		body = append(body, '\n')
+		if err := os.WriteFile(filepath.Join(dir, t.ID+".json"), body, 0o644); err != nil {
+			return err
+		}
 	}
-	body = append(body, '\n')
-	return os.WriteFile(filepath.Join(dir, t.ID+".json"), body, 0o644)
+	return nil
 }
 
 func loadTests(dir string) ([]TestSpec, error) {
@@ -275,18 +308,41 @@ func runTest(ctx context.Context, gw *gateway.Client, t TestSpec, defaultTimeout
 		return false, fmt.Errorf("compute: %w", err)
 	}
 
-	// Lazy Infisical for grok (always api mode). Initialize only if
-	// needed so subscription-only tests don't pay the load cost.
-	var inf *infisical.Client
-	for _, c := range clis {
-		if c == "grok" {
-			icfg, err := infisical.LoadConfig()
-			if err != nil {
-				return false, fmt.Errorf("grok needs Infisical for XAI_API_KEY: %w", err)
+	// Resolve per-CLI billing mode. Default: grok=api, others=sub.
+	// The test's `billing` field can override per CLI — e.g. a copy
+	// of the same test in api-mode to isolate subscription throttling.
+	billingMode := func(cli string) string {
+		if m, ok := t.Billing[cli]; ok {
+			switch strings.ToLower(strings.TrimSpace(m)) {
+			case "api":
+				return "api"
+			case "sub", "subscription":
+				return "subscription"
 			}
-			inf = infisical.New(icfg)
+		}
+		if cli == "grok" {
+			return "api"
+		}
+		return "subscription"
+	}
+
+	// Lazy Infisical — needed for any CLI in api mode (XAI_API_KEY
+	// for grok, ANTHROPIC_API_KEY for claude, OPENAI_API_KEY for
+	// codex), so initialize whenever the per-CLI map has any api.
+	var inf *infisical.Client
+	needsInfisical := false
+	for _, c := range clis {
+		if billingMode(c) == "api" {
+			needsInfisical = true
 			break
 		}
+	}
+	if needsInfisical {
+		icfg, err := infisical.LoadConfig()
+		if err != nil {
+			return false, fmt.Errorf("api-mode test needs Infisical for vendor keys: %w", err)
+		}
+		inf = infisical.New(icfg)
 	}
 
 	fmt.Printf("==== test %s · %s ====\n", t.ID, t.Name)
@@ -308,17 +364,11 @@ func runTest(ctx context.Context, gw *gateway.Client, t TestSpec, defaultTimeout
 	// Preflight every CLI in parallel — auth check + provider-API
 	// reachability. A failed preflight short-circuits the test for
 	// that CLI (no 90s wait for a CLI we already know can't run).
-	// The grok-via-claude path uses Infisical, so we make sure inf
-	// is loaded if grok is in the mix (already handled above) before
-	// preflight runs.
+	// Preflight always benefits from Infisical (for grok's
+	// XAI_API_KEY auth check) — load it if we haven't already.
 	if inf == nil {
-		for _, c := range clis {
-			if c == "grok" {
-				if icfg, err := infisical.LoadConfig(); err == nil {
-					inf = infisical.New(icfg)
-				}
-				break
-			}
+		if icfg, err := infisical.LoadConfig(); err == nil {
+			inf = infisical.New(icfg)
 		}
 	}
 	fmt.Println("Preflight:")
@@ -367,10 +417,7 @@ func runTest(ctx context.Context, gw *gateway.Client, t TestSpec, defaultTimeout
 	var wg sync.WaitGroup
 	for i, cli := range clis {
 		i, cli := i, cli
-		mode := "subscription"
-		if cli == "grok" {
-			mode = "api"
-		}
+		mode := billingMode(cli)
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -394,7 +441,7 @@ func runTest(ctx context.Context, gw *gateway.Client, t TestSpec, defaultTimeout
 				results <- slot{idx: i, cli: cli, res: res}
 				return
 			}
-			fmt.Printf("→ %s spawning…\n", cli)
+			fmt.Printf("→ %s spawning… (%s)\n", cli, mode)
 			r := runOneCLI(ctx, inf, gw, cli, computeID, t.Prompt, mode, "", timeoutSec)
 			res := TestResult{CLI: cli, Mode: r.mode, Elapsed: r.elapsed}
 			if r.err != nil {
