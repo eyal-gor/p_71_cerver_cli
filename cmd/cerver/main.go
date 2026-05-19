@@ -45,7 +45,7 @@ commands:
                  cerver test 01            # run by id-prefix match
                  cerver test --all         # run every test
   update     Reinstall cerver from the latest commit on main. Uses
-               `go install` and lands the new binary in the same
+               'go install' and lands the new binary in the same
                directory the current one runs from.
                  cerver update             # upgrade in place
                  cerver update --verbose   # stream go output
