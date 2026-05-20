@@ -497,59 +497,112 @@ func runTest(ctx context.Context, gw *gateway.Client, t TestSpec, defaultTimeout
 	fmt.Println()
 	printPhaseHeader("Running")
 
-	// Run each CLI sequentially on the same compute. Parallel spawns
-	// on one local relay are fragile in api mode — a burst of three
-	// CLIs all racing to materialize tmp CODEX_HOME dirs, fetch
-	// Infisical keys, and bind subprocess pipes ends with codex and
-	// grok silently hanging while claude finishes cleanly. The
-	// `cerver compare` path already runs sequential-per-compute; the
-	// test runner now matches. Wall-clock cost: ~3× per-CLI time
-	// (~40-60s for a 3-way test) vs the previous "fans out, often
-	// times out" pattern.
-	ordered := make([]TestResult, len(clis))
-	for i, cli := range clis {
-		mode := billingMode(cli)
-		// Short-circuit on failed preflight — saves the 90s timeout
-		// when we already know the CLI can't run.
-		if pf := preflights[cli]; !pf.Pass() {
-			reason := pf.AuthDetail
-			if !pf.HealthOK {
-				reason = pf.HealthDetail
-			}
-			res := TestResult{
-				CLI: cli, Mode: mode,
-				Error:   "preflight failed: " + reason,
-				Pass:    false,
-				FailWhy: "preflight failed",
-			}
-			printDoneLine(cli, 0, "skipped")
-			ordered[i] = res
-			continue
-		}
-		printSpawnLine(cli, mode)
-		r := runOneCLI(ctx, gw, cli, computeID, t.Prompt, mode, "", timeoutSec)
-		res := TestResult{CLI: cli, Mode: r.mode, Elapsed: r.elapsed}
-		if r.err != nil {
-			res.Error = r.err.Error()
-		} else {
-			res.Reply = r.reply
-		}
-		res.Pass, res.Transient, res.FailWhy = evalExpect(res, t.Expect)
-		tag := "ok"
-		switch {
-		case res.Pass:
-			tag = "ok"
-		case res.Transient:
-			tag = "OVERLOAD"
-		case res.Error != "":
-			tag = "ERR"
-		default:
-			tag = "FAIL"
-		}
-		printDoneLine(cli, res.Elapsed, tag)
-		ordered[i] = res
+	// Run all CLIs in parallel on the same compute. The relay's agent
+	// manager is designed for this — MAX_AGENTS=50, dedicated subprocess
+	// pipes per agent, no shared state between concurrent spawns. If
+	// parallel spawns fail, that's a relay-side bug to fix, not a
+	// reason to serialize here.
+	type slot struct {
+		idx int
+		cli string
+		res TestResult
 	}
+	results := make(chan slot, len(clis))
+	var remainingMu sync.Mutex
+	remaining := make(map[string]bool, len(clis))
+	for _, c := range clis {
+		remaining[c] = true
+	}
+	var wg sync.WaitGroup
+	for i, cli := range clis {
+		i, cli := i, cli
+		mode := billingMode(cli)
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			// Short-circuit on failed preflight — saves the 90s timeout
+			// when we already know the CLI can't run.
+			if pf := preflights[cli]; !pf.Pass() {
+				reason := pf.AuthDetail
+				if !pf.HealthOK {
+					reason = pf.HealthDetail
+				}
+				res := TestResult{
+					CLI: cli, Mode: mode,
+					Error:   "preflight failed: " + reason,
+					Pass:    false,
+					FailWhy: "preflight failed",
+				}
+				remainingMu.Lock()
+				delete(remaining, cli)
+				remainingMu.Unlock()
+				printDoneLine(cli, 0, "skipped")
+				results <- slot{idx: i, cli: cli, res: res}
+				return
+			}
+			printSpawnLine(cli, mode)
+			r := runOneCLI(ctx, gw, cli, computeID, t.Prompt, mode, "", timeoutSec)
+			res := TestResult{CLI: cli, Mode: r.mode, Elapsed: r.elapsed}
+			if r.err != nil {
+				res.Error = r.err.Error()
+			} else {
+				res.Reply = r.reply
+			}
+			res.Pass, res.Transient, res.FailWhy = evalExpect(res, t.Expect)
+			remainingMu.Lock()
+			delete(remaining, cli)
+			remainingMu.Unlock()
+			tag := "ok"
+			switch {
+			case res.Pass:
+				tag = "ok"
+			case res.Transient:
+				tag = "OVERLOAD"
+			case res.Error != "":
+				tag = "ERR"
+			default:
+				tag = "FAIL"
+			}
+			printDoneLine(cli, res.Elapsed, tag)
+			results <- slot{idx: i, cli: cli, res: res}
+		}()
+	}
+
+	// Heartbeat: every 10s while goroutines run, print what we're
+	// still waiting on.
+	heartbeatDone := make(chan struct{})
+	go func() {
+		ticker := time.NewTicker(10 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatDone:
+				return
+			case <-ticker.C:
+				remainingMu.Lock()
+				if len(remaining) == 0 {
+					remainingMu.Unlock()
+					return
+				}
+				names := make([]string, 0, len(remaining))
+				for c := range remaining {
+					names = append(names, c)
+				}
+				remainingMu.Unlock()
+				sort.Strings(names)
+				printWaitingLine(names)
+			}
+		}
+	}()
+	wg.Wait()
+	close(heartbeatDone)
+	close(results)
 	fmt.Println()
+
+	ordered := make([]TestResult, len(clis))
+	for s := range results {
+		ordered[s.idx] = s.res
+	}
 
 	fmt.Println()
 	printPhaseHeader("Results")
