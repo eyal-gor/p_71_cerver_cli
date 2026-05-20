@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -87,8 +88,11 @@ func Compare(args []string) error {
 	}
 	modelPerCLI := parseModelsFlag(*modelsFlag, clis)
 
+	// The timeout flag is per compare leg. When several legs target the
+	// same compute we run them sequentially, so the outer context must
+	// cover the longest per-compute group instead of only one leg.
 	ctx, cancel := context.WithTimeout(context.Background(),
-		time.Duration(*timeoutSec)*time.Second+15*time.Second)
+		time.Duration(*timeoutSec*len(entries))*time.Second+30*time.Second)
 	defer cancel()
 
 	cerverTok, err := infisical.LoadCerverToken(ctx)
@@ -97,20 +101,6 @@ func Compare(args []string) error {
 	}
 	if cerverTok == "" {
 		return errors.New("no cerver credentials found — run cerver.ai/install.sh first")
-	}
-	// Lazy Infisical handle for the `api` billing path (vendor keys).
-	// Nil here means we won't need Infisical for any of the CLIs picked;
-	// runOneCLI initializes it on demand only when mode == "api".
-	var inf *infisical.Client
-	for _, m := range billPerCLI {
-		if m == "api" {
-			icfg, err := infisical.LoadConfig()
-			if err != nil {
-				return fmt.Errorf("--bill api needs Infisical for vendor keys: %w", err)
-			}
-			inf = infisical.New(icfg)
-			break
-		}
 	}
 	gw := gateway.New(cerverTok)
 
@@ -148,24 +138,46 @@ func Compare(args []string) error {
 	results := make(chan result, len(entries))
 	var wg sync.WaitGroup
 
-	for i, e := range entries {
-		i, e := i, e
-		mode := billPerCLI[e.cli]
-		model := modelPerCLI[e.cli]
-		computeID := resolvedComputeIDs[i]
+	// Run one compare leg at a time per compute. A local relay can run
+	// multiple CLIs, but starting Claude, Codex, and Grok at once on the
+	// same machine is fragile: one leg can starve and never publish its
+	// final assistant text. Different computes still run in parallel.
+	byCompute := map[string][]int{}
+	for i := range entries {
+		byCompute[resolvedComputeIDs[i]] = append(byCompute[resolvedComputeIDs[i]], i)
+	}
+	for _, indexes := range byCompute {
+		sort.SliceStable(indexes, func(i, j int) bool {
+			left := entries[indexes[i]].cli
+			right := entries[indexes[j]].cli
+			return launchPriority(left, billPerCLI[left]) < launchPriority(right, billPerCLI[right])
+		})
+	}
+
+	for _, indexes := range byCompute {
+		indexes := indexes
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			r := runOneCLI(ctx, inf, gw, e.cli, computeID, prompt, mode, model, *timeoutSec)
-			results <- result{
-				idx:     i,
-				cli:     e.cli,
-				compute: e.computeQuery,
-				reply:   r.reply,
-				usage:   r.usage,
-				elapsed: r.elapsed,
-				mode:    r.mode,
-				err:     r.err,
+			for _, i := range indexes {
+				e := entries[i]
+				mode := billPerCLI[e.cli]
+				model := modelPerCLI[e.cli]
+				computeID := resolvedComputeIDs[i]
+				legCtx, cancelLeg := context.WithTimeout(ctx,
+					time.Duration(*timeoutSec)*time.Second+15*time.Second)
+				r := runOneCLI(legCtx, gw, e.cli, computeID, prompt, mode, model, *timeoutSec)
+				cancelLeg()
+				results <- result{
+					idx:     i,
+					cli:     e.cli,
+					compute: e.computeQuery,
+					reply:   r.reply,
+					usage:   r.usage,
+					elapsed: r.elapsed,
+					mode:    r.mode,
+					err:     r.err,
+				}
 			}
 		}()
 	}
@@ -194,7 +206,14 @@ func Compare(args []string) error {
 	return nil
 }
 
-func runOneCLI(ctx context.Context, inf *infisical.Client, gw *gateway.Client,
+func launchPriority(cli, mode string) int {
+	if cli == "grok" || mode == "api" {
+		return 0
+	}
+	return 1
+}
+
+func runOneCLI(ctx context.Context, gw *gateway.Client,
 	cli, computeID, prompt, mode, model string, timeoutSec int) (out struct {
 	cli, reply string
 	usage      *gateway.Usage
@@ -204,20 +223,6 @@ func runOneCLI(ctx context.Context, inf *infisical.Client, gw *gateway.Client,
 }) {
 	out.cli = cli
 	out.mode = mode
-	envInject := map[string]string{}
-	if mode == "api" {
-		keyName := apiKeyEnvFor(cli)
-		v, err := inf.Get(ctx, keyName)
-		if err != nil {
-			out.err = err
-			return
-		}
-		if v == "" {
-			out.err = fmt.Errorf("%s api mode but %s isn't in vault", cli, keyName)
-			return
-		}
-		envInject[keyName] = v
-	}
 
 	// `complete_on_exit` tells the relay to close the agent record when
 	// the CLI process ends instead of parking it in `paused` for a
@@ -228,15 +233,12 @@ func runOneCLI(ctx context.Context, inf *infisical.Client, gw *gateway.Client,
 	if model != "" {
 		metadata["cli_model"] = model
 	}
-	if len(envInject) > 0 {
-		metadata["env"] = envInject
-	}
 	sid, err := gw.CreateSession(ctx, gateway.SessionCreate{
 		SessionType: "coding",
 		Compute:     map[string]any{"compute_id": computeID},
 		Task:        prompt,
 		Workload:    "coding",
-		SessionName: "cli-compare-" + cli,
+		SessionName: "cli-run",
 		Metadata:    metadata,
 	})
 	if err != nil {

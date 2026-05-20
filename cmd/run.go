@@ -51,27 +51,6 @@ func Run(args []string) error {
 		return errors.New("no cerver credentials found — run `curl https://cerver.ai/install.sh | bash` first")
 	}
 
-	// Vendor API keys (for --bill api) still require Infisical. Only
-	// initialize the Infisical client lazily on that path so users
-	// without a vault never trip over it.
-	envInject := map[string]string{}
-	if mode == "api" {
-		icfg, err := infisical.LoadConfig()
-		if err != nil {
-			return fmt.Errorf("--bill api needs Infisical for the vendor key: %w", err)
-		}
-		inf := infisical.New(icfg)
-		keyName := apiKeyEnvFor(*cli)
-		v, err := inf.Get(ctx, keyName)
-		if err != nil {
-			return err
-		}
-		if v == "" {
-			return fmt.Errorf("%s set to api but %s isn't in your vault — paste one or use --bill sub", *cli, keyName)
-		}
-		envInject[keyName] = v
-	}
-
 	gw := gateway.New(cerverTok)
 
 	// 2. Pick compute.
@@ -87,9 +66,6 @@ func Run(args []string) error {
 	metadata := map[string]any{"cli_tool": *cli, "complete_on_exit": true}
 	if *model != "" {
 		metadata["cli_model"] = *model
-	}
-	if len(envInject) > 0 {
-		metadata["env"] = envInject
 	}
 	sessionID, err := gw.CreateSession(ctx, gateway.SessionCreate{
 		SessionType: "coding",

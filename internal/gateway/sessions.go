@@ -395,6 +395,11 @@ func looksLikeProgressReply(reply string) bool {
 	if text == "" {
 		return false
 	}
+	if strings.Contains(text, "\n- ") ||
+		strings.Contains(text, "\n* ") ||
+		strings.Contains(text, "\n1. ") {
+		return false
+	}
 	progressStarts := []string{
 		"i'll ",
 		"i’ll ",
