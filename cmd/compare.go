@@ -5,7 +5,6 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -138,46 +137,36 @@ func Compare(args []string) error {
 	results := make(chan result, len(entries))
 	var wg sync.WaitGroup
 
-	// Run one compare leg at a time per compute. A local relay can run
-	// multiple CLIs, but starting Claude, Codex, and Grok at once on the
-	// same machine is fragile: one leg can starve and never publish its
-	// final assistant text. Different computes still run in parallel.
-	byCompute := map[string][]int{}
+	// True parallel: one goroutine per entry. The earlier "sequential
+	// per compute" workaround (4608b46) papered over a relay-side
+	// concurrency bug — three concurrent /run requests serialized in
+	// the cerver_connect WS read loop, and the second + third never
+	// got their CLI subprocess spawned before the upstream timed out.
+	// That's fixed in the relay now (dcbbac2 — `asyncio.create_task`
+	// per inbound request), so this client can run the legs in true
+	// parallel: total wall time = slowest CLI, not sum.
 	for i := range entries {
-		byCompute[resolvedComputeIDs[i]] = append(byCompute[resolvedComputeIDs[i]], i)
-	}
-	for _, indexes := range byCompute {
-		sort.SliceStable(indexes, func(i, j int) bool {
-			left := entries[indexes[i]].cli
-			right := entries[indexes[j]].cli
-			return launchPriority(left, billPerCLI[left]) < launchPriority(right, billPerCLI[right])
-		})
-	}
-
-	for _, indexes := range byCompute {
-		indexes := indexes
+		i := i
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for _, i := range indexes {
-				e := entries[i]
-				mode := billPerCLI[e.cli]
-				model := modelPerCLI[e.cli]
-				computeID := resolvedComputeIDs[i]
-				legCtx, cancelLeg := context.WithTimeout(ctx,
-					time.Duration(*timeoutSec)*time.Second+15*time.Second)
-				r := runOneCLI(legCtx, gw, e.cli, computeID, prompt, mode, model, *timeoutSec)
-				cancelLeg()
-				results <- result{
-					idx:     i,
-					cli:     e.cli,
-					compute: e.computeQuery,
-					reply:   r.reply,
-					usage:   r.usage,
-					elapsed: r.elapsed,
-					mode:    r.mode,
-					err:     r.err,
-				}
+			e := entries[i]
+			mode := billPerCLI[e.cli]
+			model := modelPerCLI[e.cli]
+			computeID := resolvedComputeIDs[i]
+			legCtx, cancelLeg := context.WithTimeout(ctx,
+				time.Duration(*timeoutSec)*time.Second+15*time.Second)
+			r := runOneCLI(legCtx, gw, e.cli, computeID, prompt, mode, model, *timeoutSec)
+			cancelLeg()
+			results <- result{
+				idx:     i,
+				cli:     e.cli,
+				compute: e.computeQuery,
+				reply:   r.reply,
+				usage:   r.usage,
+				elapsed: r.elapsed,
+				mode:    r.mode,
+				err:     r.err,
 			}
 		}()
 	}
@@ -204,13 +193,6 @@ func Compare(args []string) error {
 		fmt.Println()
 	}
 	return nil
-}
-
-func launchPriority(cli, mode string) int {
-	if cli == "grok" || mode == "api" {
-		return 0
-	}
-	return 1
 }
 
 func runOneCLI(ctx context.Context, gw *gateway.Client,
