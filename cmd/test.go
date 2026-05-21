@@ -141,6 +141,19 @@ func Test(args []string) error {
 		return nil
 	}
 
+	// `cerver test diagnose [<provider>]` runs a provider-specific
+	// health probe instead of a prompt-based test. Same vault flow,
+	// same `cerver test` entry point — just a different verb. Kept
+	// inside the test command (rather than its own top-level verb)
+	// so users find it next to the failure: "`cerver test --on
+	// provider_vercel` doesn't work → run `cerver test diagnose
+	// vercel`".
+	if fs.Arg(0) == "diagnose" {
+		dctx, dcancel := context.WithTimeout(context.Background(), 60*time.Second)
+		defer dcancel()
+		return Diagnose(dctx, fs.Args()[1:])
+	}
+
 	targets := tests
 	if !*all {
 		query := fs.Arg(0)

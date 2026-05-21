@@ -44,6 +44,9 @@ commands:
                  cerver test               # list tests
                  cerver test 01            # run by id-prefix match
                  cerver test --all         # run every test
+                 cerver test diagnose <provider>
+                                           # probe provider readiness
+                                           # (e.g. vercel)
   update     Reinstall cerver from the latest commit on main. Uses
                'go install' and lands the new binary in the same
                directory the current one runs from.
