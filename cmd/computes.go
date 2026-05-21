@@ -67,6 +67,39 @@ func Computes(args []string) error {
 		}
 	}
 
+	// Synthesize a `provider_cerver_local` row if the gateway didn't
+	// send one. Reason: every other provider type (vercel/cloudflare/
+	// e2b) shows up as a request handle, but the local provider
+	// today is only visible through whatever instances the user has
+	// already registered. From a "what kinds of compute can I run on"
+	// perspective they're symmetric — the menu should list all four.
+	//
+	// Status mirrors the registered-instance state: "ready" if there's
+	// at least one ready local instance, "none" if not (which tells a
+	// new user they need to run install.sh on their machine first).
+	hasLocalProvider := false
+	for _, p := range providers {
+		if p.Provider == "cerver_local_provider" {
+			hasLocalProvider = true
+			break
+		}
+	}
+	if !hasLocalProvider {
+		status := "none"
+		for _, inst := range instances {
+			if inst.Provider == "cerver_local_provider" && inst.Status == "ready" {
+				status = "ready"
+				break
+			}
+		}
+		providers = append([]gateway.Compute{{
+			ID:       "provider_cerver_local",
+			Label:    "Your machine",
+			Provider: "cerver_local_provider",
+			Status:   status,
+		}}, providers...)
+	}
+
 	fmt.Println("INSTANCES")
 	if len(instances) == 0 {
 		fmt.Println("  (none — start a local relay or request a sandbox-relay via `cerver run --on provider_…`)")
