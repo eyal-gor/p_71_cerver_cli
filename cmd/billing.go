@@ -54,11 +54,21 @@ func Billing(args []string) error {
 	}
 
 	t := summary.Totals
+	c := summary.Counts
 	fmt.Printf("Cerver billing  %s → %s\n", short(summary.Period.Start), short(summary.Period.End))
 	fmt.Println()
-	fmt.Printf("  service fee       $%.4f   (%.0f sessions × $0.002)\n", t.ServiceUSD, summary.Counts.Sessions)
-	fmt.Printf("  database egress   $%.4f   (%s)\n", t.DBEgressUSD, humanBytes(summary.Counts.BytesOut))
-	fmt.Printf("  database compute  $%.4f   (%s)\n", t.DBComputeUSD, humanMillis(summary.Counts.ComputeMS))
+	fmt.Printf("  service fee       $%.4f   (%.0f sessions × $0.002)\n", t.ServiceUSD, c.Sessions)
+	// LLM-token line surfaces what cerver gateway recorded from the
+	// relay's per-turn usage_total PATCHes. Skipped when zero so a
+	// brand-new account's bill isn't padded with empty rows.
+	if t.LLMTokensUSD > 0 || c.LLMTokens > 0 {
+		fmt.Printf("  llm tokens        $%.4f   (%s tokens)\n", t.LLMTokensUSD, humanCount(c.LLMTokens))
+	}
+	if t.SandboxComputeUSD > 0 || c.SandboxSeconds > 0 {
+		fmt.Printf("  sandbox compute   $%.4f   (%s)\n", t.SandboxComputeUSD, humanSeconds(c.SandboxSeconds))
+	}
+	fmt.Printf("  database egress   $%.4f   (%s)\n", t.DBEgressUSD, humanBytes(c.BytesOut))
+	fmt.Printf("  database compute  $%.4f   (%s)\n", t.DBComputeUSD, humanMillis(c.ComputeMS))
 	fmt.Printf("  ─────────────────────────\n")
 	fmt.Printf("  total             $%.4f\n", t.TotalUSD)
 	fmt.Println()
@@ -119,5 +129,30 @@ func humanMillis(ms float64) string {
 		return fmt.Sprintf("%.1f s", ms/1000)
 	default:
 		return fmt.Sprintf("%.1f min", ms/60000)
+	}
+}
+
+// humanCount formats large token counts in a familiar k/M shape so a
+// row like "12,453,221 tokens" reads as "12.5M" without padding the
+// column.
+func humanCount(n float64) string {
+	switch {
+	case n < 1_000:
+		return fmt.Sprintf("%.0f", n)
+	case n < 1_000_000:
+		return fmt.Sprintf("%.1fk", n/1_000)
+	default:
+		return fmt.Sprintf("%.2fM", n/1_000_000)
+	}
+}
+
+func humanSeconds(s float64) string {
+	switch {
+	case s < 60:
+		return fmt.Sprintf("%.0f s", s)
+	case s < 3600:
+		return fmt.Sprintf("%.1f min", s/60)
+	default:
+		return fmt.Sprintf("%.1f h", s/3600)
 	}
 }

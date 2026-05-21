@@ -15,16 +15,20 @@ type BillingSummary struct {
 		End   string `json:"end"`
 	} `json:"period"`
 	Totals struct {
-		ServiceUSD   float64 `json:"service_usd"`
-		DBEgressUSD  float64 `json:"db_egress_usd"`
-		DBComputeUSD float64 `json:"db_compute_usd"`
-		DBStorageUSD float64 `json:"db_storage_usd"`
-		TotalUSD     float64 `json:"total_usd"`
+		ServiceUSD        float64 `json:"service_usd"`
+		DBEgressUSD       float64 `json:"db_egress_usd"`
+		DBComputeUSD      float64 `json:"db_compute_usd"`
+		DBStorageUSD      float64 `json:"db_storage_usd"`
+		LLMTokensUSD      float64 `json:"llm_tokens_usd"`
+		SandboxComputeUSD float64 `json:"sandbox_compute_usd"`
+		TotalUSD          float64 `json:"total_usd"`
 	} `json:"totals"`
 	Counts struct {
-		Sessions  float64 `json:"sessions"`
-		BytesOut  float64 `json:"bytes_out"`
-		ComputeMS float64 `json:"compute_ms"`
+		Sessions       float64 `json:"sessions"`
+		BytesOut       float64 `json:"bytes_out"`
+		ComputeMS      float64 `json:"compute_ms"`
+		LLMTokens      float64 `json:"llm_tokens"`
+		SandboxSeconds float64 `json:"sandbox_seconds"`
 	} `json:"counts"`
 	BySession []BillingSessionRow `json:"by_session"`
 }
