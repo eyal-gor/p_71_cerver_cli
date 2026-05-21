@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -12,8 +13,18 @@ import (
 	"github.com/eyal-gor/p_71_cerver_cli/internal/infisical"
 )
 
-// Computes lists every compute the account has access to. Tabwriter
-// gives us a clean aligned table without pulling in a TUI lib.
+// Computes lists what the account can run on. Two tables:
+//
+//   1. INSTANCES — actual computes that exist right now. Your laptop
+//      relays, any warm shared-provider sandbox-relays. Each has a
+//      stable compute_id you can target with `--on <comp_id>`.
+//
+//   2. PROVIDERS — request handles ("give me a fresh sandbox of this
+//      kind"). Always present; never refer to a specific machine.
+//      Use these with `--on provider_<name>` when you want a new one,
+//      not when you want to reuse an existing instance.
+//
+// JSON output keeps the flat one-list shape for scripting compat.
 func Computes(args []string) error {
 	fs := flag.NewFlagSet("computes", flag.ContinueOnError)
 	jsonOut := fs.Bool("json", false, "Emit raw JSON instead of a table (for scripting)")
@@ -43,12 +54,48 @@ func Computes(args []string) error {
 		return encodeJSON(os.Stdout, list)
 	}
 
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "ID\tLABEL\tPROVIDER\tSTATUS")
+	// Split the flat API response into the two semantic groups.
+	// The "provider_" id-prefix is the gateway's convention for
+	// request handles (see v2/sessions/service.ts's `provider_`
+	// branch); everything else is a concrete instance.
+	var instances, providers []gateway.Compute
 	for _, c := range list {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", c.ID, c.Label, c.Provider, c.Status)
+		if strings.HasPrefix(c.ID, "provider_") {
+			providers = append(providers, c)
+		} else {
+			instances = append(instances, c)
+		}
 	}
-	return w.Flush()
+
+	fmt.Println("INSTANCES")
+	if len(instances) == 0 {
+		fmt.Println("  (none — start a local relay or request a sandbox-relay via `cerver run --on provider_…`)")
+	} else {
+		w := tabwriter.NewWriter(os.Stdout, 2, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "  ID\tLABEL\tPROVIDER\tSTATUS")
+		for _, c := range instances {
+			fmt.Fprintf(w, "  %s\t%s\t%s\t%s\n", c.ID, c.Label, c.Provider, c.Status)
+		}
+		if err := w.Flush(); err != nil {
+			return err
+		}
+	}
+
+	fmt.Println()
+	fmt.Println("PROVIDERS")
+	if len(providers) == 0 {
+		fmt.Println("  (none)")
+	} else {
+		w := tabwriter.NewWriter(os.Stdout, 2, 0, 2, ' ', 0)
+		fmt.Fprintln(w, "  ID\tLABEL\tPROVIDER\tSTATUS")
+		for _, c := range providers {
+			fmt.Fprintf(w, "  %s\t%s\t%s\t%s\n", c.ID, c.Label, c.Provider, c.Status)
+		}
+		if err := w.Flush(); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // encodeJSON is in its own helper so we can extend it (pretty print,
