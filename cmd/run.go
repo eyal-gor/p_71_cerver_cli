@@ -119,7 +119,13 @@ func Run(args []string) error {
 			Compute:     map[string]any{"compute_id": computeID},
 			Task:        prompt,
 			Workload:    "coding",
-			SessionName: "cli-run",
+			// Use the first line of the prompt (truncated) as the
+			// session label so the relay TUI's "Cerver sessions" table
+			// shows what each run was actually about instead of a
+			// row of identical "cli-run" labels. Trim at the first
+			// newline so multi-line prompts don't smear across the
+			// column.
+			SessionName: shortPromptLabel(prompt, 48),
 			Metadata:    metadata,
 		})
 		if err != nil {
@@ -189,6 +195,25 @@ func resolveBillingMode(cli, flag string) (string, error) {
 	default:
 		return "", fmt.Errorf("unknown --bill value %q (use subscription / sub / api)", flag)
 	}
+}
+
+// shortPromptLabel returns a one-line, length-capped form of the
+// user's prompt suitable for a session-name column in lists. Strips
+// leading whitespace, takes the first line only, and adds an ellipsis
+// when truncating mid-word so the label doesn't look like a fragment.
+func shortPromptLabel(prompt string, maxLen int) string {
+	s := strings.TrimSpace(prompt)
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		s = s[:i]
+	}
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "cli-run"
+	}
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen-1] + "…"
 }
 
 func apiKeyEnvFor(cli string) string {
