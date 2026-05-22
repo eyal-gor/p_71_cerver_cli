@@ -16,6 +16,12 @@ import (
 
 // Run executes a single prompt on a single CLI. Default cli=claude,
 // default compute=first local-relay or whatever the user pinned.
+//
+// With --resume <sid> the prompt is sent as a follow-up to an
+// existing session instead of creating a new one. The session keeps
+// its same transcript, compute, and CLI — those are owned by the
+// session, not by this invocation — so --cli / --on / --model are
+// rejected when paired with --resume.
 func Run(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	cli := fs.String("cli", "claude", "CLI to run: claude | codex | grok")
@@ -23,12 +29,29 @@ func Run(args []string) error {
 	bill := fs.String("bill", "", "Billing mode: subscription | api (alias: sub | api)")
 	model := fs.String("model", "", "Model override (e.g. sonnet, opus, gpt-5-codex). Empty = CLI's local default.")
 	timeoutSec := fs.Int("timeout", 180, "Max seconds to wait for the reply")
+	resume := fs.String("resume", "", "Session id (or short prefix) to resume — sends prompt as a follow-up to an existing session")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	prompt := strings.TrimSpace(strings.Join(fs.Args(), " "))
 	if prompt == "" {
 		return errors.New("usage: cerver run [flags] \"your prompt\"")
+	}
+
+	// Detect which flags the user passed (vs. carry their defaults).
+	// Needed because we want to allow `--cli` etc. for fresh runs but
+	// reject them when paired with --resume — the existing session
+	// owns those choices, accepting them would imply we'd swap CLI
+	// mid-session, which we don't do yet.
+	passedFlags := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { passedFlags[f.Name] = true })
+
+	if *resume != "" {
+		for _, name := range []string{"cli", "on", "model"} {
+			if passedFlags[name] {
+				return fmt.Errorf("--%s can't be combined with --resume (the existing session owns its %s — switch is a future feature)", name, name)
+			}
+		}
 	}
 
 	mode, err := resolveBillingMode(*cli, *bill)
@@ -40,9 +63,6 @@ func Run(args []string) error {
 		time.Duration(*timeoutSec)*time.Second+10*time.Second)
 	defer cancel()
 
-	// 1. Unlock cerver token — prefers ~/.cerver/cerver.env (set by the
-	// relay's email-login installer), falls back to Infisical UA. Vanilla
-	// runs work without Infisical configured.
 	cerverTok, err := infisical.LoadCerverToken(ctx)
 	if err != nil {
 		return err
@@ -53,40 +73,67 @@ func Run(args []string) error {
 
 	gw := gateway.New(cerverTok)
 
-	// 2. Pick compute.
-	computeID, err := pickCompute(ctx, gw, *on)
-	if err != nil {
-		return err
+	var sessionID string
+	cursor := 0
+	if *resume != "" {
+		// Resume path — no session create, no compute pick. POST input
+		// to the existing session; the gateway uses native CLI resume
+		// (claude --resume, codex exec resume) under the hood via the
+		// recovery hints recorded in session metadata.
+		sid, err := resolveSessionID(ctx, gw, *resume)
+		if err != nil {
+			return err
+		}
+		sessionID = sid
+		// Seed cursor BEFORE SendInput so WaitForReplyFromCursor doesn't
+		// race on the previous turn's assistant text. Codex's audit
+		// flagged this specifically — without the seed, the next
+		// /v2/sessions GET returns the old reply and we exit too early.
+		probe, err := gw.GetSession(ctx, sessionID)
+		if err == nil {
+			if probe.TranscriptTotal > 0 {
+				cursor = probe.TranscriptTotal
+			} else {
+				cursor = len(probe.Transcript)
+			}
+		}
+	} else {
+		// Fresh-session path. Pick compute, create session.
+		computeID, err := pickCompute(ctx, gw, *on)
+		if err != nil {
+			return err
+		}
+		// `complete_on_exit: true` used to live here as the "this is a
+		// one-shot, free the relay slot fast" hint. It also (unintentionally)
+		// broke resume: the gateway took a different code path that
+		// didn't record native CLI session ids in metadata, and the
+		// relay deleted its agent record. Dropped — sessions are now
+		// genuinely resumable by default; the relay can still recycle
+		// its in-process slot on CLI exit (separate concern).
+		metadata := map[string]any{"cli_tool": *cli}
+		if *model != "" {
+			metadata["cli_model"] = *model
+		}
+		sid, err := gw.CreateSession(ctx, gateway.SessionCreate{
+			SessionType: "coding",
+			Compute:     map[string]any{"compute_id": computeID},
+			Task:        prompt,
+			Workload:    "coding",
+			SessionName: "cli-run",
+			Metadata:    metadata,
+		})
+		if err != nil {
+			return err
+		}
+		sessionID = sid
 	}
 
-	// 3. Create the session.
-	// `complete_on_exit` flags this as a one-shot — relay disposes of
-	// the agent when the CLI ends instead of leaving it paused for an
-	// implicit --resume. Same rationale as `cerver compare`.
-	metadata := map[string]any{"cli_tool": *cli, "complete_on_exit": true}
-	if *model != "" {
-		metadata["cli_model"] = *model
-	}
-	sessionID, err := gw.CreateSession(ctx, gateway.SessionCreate{
-		SessionType: "coding",
-		Compute:     map[string]any{"compute_id": computeID},
-		Task:        prompt,
-		Workload:    "coding",
-		SessionName: "cli-run",
-		Metadata:    metadata,
-	})
-	if err != nil {
-		return err
-	}
-
-	// 4. Kick off the CLI.
 	if err := gw.SendInput(ctx, sessionID, prompt); err != nil {
 		return err
 	}
 
-	// 5. Wait for the agent to finish emitting (not just the first text).
 	start := time.Now()
-	s, err := gw.WaitForReply(ctx, sessionID,
+	s, err := gw.WaitForReplyFromCursor(ctx, sessionID, cursor,
 		time.Duration(*timeoutSec)*time.Second,
 		8*time.Second)
 	if err != nil {
