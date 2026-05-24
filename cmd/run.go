@@ -30,6 +30,12 @@ func Run(args []string) error {
 	model := fs.String("model", "", "Model override (e.g. sonnet, opus, gpt-5-codex). Empty = CLI's local default.")
 	timeoutSec := fs.Int("timeout", 180, "Max seconds to wait for the reply")
 	resume := fs.String("resume", "", "Session id (or short prefix) to resume — sends prompt as a follow-up to an existing session")
+	// --repo plumbs into metadata.repo_url + metadata.repo_ref which
+	// the gateway's session-create reads and forwards to the sandbox
+	// provisioner. The sandbox-relay then clones the repo before the
+	// CLI starts so codex/claude can actually read your code. No
+	// effect on local-relay computes (they already have your files).
+	repoSpec := fs.String("repo", "", "GitHub repo to clone in the sandbox before running. Accepts owner/name, owner/name@ref, or a full git URL. Useful when --on is a shared sandbox (provider_vercel / provider_e2b) that boots with an empty workspace.")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -47,11 +53,18 @@ func Run(args []string) error {
 	fs.Visit(func(f *flag.Flag) { passedFlags[f.Name] = true })
 
 	if *resume != "" {
-		for _, name := range []string{"cli", "on", "model"} {
+		for _, name := range []string{"cli", "on", "model", "repo"} {
 			if passedFlags[name] {
 				return fmt.Errorf("--%s can't be combined with --resume (the existing session owns its %s — switch is a future feature)", name, name)
 			}
 		}
+	}
+
+	// Parse --repo into URL + optional ref upfront so we fail before
+	// any gateway round-trip when the spec is malformed.
+	repoURL, repoRef, err := parseRepoSpec(*repoSpec)
+	if err != nil {
+		return err
 	}
 
 	mode, err := resolveBillingMode(*cli, *bill)
@@ -120,6 +133,17 @@ func Run(args []string) error {
 		}
 		if *model != "" {
 			metadata["cli_model"] = *model
+		}
+		// Gateway's session-create reads these two keys and forwards
+		// them to the sandbox provisioner (sandbox_relays/manager).
+		// On local-relay computes the keys are inert (the relay
+		// already has your files); on shared providers like Vercel
+		// or E2B the sandbox is cloned at boot.
+		if repoURL != "" {
+			metadata["repo_url"] = repoURL
+			if repoRef != "" {
+				metadata["repo_ref"] = repoRef
+			}
 		}
 		sid, err := gw.CreateSession(ctx, gateway.SessionCreate{
 			SessionType: "coding",
@@ -202,6 +226,54 @@ func resolveBillingMode(cli, flag string) (string, error) {
 	default:
 		return "", fmt.Errorf("unknown --bill value %q (use subscription / sub / api)", flag)
 	}
+}
+
+// parseRepoSpec turns --repo into (url, ref, err). Accepts:
+//
+//	owner/name              → https://github.com/owner/name.git, no ref
+//	owner/name@ref          → … + ref
+//	owner/name@feature/x    → … + ref (refs can contain slashes)
+//	https://… / git@…       → URL as-is, with optional trailing @ref
+//
+// We split at the LAST '@', BUT skip the split when the spec is an
+// SSH URL with only one '@' (git@host:owner/name — the '@' is part
+// of the URL, not a ref delimiter).
+func parseRepoSpec(spec string) (url, ref string, err error) {
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return "", "", nil
+	}
+	isSSH := strings.HasPrefix(spec, "git@") || strings.HasPrefix(spec, "ssh://")
+	atCount := strings.Count(spec, "@")
+	// For SSH URLs the first '@' is part of user@host. Only split a
+	// ref off when there's a SECOND '@'. For everything else, split
+	// at the last '@'.
+	shouldSplit := false
+	at := -1
+	if isSSH {
+		if atCount >= 2 {
+			at = strings.LastIndex(spec, "@")
+			shouldSplit = at > 0
+		}
+	} else if atCount >= 1 {
+		at = strings.LastIndex(spec, "@")
+		shouldSplit = at > 0
+	}
+	if shouldSplit {
+		ref = spec[at+1:]
+		spec = spec[:at]
+	}
+	if strings.HasPrefix(spec, "http://") ||
+		strings.HasPrefix(spec, "https://") ||
+		strings.HasPrefix(spec, "git@") ||
+		strings.HasPrefix(spec, "ssh://") {
+		return spec, ref, nil
+	}
+	// owner/name shorthand: exactly one slash, no scheme prefix.
+	if strings.Count(spec, "/") != 1 {
+		return "", "", fmt.Errorf("--repo expects owner/name or a full git URL, got %q", spec)
+	}
+	return "https://github.com/" + spec + ".git", ref, nil
 }
 
 // shortPromptLabel returns a one-line, length-capped form of the
