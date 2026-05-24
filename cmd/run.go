@@ -110,7 +110,14 @@ func Run(args []string) error {
 		// relay deleted its agent record. Dropped — sessions are now
 		// genuinely resumable by default; the relay can still recycle
 		// its in-process slot on CLI exit (separate concern).
-		metadata := map[string]any{"cli_tool": *cli}
+		metadata := map[string]any{
+			"cli_tool": *cli,
+			// Identifies the originating app/client to the gateway so
+			// the dashboard's "App" column reads "cerver-cli" instead
+			// of blank. Custom apps (e.g. invest-watch's chat panel)
+			// set their own metadata.source value.
+			"source": "cerver-cli",
+		}
 		if *model != "" {
 			metadata["cli_model"] = *model
 		}
