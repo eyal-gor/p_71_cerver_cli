@@ -39,6 +39,13 @@ commands:
                cerver envs repos --app SLUG --env prod
                cerver envs repos add --app SLUG --env prod --url URL [--primary]
                cerver envs repos rm  --app SLUG --env prod --repo-id rep_…
+  vaults     Manage your Infisical vaults (per-account secret connections).
+               cerver vaults                        # list
+               cerver vaults add --label N --client-id ID --client-secret SEC --project-id PID [--default]
+               cerver vaults rename --id ifc_… --label NEW
+               cerver vaults set-default --id ifc_…
+               cerver vaults verify --id ifc_…
+               cerver vaults delete --id ifc_…
   sessions   List recent sessions.
   show       Print a session's full transcript (--follow to stream).
   peek       One-screen snapshot of a session (status + last reply).
@@ -124,6 +131,8 @@ func main() {
 		err = cmd.Computes(args)
 	case "envs", "env", "environments":
 		err = cmd.Envs(args)
+	case "vaults", "vault":
+		err = cmd.Vaults(args)
 	case "sessions":
 		err = cmd.Sessions(args)
 	case "show":
