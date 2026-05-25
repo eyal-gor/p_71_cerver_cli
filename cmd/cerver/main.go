@@ -30,6 +30,11 @@ commands:
   chat       Multi-turn conversation; resume with: cerver chat <sid>
   compare    Run the same prompt across multiple CLIs in parallel.
   computes   List the computes registered to your account.
+  apps       Manage your apps (per-account namespaces for sessions/keys/billing).
+               cerver apps                          # list with this month's stats
+               cerver apps create --name "Kompany" [--slug kompany]
+               cerver apps set-vault --slug kompany --vault ifc_…
+               cerver apps delete --slug kompany
   envs       Manage app environments + their repo bindings (CRUD).
                cerver envs                          # list across all apps
                cerver envs --app SLUG               # filter
@@ -138,6 +143,8 @@ func main() {
 		err = cmd.Envs(args)
 	case "vaults", "vault":
 		err = cmd.Vaults(args)
+	case "apps", "app":
+		err = cmd.Apps(args)
 	case "insights", "insight":
 		err = cmd.Insights(args)
 	case "sessions":
