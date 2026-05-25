@@ -46,6 +46,11 @@ commands:
                cerver vaults set-default --id ifc_…
                cerver vaults verify --id ifc_…
                cerver vaults delete --id ifc_…
+  insights   Run the "read between the lines" agent over recent sessions —
+               returns top user asks, stuck patterns, and suggested features.
+                 cerver insights                  # across all apps
+                 cerver insights --app SLUG
+                 cerver insights --limit 50 --json
   sessions   List recent sessions.
   show       Print a session's full transcript (--follow to stream).
   peek       One-screen snapshot of a session (status + last reply).
@@ -133,6 +138,8 @@ func main() {
 		err = cmd.Envs(args)
 	case "vaults", "vault":
 		err = cmd.Vaults(args)
+	case "insights", "insight":
+		err = cmd.Insights(args)
 	case "sessions":
 		err = cmd.Sessions(args)
 	case "show":
