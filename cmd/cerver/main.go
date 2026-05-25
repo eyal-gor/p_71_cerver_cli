@@ -30,6 +30,15 @@ commands:
   chat       Multi-turn conversation; resume with: cerver chat <sid>
   compare    Run the same prompt across multiple CLIs in parallel.
   computes   List the computes registered to your account.
+  envs       Manage app environments + their repo bindings (CRUD).
+               cerver envs                          # list across all apps
+               cerver envs --app SLUG               # filter
+               cerver envs create --app SLUG --slug prod [--default]
+               cerver envs update --app SLUG --env prod --name "Prod"
+               cerver envs delete --app SLUG --env prod
+               cerver envs repos --app SLUG --env prod
+               cerver envs repos add --app SLUG --env prod --url URL [--primary]
+               cerver envs repos rm  --app SLUG --env prod --repo-id rep_…
   sessions   List recent sessions.
   show       Print a session's full transcript (--follow to stream).
   peek       One-screen snapshot of a session (status + last reply).
@@ -113,6 +122,8 @@ func main() {
 		err = cmd.Compare(args)
 	case "computes":
 		err = cmd.Computes(args)
+	case "envs", "env", "environments":
+		err = cmd.Envs(args)
 	case "sessions":
 		err = cmd.Sessions(args)
 	case "show":
