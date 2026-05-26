@@ -62,3 +62,20 @@ func (c *Client) SetAppInfisicalConfig(ctx context.Context, slug string, configI
 func (c *Client) ArchiveApp(ctx context.Context, slug string) error {
 	return c.Do(ctx, "DELETE", fmt.Sprintf("/v2/apps/%s", slug), nil, nil)
 }
+
+// AppRename is the body for renaming an app (name and/or slug). Empty fields
+// are omitted so a partial update only touches what you pass.
+type AppRename struct {
+	Name string `json:"name,omitempty"`
+	Slug string `json:"slug,omitempty"`
+}
+
+// RenameApp updates an app's display name and/or slug. PATCH /v2/apps/:slug
+// returns the updated app object directly (not wrapped in {app}).
+func (c *Client) RenameApp(ctx context.Context, slug string, body AppRename) (App, error) {
+	var resp App
+	if err := c.Do(ctx, "PATCH", fmt.Sprintf("/v2/apps/%s", slug), body, &resp); err != nil {
+		return App{}, err
+	}
+	return resp, nil
+}

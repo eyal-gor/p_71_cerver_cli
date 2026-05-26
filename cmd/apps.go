@@ -35,6 +35,8 @@ func Apps(args []string) error {
 		return appsList(rest)
 	case "create", "add", "new":
 		return appsCreate(rest)
+	case "rename", "update":
+		return appsRename(rest)
 	case "set-vault", "vault", "bind":
 		return appsSetVault(rest)
 	case "delete", "rm", "archive":
@@ -53,10 +55,13 @@ usage:
   cerver apps                                   list (with this month's stats)
   cerver apps [--json]
   cerver apps create --name "Kompany" [--slug kompany]
+  cerver apps rename --slug cron [--name "Kompany"] [--new-slug kompany]
   cerver apps set-vault --slug kompany --vault ifc_...   (--vault none to clear)
   cerver apps delete --slug kompany
 
-An app's slug is what shows in the dashboard's App column. Bind a default
+Renaming the slug does NOT relabel already-created sessions (their App column
+is the source slug stamped at creation). An app's slug is what shows in the
+dashboard's App column. Bind a default
 vault to an app with set-vault, or attach environments + repos with:
   cerver envs create --app SLUG --slug prod
 `
@@ -118,6 +123,34 @@ func appsCreate(args []string) error {
 		return err
 	}
 	fmt.Printf("created app %s (slug %s, %s)\n", app.Name, app.Slug, app.ID)
+	return nil
+}
+
+func appsRename(args []string) error {
+	fs := flag.NewFlagSet("apps rename", flag.ContinueOnError)
+	slug := fs.String("slug", "", "Current app slug (required)")
+	name := fs.String("name", "", "New display name")
+	newSlug := fs.String("new-slug", "", "New slug")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *slug == "" {
+		return fmt.Errorf("--slug is required (the app to rename)")
+	}
+	if *name == "" && *newSlug == "" {
+		return fmt.Errorf("pass --name and/or --new-slug")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	gw, err := authedClient(ctx)
+	if err != nil {
+		return err
+	}
+	app, err := gw.RenameApp(ctx, *slug, gateway.AppRename{Name: *name, Slug: *newSlug})
+	if err != nil {
+		return err
+	}
+	fmt.Printf("renamed → name %q, slug %q (%s)\n", app.Name, app.Slug, app.ID)
 	return nil
 }
 
