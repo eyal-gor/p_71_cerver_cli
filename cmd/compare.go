@@ -44,6 +44,8 @@ func Compare(args []string) error {
 	billFlag := fs.String("bill", "", "Billing override. Global: `api` or `sub`. Per-CLI: `claude=sub,codex=api`")
 	modelsFlag := fs.String("models", "", "Model override. Global: `sonnet`. Per-CLI: `claude=opus,codex=gpt-5-codex`. Empty = each CLI's local default.")
 	timeoutSec := fs.Int("timeout", 180, "Max seconds to wait for replies")
+	judgeFlag := fs.Bool("judge", false, "After results, ask a 4th LLM (gpt-5-mini) to pick a winner + score each answer.")
+	noShareFlag := fs.Bool("no-share", false, "Skip persisting the comparison to cerver.ai/c/<id> (default: share is on).")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -191,6 +193,65 @@ func Compare(args []string) error {
 		fmt.Printf("  on %s\n", r.compute)
 		fmt.Println(r.reply)
 		fmt.Println()
+	}
+
+	// ── Share artifact: POST results to /v2/compares, print URL ──
+	// Skipped on --no-share. Also skipped if every leg errored (nothing
+	// useful to persist). Failures here are non-fatal — the user already
+	// got their per-CLI output; the share is a nice-to-have on top.
+	if !*noShareFlag {
+		shareCtx, cancelShare := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancelShare()
+		items := make([]gateway.CompareResultItem, 0, len(ordered))
+		for _, r := range ordered {
+			if r.err != nil {
+				continue
+			}
+			// Model + cost are not on Usage today (just input/output tokens
+			// + turns). Leave model blank; the gateway side renders a
+			// generic chip in that case. Cost stays 0; the per-CLI Header
+			// already printed the human-readable cost line above, which
+			// is what the user sees.
+			item := gateway.CompareResultItem{
+				CLI:       r.cli,
+				Content:   r.reply,
+				LatencyMs: r.elapsed * 1000,
+			}
+			items = append(items, item)
+		}
+		if len(items) > 0 {
+			share, shareErr := gw.CreateCompare(shareCtx, prompt, "", items)
+			if shareErr != nil {
+				fmt.Printf("(share skipped: %v)\n", shareErr)
+			} else {
+				fmt.Printf("view + share → %s\n", share.URL)
+				if *judgeFlag {
+					if err := runJudge(shareCtx, gw, share.ID); err != nil {
+						fmt.Printf("(judge skipped: %v)\n", err)
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// runJudge calls the gateway's judge endpoint and prints the verdict
+// underneath the share URL. Lives here (not in output/) because the
+// formatting is unique to compare and short enough to be local.
+func runJudge(ctx context.Context, gw *gateway.Client, id string) error {
+	verdict, err := gw.JudgeCompare(ctx, id)
+	if err != nil {
+		return err
+	}
+	fmt.Println()
+	fmt.Printf("==== judge: %s ====\n", verdict.JudgeModel)
+	fmt.Printf("🏆 winner: %s  —  %s\n", verdict.Winner, verdict.Reasoning)
+	if len(verdict.Scores) > 0 {
+		for _, s := range verdict.Scores {
+			stars := strings.Repeat("★", s.Score) + strings.Repeat("☆", 5-s.Score)
+			fmt.Printf("  %-10s %s\n", s.CLI, stars)
+		}
 	}
 	return nil
 }
