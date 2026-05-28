@@ -20,15 +20,16 @@ type CreateSuggestion struct {
 // surface come back as JSON null when unset — Go decodes those into
 // empty strings via the pointer types below.
 type Suggestion struct {
-	ID        string  `json:"id"`
-	AccountID string  `json:"account_id"`
-	SessionID *string `json:"session_id"`
-	CliTool   *string `json:"cli_tool"`
-	Surface   *string `json:"surface"`
-	Summary   string  `json:"summary"`
-	Detail    string  `json:"detail"`
-	Status    string  `json:"status"`
-	CreatedAt string  `json:"created_at"`
+	ID         string  `json:"id"`
+	AccountID  string  `json:"account_id"`
+	SessionID  *string `json:"session_id"`
+	CliTool    *string `json:"cli_tool"`
+	Surface    *string `json:"surface"`
+	Summary    string  `json:"summary"`
+	Detail     string  `json:"detail"`
+	Status     string  `json:"status"`
+	CreatedAt  string  `json:"created_at"`
+	IsUpstream bool    `json:"is_upstream"`
 }
 
 type suggestionsListResp struct {
@@ -40,6 +41,18 @@ type suggestionsListResp struct {
 func (c *Client) FileSuggestion(ctx context.Context, req CreateSuggestion) (*Suggestion, error) {
 	var s Suggestion
 	if err := c.Do(ctx, "POST", "/v2/suggestions", req, &s); err != nil {
+		return nil, err
+	}
+	return &s, nil
+}
+
+// FileUpstreamSuggestion posts a new suggestion with the explicit
+// opt-in upstream flag set. The user is consenting to share that note
+// with the cerver maintainers via the admin aggregation path. The
+// gateway persists is_upstream=true on the row.
+func (c *Client) FileUpstreamSuggestion(ctx context.Context, req CreateSuggestion) (*Suggestion, error) {
+	var s Suggestion
+	if err := c.Do(ctx, "POST", "/v2/suggestions/upstream", req, &s); err != nil {
 		return nil, err
 	}
 	return &s, nil
