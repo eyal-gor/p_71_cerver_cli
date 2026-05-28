@@ -28,7 +28,11 @@ func Run(args []string) error {
 	on := fs.String("on", "", "Compute name or id to run on (default: first local relay)")
 	bill := fs.String("bill", "", "Billing mode: subscription | api (alias: sub | api)")
 	model := fs.String("model", "", "Model override (e.g. sonnet, opus, gpt-5-codex). Empty = CLI's local default.")
-	timeoutSec := fs.Int("timeout", 180, "Max seconds to wait for the reply")
+	// Sentinel 0 means "use the per-CLI default below" — we can't pick
+	// the default at flag-declare time because it depends on --cli,
+	// which isn't parsed yet. Anything > 0 means the user passed a
+	// value and we use it as-is.
+	timeoutSec := fs.Int("timeout", 0, "Max seconds to wait for the reply (default: 180 for claude, 600 for codex, 300 for grok)")
 	resume := fs.String("resume", "", "Session id (or short prefix) to resume — sends prompt as a follow-up to an existing session")
 	// --repo plumbs into metadata.repo_url + metadata.repo_ref which
 	// the gateway's session-create reads and forwards to the sandbox
@@ -70,6 +74,24 @@ func Run(args []string) error {
 	mode, err := resolveBillingMode(*cli, *bill)
 	if err != nil {
 		return err
+	}
+
+	// Pick the default timeout based on the chosen CLI. Claude tasks
+	// typically finish inside 2-3 minutes; codex routinely takes 5-10
+	// minutes for multi-file edits with verification (and was the CLI
+	// that prompted this — codex runs were silently truncating at the
+	// previous flat 180s default, leaving the caller convinced the
+	// session "didn't return"). grok sits between the two in practice.
+	// --timeout still overrides — we only fill in when nothing was passed.
+	if *timeoutSec == 0 {
+		switch *cli {
+		case "codex":
+			*timeoutSec = 600
+		case "grok":
+			*timeoutSec = 300
+		default:
+			*timeoutSec = 180
+		}
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(),
