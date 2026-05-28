@@ -353,6 +353,25 @@ func (c *Client) WaitForReplyFromCursor(ctx context.Context, sessionID string, s
 		}
 		merged.TranscriptTotal = cursor
 
+		// Deterministic completion signal — the relay's supervisor posts
+		// a synthetic `session_completed` transcript entry when the CLI
+		// subprocess actually exits (p_69_cerver_relay PR #12). When we
+		// see it, return immediately: no more events will arrive on this
+		// session by definition, so quiescence guessing below is wasted
+		// time. Scans only `s.Transcript` (the new entries this poll
+		// returned) — same cursor invariant the rest of the loop uses.
+		//
+		// Relays predating that PR don't emit this. The loop falls
+		// through to the existing quiescence + timeout heuristic in
+		// that case, which is why those branches stay in place. They
+		// become dead code once the supervisor change is universally
+		// deployed and can be removed in a follow-up.
+		for _, e := range s.Transcript {
+			if e.Kind == "session_completed" {
+				return merged, nil
+			}
+		}
+
 		reply := merged.LastAssistantText()
 		if reply == "" {
 			continue
