@@ -14,31 +14,37 @@ import (
 	"github.com/eyal-gor/p_71_cerver_cli/internal/output"
 )
 
-// Compare runs the same prompt across N CLI/compute pairs in parallel
-// and prints the answers side-by-side.
+// Compare runs the same prompt across N (harness, model, compute)
+// competitors in parallel and prints the answers side-by-side.
 //
 // Usage:
 //
-//	cerver compare "<prompt>" <cli> <compute> [<cli> <compute> …]
+//	cerver compare "<prompt>" <cli>[/model] <compute> [<cli>[/model] <compute> …]
 //
-// Example:
+// Examples:
 //
+//	# different harnesses
 //	cerver compare "explain Raft leader election" \
 //	  claude mac-mini \
 //	  codex mac-mini \
 //	  grok  provider_vercel
 //
-// Positional after the prompt is a flat sequence of (cli, compute)
-// pairs. Each pair gets its own goroutine, its own session, its own
-// compute — so users can route, say, codex to a beefier box than
-// claude in the same run. Repeating the same CLI is allowed (e.g.
-// `claude mac-mini claude macbook` for an A/B on the same model).
+//	# same harness, different model — opus 4.8 vs 4.7
+//	cerver compare "implement the rate limiter" \
+//	  claude/opus-4.8 mac-mini \
+//	  claude/opus-4.7 mac-mini
+//
+// Positional after the prompt is a flat sequence of (competitor,
+// compute) pairs. The competitor token is `harness[/model]`: a bare
+// `claude` uses the CLI's local default model; `claude/opus-4.7` pins
+// the model. Each pair gets its own goroutine, session, and compute,
+// so two entries of the same harness can run different models — the
+// model rides with the entry instead of being keyed by harness name.
 // Compute query strings go through the same resolver as `--on` did
 // before: nickname, prefix, compute_id, or compute_label match.
 //
-// `--bill` and `--models` still take global or per-CLI csv values —
-// they're rarely changed, so we keep them as flags rather than packing
-// more positionals.
+// `--bill` and `--models` still take global or per-CLI csv values; a
+// per-token `/model` takes precedence over `--models` for that entry.
 func Compare(args []string) error {
 	fs := flag.NewFlagSet("compare", flag.ContinueOnError)
 	billFlag := fs.String("bill", "", "Billing override. Global: `api` or `sub`. Per-CLI: `claude=sub,codex=api`")
@@ -50,7 +56,7 @@ func Compare(args []string) error {
 
 	rest := fs.Args()
 	if len(rest) < 1 {
-		return errors.New(`usage: cerver compare "<prompt>" <cli> <compute> [<cli> <compute> …]`)
+		return errors.New(`usage: cerver compare "<prompt>" <cli>[/model] <compute> [<cli>[/model] <compute> …]`)
 	}
 	prompt := strings.TrimSpace(rest[0])
 	if prompt == "" {
@@ -59,25 +65,32 @@ func Compare(args []string) error {
 
 	pairs := rest[1:]
 	if len(pairs) == 0 {
-		return errors.New("compare: specify at least one <cli> <compute> pair (e.g. `claude mac-mini`)")
+		return errors.New("compare: specify at least one <cli>[/model] <compute> pair (e.g. `claude mac-mini` or `claude/opus-4.7 mac-mini`)")
 	}
 	if len(pairs)%2 != 0 {
-		return fmt.Errorf("compare: uneven trailing args — must be <cli> <compute> pairs, got %d tokens after the prompt", len(pairs))
+		return fmt.Errorf("compare: uneven trailing args — must be <cli>[/model] <compute> pairs, got %d tokens after the prompt", len(pairs))
 	}
 
 	// Order matters: output preserves the order pairs appeared on the
 	// command line, so `claude codex grok` and `grok claude codex` give
 	// the same answers but rendered top-to-bottom in the user's order.
-	type entry struct{ cli, computeQuery string }
+	// The competitor token is `harness[/model]` — the model rides with
+	// the entry so two same-harness entries (opus-4.8 vs opus-4.7) don't
+	// collapse onto one harness-keyed model.
+	type entry struct{ cli, model, computeQuery string }
 	entries := make([]entry, 0, len(pairs)/2)
 	clis := make([]string, 0, len(pairs)/2)
 	for i := 0; i < len(pairs); i += 2 {
-		cli := strings.TrimSpace(pairs[i])
+		tok := strings.TrimSpace(pairs[i])
 		cq := strings.TrimSpace(pairs[i+1])
-		if cli == "" || cq == "" {
-			return fmt.Errorf("compare: blank cli or compute in pair %d", i/2+1)
+		if tok == "" || cq == "" {
+			return fmt.Errorf("compare: blank competitor or compute in pair %d", i/2+1)
 		}
-		entries = append(entries, entry{cli, cq})
+		cli, model := splitCLIModel(tok)
+		if cli == "" {
+			return fmt.Errorf("compare: blank harness in pair %d (%q)", i/2+1, tok)
+		}
+		entries = append(entries, entry{cli, model, cq})
 		clis = append(clis, cli)
 	}
 
@@ -128,6 +141,7 @@ func Compare(args []string) error {
 	type result struct {
 		idx     int
 		cli     string
+		model   string
 		compute string
 		reply   string
 		usage   *gateway.Usage
@@ -151,9 +165,18 @@ func Compare(args []string) error {
 	// Announce the fan-out up front, then print a live ✓/✗ line as each
 	// leg lands (in completion order — that's what makes the parallelism
 	// visible; the side-by-side blocks below stay in command-line order).
+	// Effective model per entry: a per-token `/model` wins; otherwise
+	// fall back to the --models flag (keyed by harness); empty means the
+	// relay uses the CLI's local default.
+	effModels := make([]string, len(entries))
 	legLabels := make([]string, len(entries))
 	for i, e := range entries {
-		legLabels[i] = fmt.Sprintf("%s@%s", e.cli, e.computeQuery)
+		m := e.model
+		if m == "" {
+			m = modelPerCLI[e.cli]
+		}
+		effModels[i] = m
+		legLabels[i] = legLabel(e.cli, m, e.computeQuery)
 	}
 	fmt.Printf("→ running %d agents in parallel: %s\n", len(entries), strings.Join(legLabels, ", "))
 
@@ -165,7 +188,7 @@ func Compare(args []string) error {
 			defer wg.Done()
 			e := entries[i]
 			mode := billPerCLI[e.cli]
-			model := modelPerCLI[e.cli]
+			model := effModels[i]
 			computeID := resolvedComputeIDs[i]
 			legCtx, cancelLeg := context.WithTimeout(ctx,
 				time.Duration(*timeoutSec)*time.Second+15*time.Second)
@@ -176,6 +199,7 @@ func Compare(args []string) error {
 			results <- result{
 				idx:     i,
 				cli:     e.cli,
+				model:   model,
 				compute: e.computeQuery,
 				reply:   r.reply,
 				usage:   r.usage,
@@ -205,9 +229,9 @@ func Compare(args []string) error {
 		done++
 		sumLegWall += r.legWall
 		if r.err != nil {
-			fmt.Printf("  ✗ %s@%s — %v  (%d/%d)\n", r.cli, r.compute, r.err, done, len(entries))
+			fmt.Printf("  ✗ %s — %v  (%d/%d)\n", legLabel(r.cli, r.model, r.compute), r.err, done, len(entries))
 		} else {
-			fmt.Printf("  ✓ %s@%s — %ds  (%d/%d)\n", r.cli, r.compute, r.legWall, done, len(entries))
+			fmt.Printf("  ✓ %s — %ds  (%d/%d)\n", legLabel(r.cli, r.model, r.compute), r.legWall, done, len(entries))
 		}
 	}
 	wallSec := int(time.Since(startAll).Round(time.Second).Seconds())
@@ -217,11 +241,15 @@ func Compare(args []string) error {
 		// Header takes the bare cli name (apiKeyEnvFor + Cost look it
 		// up internally), so the compute label rides on a second line.
 		if r.err != nil {
-			fmt.Printf("==== %s @ %s (error) ====\n%s\n\n", r.cli, r.compute, r.err)
+			fmt.Printf("==== %s (error) ====\n%s\n\n", legLabel(r.cli, r.model, r.compute), r.err)
 			continue
 		}
 		fmt.Println(output.Header(r.cli, r.elapsed, r.mode, r.usage))
-		fmt.Printf("  on %s\n", r.compute)
+		if r.model != "" {
+			fmt.Printf("  model %s · on %s\n", r.model, r.compute)
+		} else {
+			fmt.Printf("  on %s\n", r.compute)
+		}
 		fmt.Println(r.reply)
 		fmt.Println()
 	}
@@ -375,4 +403,27 @@ func parseModelsFlag(raw string, clis []string) map[string]string {
 		out[strings.TrimSpace(parts[0])] = strings.TrimSpace(parts[1])
 	}
 	return out
+}
+
+// splitCLIModel parses a competitor token `harness[/model]`:
+//
+//	"claude/opus-4.8" → ("claude", "opus-4.8")
+//	"claude"          → ("claude", "")
+//
+// Split on the first "/" only, so a model name that itself contains a
+// slash (e.g. "anthropic/claude-…") survives intact.
+func splitCLIModel(tok string) (cli, model string) {
+	if i := strings.IndexByte(tok, '/'); i >= 0 {
+		return strings.TrimSpace(tok[:i]), strings.TrimSpace(tok[i+1:])
+	}
+	return tok, ""
+}
+
+// legLabel renders a competitor for status lines: "claude/opus-4.8@mac-mini"
+// when a model is pinned, "claude@mac-mini" otherwise.
+func legLabel(cli, model, compute string) string {
+	if model != "" {
+		return fmt.Sprintf("%s/%s@%s", cli, model, compute)
+	}
+	return fmt.Sprintf("%s@%s", cli, compute)
 }
