@@ -87,9 +87,10 @@ func Compare(args []string) error {
 	}
 	modelPerCLI := parseModelsFlag(*modelsFlag, clis)
 
-	// The timeout flag is per compare leg. When several legs target the
-	// same compute we run them sequentially, so the outer context must
-	// cover the longest per-compute group instead of only one leg.
+	// The timeout flag is per compare leg. Legs run concurrently (one
+	// goroutine each), so a per-leg ceiling would suffice — but we keep a
+	// generous outer budget so a slow leg plus its retries still fits well
+	// inside the parent context.
 	ctx, cancel := context.WithTimeout(context.Background(),
 		time.Duration(*timeoutSec*len(entries))*time.Second+30*time.Second)
 	defer cancel()
@@ -130,7 +131,8 @@ func Compare(args []string) error {
 		compute string
 		reply   string
 		usage   *gateway.Usage
-		elapsed int
+		elapsed int // model run time (from the relay) — shown in the header
+		legWall int // end-to-end wall for this leg (create + run + poll)
 		mode    string
 		err     error
 	}
@@ -145,6 +147,17 @@ func Compare(args []string) error {
 	// That's fixed in the relay now (dcbbac2 — `asyncio.create_task`
 	// per inbound request), so this client can run the legs in true
 	// parallel: total wall time = slowest CLI, not sum.
+	//
+	// Announce the fan-out up front, then print a live ✓/✗ line as each
+	// leg lands (in completion order — that's what makes the parallelism
+	// visible; the side-by-side blocks below stay in command-line order).
+	legLabels := make([]string, len(entries))
+	for i, e := range entries {
+		legLabels[i] = fmt.Sprintf("%s@%s", e.cli, e.computeQuery)
+	}
+	fmt.Printf("→ running %d agents in parallel: %s\n", len(entries), strings.Join(legLabels, ", "))
+
+	startAll := time.Now()
 	for i := range entries {
 		i := i
 		wg.Add(1)
@@ -156,7 +169,9 @@ func Compare(args []string) error {
 			computeID := resolvedComputeIDs[i]
 			legCtx, cancelLeg := context.WithTimeout(ctx,
 				time.Duration(*timeoutSec)*time.Second+15*time.Second)
+			legStart := time.Now()
 			r := runOneCLI(legCtx, gw, e.cli, computeID, prompt, mode, model, *timeoutSec)
+			legWall := int(time.Since(legStart).Round(time.Second).Seconds())
 			cancelLeg()
 			results <- result{
 				idx:     i,
@@ -165,21 +180,39 @@ func Compare(args []string) error {
 				reply:   r.reply,
 				usage:   r.usage,
 				elapsed: r.elapsed,
+				legWall: legWall,
 				mode:    r.mode,
 				err:     r.err,
 			}
 		}()
 	}
-	wg.Wait()
-	close(results)
+	// Close the channel once all legs report, so the drain loop below can
+	// range over it and update live status as each completes.
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
 
 	// Drain into a stable order matching the user's pair sequence on
 	// the command line. Index-based ordering also covers the duplicate-
-	// CLI case where map-by-name would collapse rows.
+	// CLI case where map-by-name would collapse rows. We print a live
+	// completion line here, as results arrive (completion order).
 	ordered := make([]result, len(entries))
+	done := 0
+	sumLegWall := 0
 	for r := range results {
 		ordered[r.idx] = r
+		done++
+		sumLegWall += r.legWall
+		if r.err != nil {
+			fmt.Printf("  ✗ %s@%s — %v  (%d/%d)\n", r.cli, r.compute, r.err, done, len(entries))
+		} else {
+			fmt.Printf("  ✓ %s@%s — %ds  (%d/%d)\n", r.cli, r.compute, r.legWall, done, len(entries))
+		}
 	}
+	wallSec := int(time.Since(startAll).Round(time.Second).Seconds())
+	fmt.Println()
+
 	for _, r := range ordered {
 		// Header takes the bare cli name (apiKeyEnvFor + Cost look it
 		// up internally), so the compute label rides on a second line.
@@ -191,6 +224,14 @@ func Compare(args []string) error {
 		fmt.Printf("  on %s\n", r.compute)
 		fmt.Println(r.reply)
 		fmt.Println()
+	}
+	// Make the saved time explicit: wall clock tracks the slowest leg, not
+	// the sum — the whole point of running them concurrently.
+	if len(entries) > 1 {
+		fmt.Printf("— %d agents · %ds wall · ~%ds if run one-by-one (ran concurrently)\n",
+			len(entries), wallSec, sumLegWall)
+	} else {
+		fmt.Printf("— %d agent · %ds wall\n", len(entries), wallSec)
 	}
 	return nil
 }
@@ -244,7 +285,6 @@ func runOneCLI(ctx context.Context, gw *gateway.Client,
 	out.elapsed = int(time.Since(start).Seconds())
 	return
 }
-
 
 // parseBillFlag accepts either a global value ("api" / "sub") or a
 // per-CLI csv ("claude=sub,codex=api"). Returns a fully resolved
