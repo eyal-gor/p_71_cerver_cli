@@ -31,6 +31,29 @@ type BillingSummary struct {
 		SandboxSeconds float64 `json:"sandbox_seconds"`
 	} `json:"counts"`
 	BySession []BillingSessionRow `json:"by_session"`
+	// Spend split by the session's billing tag (subscription vs api).
+	ByBilling map[string]struct {
+		TotalUSD     float64 `json:"total_usd"`
+		LLMTokens    float64 `json:"llm_tokens"`
+		Sessions     float64 `json:"sessions"`
+		VendorEstUSD float64 `json:"vendor_est_usd"`
+	} `json:"by_billing"`
+	// Default-on monthly cap; nil on gateways predating it.
+	SpendingLimit *struct {
+		Enabled      bool     `json:"enabled"`
+		LimitUSD     *float64 `json:"limit_usd"`
+		IsDefault    bool     `json:"is_default"`
+		SpentUSD     float64  `json:"spent_usd"`
+		RemainingUSD *float64 `json:"remaining_usd"`
+		ResetsAt     string   `json:"resets_at"`
+	} `json:"spending_limit"`
+	// Metered-billing subscription state; nil on older gateways.
+	Subscription *struct {
+		Active      bool    `json:"active"`
+		Status      *string `json:"status"`
+		CheckoutURL *string `json:"checkout_url"`
+		FreeTierUSD float64 `json:"free_tier_usd"`
+	} `json:"subscription"`
 }
 
 type BillingSessionRow struct {

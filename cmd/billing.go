@@ -72,7 +72,39 @@ func Billing(args []string) error {
 	fmt.Printf("  ─────────────────────────\n")
 	fmt.Printf("  total             $%.4f\n", t.TotalUSD)
 	fmt.Println()
-	fmt.Println("  (observe-only mode — not yet billed)")
+
+	// What's left: spending-limit headroom + billing state. These
+	// blocks are nil against older gateways, so the command degrades
+	// to the plain usage report there.
+	if sl := summary.SpendingLimit; sl != nil && sl.Enabled && sl.LimitUSD != nil {
+		remaining := 0.0
+		if sl.RemainingUSD != nil {
+			remaining = *sl.RemainingUSD
+		}
+		tag := ""
+		if sl.IsDefault {
+			tag = " (default)"
+		}
+		fmt.Printf("  Spending limit:   $%.2f of $%.2f%s used — $%.2f left, resets %s\n",
+			sl.SpentUSD, *sl.LimitUSD, tag, remaining, short(sl.ResetsAt))
+	}
+	if sub := summary.Subscription; sub != nil {
+		if sub.Active {
+			status := "active"
+			if sub.Status != nil {
+				status = *sub.Status
+			}
+			fmt.Printf("  Billing:          metered subscription %s — $2 per 1M tokens, billed monthly\n", status)
+		} else {
+			fmt.Printf("  Billing:          no subscription — $%.2f free tier", sub.FreeTierUSD)
+			if sub.CheckoutURL != nil && *sub.CheckoutURL != "" {
+				fmt.Printf(", subscribe: %s", *sub.CheckoutURL)
+			}
+			fmt.Println()
+		}
+	} else {
+		fmt.Println("  (observe-only mode — not yet billed)")
+	}
 	fmt.Println()
 
 	if len(summary.BySession) == 0 {
