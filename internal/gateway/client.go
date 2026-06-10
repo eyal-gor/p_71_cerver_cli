@@ -55,6 +55,16 @@ func (c *Client) Do(ctx context.Context, method, path string, body, out any) err
 
 	if resp.StatusCode >= 300 {
 		body, _ := io.ReadAll(resp.Body)
+		// 402 = the gateway wants money before it does work (free tier
+		// exhausted / no subscription, or a spending cap). Turn the
+		// JSON blob into a human sentence and, when there's a checkout
+		// URL, open it — the user shouldn't have to think about how
+		// to go pay.
+		if resp.StatusCode == http.StatusPaymentRequired {
+			if err := paymentRequiredError(body); err != nil {
+				return err
+			}
+		}
 		return fmt.Errorf("%s %s: HTTP %d: %s", method, path, resp.StatusCode, string(body))
 	}
 	if out == nil {
