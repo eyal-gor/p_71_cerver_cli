@@ -118,6 +118,19 @@ func authCheck(ctx context.Context, cli string, inf *infisical.Client) (bool, st
 			mask = mask[:5] + "…" + mask[len(mask)-4:]
 		}
 		return true, "XAI_API_KEY in vault (" + mask + ")"
+	case "ollama":
+		// Local models need no key — "auth" here just means the Ollama
+		// server is reachable on this machine.
+		out, err := exec.CommandContext(tctx, "ollama", "list").CombinedOutput()
+		if err != nil {
+			return false, "ollama not reachable — install/start it (cerver-add-provider → Ollama)"
+		}
+		// `ollama list` header + one row per pulled model.
+		lines := strings.Count(strings.TrimSpace(string(out)), "\n")
+		if lines < 1 {
+			return false, "ollama up, no models pulled (try `ollama pull llama3.2`)"
+		}
+		return true, "local Ollama, no key needed"
 	}
 	return false, "unknown cli"
 }
@@ -127,6 +140,7 @@ func healthCheck(ctx context.Context, cli string) (bool, string) {
 		"claude": "https://api.anthropic.com/",
 		"codex":  "https://api.openai.com/",
 		"grok":   "https://api.x.ai/",
+		"ollama": "http://localhost:11434/",
 	}[cli]
 	if url == "" {
 		return false, "no health endpoint configured for " + cli

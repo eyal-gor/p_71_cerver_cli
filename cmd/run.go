@@ -87,6 +87,10 @@ func Run(args []string) error {
 		switch *cli {
 		case "codex":
 			*timeoutSec = 600
+		case "ollama":
+			// Local generation can be slow on first token (model load from
+			// disk) and on modest hardware. Give it codex-level room.
+			*timeoutSec = 600
 		case "grok":
 			*timeoutSec = 300
 		default:
