@@ -20,6 +20,10 @@ type SessionCreate struct {
 	Workload    string                 `json:"workload"`
 	SessionName string                 `json:"session_name,omitempty"`
 	Metadata    map[string]any         `json:"metadata,omitempty"`
+	// Agent references a saved agent by id or slug. The gateway resolves it,
+	// injects its AGENTS.md into the session, and applies config defaults
+	// (harness/model/workload) that explicit fields still override.
+	Agent string `json:"agent,omitempty"`
 }
 
 type SessionCreateResp struct {

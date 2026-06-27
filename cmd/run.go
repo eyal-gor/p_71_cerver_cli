@@ -34,6 +34,10 @@ func Run(args []string) error {
 	// value and we use it as-is.
 	timeoutSec := fs.Int("timeout", 0, "Max seconds to wait for the reply (default: 180 for claude, 600 for codex, 300 for grok)")
 	resume := fs.String("resume", "", "Session id (or short prefix) to resume — sends prompt as a follow-up to an existing session")
+	// --agent references a saved agent (id or slug). The gateway injects its
+	// AGENTS.md into the session and applies its config defaults; an explicit
+	// --cli / --model here still wins. Manage agents with `cerver agents`.
+	agent := fs.String("agent", "", "Saved agent to apply (id or slug). Drops its AGENTS.md into the session and applies its config defaults.")
 	// --repo plumbs into metadata.repo_url + metadata.repo_ref which
 	// the gateway's session-create reads and forwards to the sandbox
 	// provisioner. The sandbox-relay then clones the repo before the
@@ -57,7 +61,7 @@ func Run(args []string) error {
 	fs.Visit(func(f *flag.Flag) { passedFlags[f.Name] = true })
 
 	if *resume != "" {
-		for _, name := range []string{"cli", "on", "model", "repo"} {
+		for _, name := range []string{"cli", "on", "model", "repo", "agent"} {
 			if passedFlags[name] {
 				return fmt.Errorf("--%s can't be combined with --resume (the existing session owns its %s — switch is a future feature)", name, name)
 			}
@@ -184,6 +188,9 @@ func Run(args []string) error {
 			// column.
 			SessionName: shortPromptLabel(prompt, 48),
 			Metadata:    metadata,
+			// Gateway resolves the agent (id or slug), injects its AGENTS.md,
+			// and applies its config defaults under the explicit fields above.
+			Agent: *agent,
 		})
 		if err != nil {
 			return err

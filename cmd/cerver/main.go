@@ -27,6 +27,15 @@ commands:
   login      Sign in (device-code flow) and write ~/.cerver/cerver.env.
   logout     Revoke the local key server-side and delete cerver.env.
   run        Send a single prompt to one CLI on one compute.
+               cerver run --agent reviewer "review my last commit"
+  agents     Save reusable agent definitions (AGENTS.md + config). Apply
+               one to a run with: cerver run --agent <slug>
+                 cerver agents                       # list
+                 cerver agents new --name "Reviewer" --md-file AGENTS.md --harness claude
+                 cerver agents show <id|slug>
+                 cerver agents pull <id|slug>        # write AGENTS.md + agent.json
+                 cerver agents push [<id|slug>]      # sync local files up
+                 cerver agents rm <id|slug>
   chat       Multi-turn conversation; resume with: cerver chat <sid>
   compare    Run the same prompt across multiple CLIs in parallel.
   computes   List the computes registered to your account.
@@ -35,6 +44,10 @@ commands:
                cerver apps create --name "Kompany" [--slug kompany]
                cerver apps set-vault --slug kompany --vault ifc_…
                cerver apps delete --slug kompany
+  keys       Manage app-scoped API keys (every key belongs to one app).
+               cerver keys                          # list (masked) + their app
+               cerver keys create --app kompany [--label "prod server"]
+               cerver keys delete --prefix ck_1a2b
   envs       Manage app environments + their repo bindings (CRUD).
                cerver envs                          # list across all apps
                cerver envs --app SLUG               # filter
@@ -145,6 +158,10 @@ func main() {
 		err = cmd.Vaults(args)
 	case "apps", "app":
 		err = cmd.Apps(args)
+	case "keys", "key":
+		err = cmd.Keys(args)
+	case "agents", "agent":
+		err = cmd.Agents(args)
 	case "insights", "insight":
 		err = cmd.Insights(args)
 	case "sessions":
