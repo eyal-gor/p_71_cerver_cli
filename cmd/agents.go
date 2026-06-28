@@ -327,7 +327,7 @@ func agentsCreate(args []string) error {
 		return err
 	}
 	a, err := gw.CreateAgent(ctx, gateway.AgentWrite{
-		Name: *af.name, Slug: *af.slug, AgentsMD: md, Config: cfg, AppSlug: *af.app,
+		Name: *af.name, Slug: *af.slug, AgentsMD: md, Config: cfg, AppSlug: *af.app, Global: *global,
 	})
 	if err != nil {
 		return err
@@ -512,6 +512,10 @@ func agentsPush(args []string) error {
 	body := gateway.AgentWrite{
 		Name: side.Name, Slug: side.Slug, AgentsMD: string(mdBytes),
 		Config: side.Config, AppSlug: side.AppSlug,
+		// An empty app_slug means the sidecar described a global agent — opt in
+		// explicitly so the gateway (which refuses to default to global) accepts
+		// the pull→push roundtrip.
+		Global: side.AppSlug == "",
 	}
 	if ref != "" {
 		cur, err := gw.ResolveAgent(ctx, ref)

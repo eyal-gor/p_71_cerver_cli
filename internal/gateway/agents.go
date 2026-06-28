@@ -78,6 +78,10 @@ type AgentWrite struct {
 	// empty value is dropped, so this can't globalize an existing agent — use
 	// the dashboard for that.)
 	AppSlug string `json:"app_slug,omitempty"`
+	// Global is the explicit opt-in to an account-wide agent. The gateway
+	// rejects a create that is neither app-scoped nor Global, so this must be
+	// set when AppSlug is empty by intent.
+	Global bool `json:"global,omitempty"`
 }
 
 // CreateAgent saves a new agent. POST /v2/agents returns the record directly.
