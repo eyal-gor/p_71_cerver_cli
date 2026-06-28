@@ -65,10 +65,37 @@ func (c *Client) Do(ctx context.Context, method, path string, body, out any) err
 				return err
 			}
 		}
+		// 403 app_key_required: sessions now need an app-scoped key. The CLI's
+		// account-wide token can't create them — guide the user to wire one.
+		if resp.StatusCode == http.StatusForbidden {
+			if err := appKeyRequiredError(body); err != nil {
+				return err
+			}
+		}
 		return fmt.Errorf("%s %s: HTTP %d: %s", method, path, resp.StatusCode, string(body))
 	}
 	if out == nil {
 		return nil
 	}
 	return json.NewDecoder(resp.Body).Decode(out)
+}
+
+// appKeyRequiredError turns the gateway's strict "sessions need an app-scoped
+// key" 403 (code app_key_required) into a clear, actionable message. This
+// machine's cerver token is account-wide and can't create sessions; the fix is
+// to wire an app-scoped key as CERVER_CLI_APP_KEY, which run/compare use
+// automatically. Returns nil for any other 403 (let the raw error through).
+func appKeyRequiredError(body []byte) error {
+	var p struct {
+		Error string `json:"error"`
+		Code  string `json:"code"`
+	}
+	if json.Unmarshal(body, &p) != nil || p.Code != "app_key_required" {
+		return nil
+	}
+	return fmt.Errorf("%s\n\nThis machine's cerver key is account-wide; sessions now require an app-scoped key. Fix it once:\n"+
+		"  1. cerver apps                           # list your app slugs\n"+
+		"  2. cerver keys create --app <app-slug>   # mint a ck_ app key\n"+
+		"  3. echo 'CERVER_CLI_APP_KEY=<that ck_ key>' >> ~/.cerver/cerver.env\n"+
+		"Then re-run — cerver run/compare pick up CERVER_CLI_APP_KEY automatically.", p.Error)
 }
