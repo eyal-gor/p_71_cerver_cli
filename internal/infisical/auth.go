@@ -92,6 +92,49 @@ func LoadCerverToken(ctx context.Context) (string, error) {
 	return New(cfg).Get(ctx, "CERVER_API_TOKEN")
 }
 
+// LoadRunToken returns the API key for session-creating commands (`cerver run`
+// / `cerver compare`). cerver requires sessions to be started with an
+// APP-SCOPED key, so this prefers CERVER_CLI_APP_KEY (the cerver-cli app key)
+// over the account-wide token, which is kept only for management reads
+// (computes / sessions / keys across apps). Falls back to the account-wide
+// token if no app key is configured yet — that fallback stops working once the
+// gateway enforces app-scoped session-create, which is the point.
+func LoadRunToken(ctx context.Context) (string, error) {
+	if k := readCerverEnvKey("CERVER_CLI_APP_KEY"); k != "" {
+		return k, nil
+	}
+	if cfg, err := LoadConfig(); err == nil {
+		if k, _ := New(cfg).Get(ctx, "CERVER_CLI_APP_KEY"); k != "" {
+			return k, nil
+		}
+	}
+	return LoadCerverToken(ctx)
+}
+
+// readCerverEnvKey reads one named key out of ~/.cerver/cerver.env.
+func readCerverEnvKey(name string) string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	f, err := os.Open(filepath.Join(home, ".cerver", "cerver.env"))
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	prefix := name + "="
+	s := bufio.NewScanner(f)
+	for s.Scan() {
+		line := strings.TrimSpace(s.Text())
+		if strings.HasPrefix(line, prefix) {
+			if v := strings.Trim(strings.TrimSpace(line[len(prefix):]), `"'`); v != "" {
+				return v
+			}
+		}
+	}
+	return ""
+}
+
 // readCerverEnv parses ~/.cerver/cerver.env for CERVER_API_KEY or
 // CERVER_API_TOKEN. Either name wins — both have been used by install
 // scripts at different times.

@@ -108,7 +108,7 @@ func Compare(args []string) error {
 		time.Duration(*timeoutSec*len(entries))*time.Second+30*time.Second)
 	defer cancel()
 
-	cerverTok, err := infisical.LoadCerverToken(ctx)
+	cerverTok, err := infisical.LoadRunToken(ctx)
 	if err != nil {
 		return err
 	}
