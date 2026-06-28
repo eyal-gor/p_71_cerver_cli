@@ -82,7 +82,9 @@ flags (new / edit):
   --harness H         preferred CLI: claude | codex | grok
   --model M           preferred model (sonnet, opus, gpt-5-codex, …)
   --workload W        workload hint (coding, …)
-  --app SLUG          scope the agent to one app (default: account-wide)
+  --app SLUG          scope the agent to this app (agents are app-scoped by default)
+  --global            make the agent account-wide instead — the explicit opt-out
+                      of app scoping (new: must pass --app or --global)
   --config-file FILE  raw JSON config (overlaid by the flags above)
 
 pull writes <dir>/AGENTS.md and <dir>/agent.json — edit them in your editor,
@@ -294,11 +296,21 @@ func agentsShow(args []string) error {
 func agentsCreate(args []string) error {
 	fs := flag.NewFlagSet("agents new", flag.ContinueOnError)
 	af := registerAgentFlags(fs)
+	// Agents are app-scoped by default — a global agent must be asked for
+	// explicitly. This prevents an agent silently leaking account-wide just
+	// because the creator forgot --app.
+	global := fs.Bool("global", false, "Make the agent account-wide (visible in every app). Default is app-scoped via --app.")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *af.name == "" {
 		return fmt.Errorf("--name is required")
+	}
+	if *af.app == "" && !*global {
+		return fmt.Errorf("agents are app-scoped by default — pass --app <slug> to scope it, or --global for an account-wide agent")
+	}
+	if *af.app != "" && *global {
+		return fmt.Errorf("--app and --global are mutually exclusive")
 	}
 	md, _, err := af.resolveAgentsMD()
 	if err != nil {
