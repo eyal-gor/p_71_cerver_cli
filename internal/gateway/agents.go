@@ -54,17 +54,15 @@ func (c *Client) GetAgent(ctx context.Context, id string) (Agent, error) {
 
 // ResolveAgent finds an agent by id OR slug, client-side (the list endpoint
 // carries both). Returns a not-found error when nothing matches.
-func (c *Client) ResolveAgent(ctx context.Context, idOrSlug string) (Agent, error) {
-	agents, err := c.ListAgents(ctx, "")
+// ResolveAgent looks an agent up by its id. The id is the canonical handle —
+// slug lookup was removed (a slug is a non-unique label, not a key). Find the id
+// with `cerver agents [query]`, then pass it.
+func (c *Client) ResolveAgent(ctx context.Context, id string) (Agent, error) {
+	a, err := c.GetAgent(ctx, id)
 	if err != nil {
-		return Agent{}, err
+		return Agent{}, fmt.Errorf("no agent with id %q — run `cerver agents [query]` to find it", id)
 	}
-	for _, a := range agents {
-		if a.ID == idOrSlug || a.Slug == idOrSlug {
-			return a, nil
-		}
-	}
-	return Agent{}, fmt.Errorf("no agent matches %q (try `cerver agents`)", idOrSlug)
+	return a, nil
 }
 
 // AgentWrite is the create/update body. Fields are omitempty so an update

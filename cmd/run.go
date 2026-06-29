@@ -34,10 +34,10 @@ func Run(args []string) error {
 	// value and we use it as-is.
 	timeoutSec := fs.Int("timeout", 0, "Max seconds to wait for the reply (default: 180 for claude, 600 for codex, 300 for grok)")
 	resume := fs.String("resume", "", "Session id (or short prefix) to resume — sends prompt as a follow-up to an existing session")
-	// --agent references a saved agent (id or slug). The gateway injects its
-	// AGENTS.md into the session and applies its config defaults; an explicit
-	// --cli / --model here still wins. Manage agents with `cerver agents`.
-	agent := fs.String("agent", "", "Saved agent to apply (id or slug). Drops its AGENTS.md into the session and applies its config defaults.")
+	// --agent references a saved agent by its id (the canonical handle; find it
+	// with `cerver agents [query]`). The gateway injects its AGENTS.md and applies
+	// its config defaults; an explicit --cli / --model here still wins.
+	agent := fs.String("agent", "", "Saved agent to apply — its id (find it with: cerver agents [query]). Injects its AGENTS.md + config defaults.")
 	// --repo plumbs into metadata.repo_url + metadata.repo_ref which
 	// the gateway's session-create reads and forwards to the sandbox
 	// provisioner. The sandbox-relay then clones the repo before the
@@ -188,7 +188,7 @@ func Run(args []string) error {
 			// column.
 			SessionName: shortPromptLabel(prompt, 48),
 			Metadata:    metadata,
-			// Gateway resolves the agent (id or slug), injects its AGENTS.md,
+			// Gateway resolves the agent by id, injects its AGENTS.md,
 			// and applies its config defaults under the explicit fields above.
 			Agent: *agent,
 		})
