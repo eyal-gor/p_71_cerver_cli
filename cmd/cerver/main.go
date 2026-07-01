@@ -29,13 +29,13 @@ commands:
   run        Send a single prompt to one CLI on one compute.
                cerver run --agent reviewer "review my last commit"
   agents     Save reusable agent definitions (AGENTS.md + config). Apply
-               one to a run with: cerver run --agent <slug>
+               one to a run with: cerver run --agent <id>
                  cerver agents                       # list
                  cerver agents new --name "Reviewer" --md-file AGENTS.md --harness claude
-                 cerver agents show <id|slug>
-                 cerver agents pull <id|slug>        # write AGENTS.md + agent.json
-                 cerver agents push [<id|slug>]      # sync local files up
-                 cerver agents rm <id|slug>
+                 cerver agents show <id>
+                 cerver agents pull <id>        # write AGENTS.md + agent.json
+                 cerver agents push [<id>]      # sync local files up
+                 cerver agents rm <id>
   chat       Multi-turn conversation; resume with: cerver chat <sid>
   compare    Run the same prompt across multiple CLIs in parallel.
   computes   List the computes registered to your account.
@@ -69,6 +69,11 @@ commands:
                  cerver insights                  # across all apps
                  cerver insights --app SLUG
                  cerver insights --limit 50 --json
+  admin      Owner-only: inspect + govern all accounts.
+               cerver admin users                 # every account + activity
+               cerver admin users --days 7 --all  # window sums, show test rows
+               cerver admin disable <account_id>  # suspend an account
+               cerver admin enable  <account_id>  # restore it
   sessions   List recent sessions.
   show       Print a session's full transcript (--follow to stream).
   peek       One-screen snapshot of a session (status + last reply).
@@ -164,6 +169,8 @@ func main() {
 		err = cmd.Agents(args)
 	case "insights", "insight":
 		err = cmd.Insights(args)
+	case "admin":
+		err = cmd.Admin(args)
 	case "sessions":
 		err = cmd.Sessions(args)
 	case "show":
