@@ -69,11 +69,6 @@ commands:
                  cerver insights                  # across all apps
                  cerver insights --app SLUG
                  cerver insights --limit 50 --json
-  admin      Owner-only: inspect + govern all accounts.
-               cerver admin users                 # every account + activity
-               cerver admin users --days 7 --all  # window sums, show test rows
-               cerver admin disable <account_id>  # suspend an account
-               cerver admin enable  <account_id>  # restore it
   sessions   List recent sessions.
   show       Print a session's full transcript (--follow to stream).
   peek       One-screen snapshot of a session (status + last reply).
@@ -169,8 +164,6 @@ func main() {
 		err = cmd.Agents(args)
 	case "insights", "insight":
 		err = cmd.Insights(args)
-	case "admin":
-		err = cmd.Admin(args)
 	case "sessions":
 		err = cmd.Sessions(args)
 	case "show":

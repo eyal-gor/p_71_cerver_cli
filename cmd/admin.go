@@ -15,15 +15,17 @@ import (
 	"github.com/eyal-gor/p_71_cerver_cli/internal/infisical"
 )
 
-// Admin exposes the owner-only /v2/admin/* endpoints. It needs an account
-// that the gateway recognizes as the owner — a normal user's token gets a
-// 403. Everything here is read-or-govern, never destructive without an id.
+// Admin is the shared dispatcher behind the standalone `cerver-admin`
+// operator binary. It exposes the owner-only /v2/admin/* endpoints; the
+// gateway gates each to its operator allowlist, so a normal user's token
+// gets a 403. Everything here is read-or-govern, never destructive without
+// an id.
 //
-//	cerver admin users                 # every signed-up account + activity
-//	cerver admin users --days 7        # window the usage sums
-//	cerver admin users --json          # raw JSON
-//	cerver admin disable <account_id>  # suspend an account
-//	cerver admin enable  <account_id>  # restore it
+//	cerver-admin users                 # every signed-up account + activity
+//	cerver-admin users --days 7        # window the usage sums
+//	cerver-admin users --json          # raw JSON
+//	cerver-admin disable <account_id>  # suspend an account
+//	cerver-admin enable  <account_id>  # restore it
 func Admin(args []string) error {
 	sub := "users"
 	rest := args
@@ -65,7 +67,7 @@ func adminUsers(args []string) error {
 
 	rows, err := gw.AdminUsage(ctx, *days)
 	if err != nil {
-		return err
+		return ownerOnly(err)
 	}
 
 	if *jsonOut {
@@ -148,7 +150,7 @@ func adminSetEnabled(args []string, enabled bool) error {
 	gw := gateway.New(tok)
 
 	if err := gw.AdminSetAccountEnabled(ctx, accountID, enabled); err != nil {
-		return err
+		return ownerOnly(err)
 	}
 	verb := "disabled"
 	if enabled {
@@ -156,6 +158,25 @@ func adminSetEnabled(args []string, enabled bool) error {
 	}
 	fmt.Printf("account %s %s\n", accountID, verb)
 	return nil
+}
+
+// ownerOnly rewrites the gateway's 403 ("Operator access required") into a
+// plain sentence. `cerver admin` is gated server-side to accounts in the
+// gateway's operator allowlist — this command is hidden from `cerver help`
+// and useless to everyone else; the real enforcement lives on the gateway,
+// not here.
+func ownerOnly(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "HTTP 403") || strings.Contains(msg, "Operator access") {
+		return errors.New("cerver admin is owner-only — your account isn't an operator")
+	}
+	if strings.Contains(msg, "HTTP 401") {
+		return errors.New("cerver admin needs an operator token — run `cerver login` as the owner account")
+	}
+	return err
 }
 
 // classifyAccount buckets an account by its email so the table can tell
