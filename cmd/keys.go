@@ -82,7 +82,7 @@ func keysList(args []string) error {
 		return nil
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "KEY\tLABEL\tAPP\tLAST USED")
+	fmt.Fprintln(tw, "KEY\tLABEL\tPROJECT\tLAST USED")
 	for _, k := range keys {
 		project := "—"
 		if k.ProjectSlug != nil && *k.ProjectSlug != "" {

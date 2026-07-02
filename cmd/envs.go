@@ -129,7 +129,7 @@ func envsList(args []string) error {
 	}
 
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(tw, "ENV\tAPP\tDEFAULT\tINFISICAL\tREPOS\tID")
+	fmt.Fprintln(tw, "ENV\tPROJECT\tDEFAULT\tINFISICAL\tREPOS\tID")
 	for _, r := range rows {
 		def := ""
 		if r.Env.IsDefault {

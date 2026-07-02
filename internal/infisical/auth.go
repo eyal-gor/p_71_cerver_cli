@@ -94,17 +94,17 @@ func LoadCerverToken(ctx context.Context) (string, error) {
 
 // LoadRunToken returns the API key for session-creating commands (`cerver run`
 // / `cerver compare`). cerver requires sessions to be started with an
-// APP-SCOPED key, so this prefers CERVER_CLI_APP_KEY (the cerver-cli project key)
+// PROJECT-SCOPED key, so this prefers CERVER_CLI_PROJECT_KEY (the cerver-cli project key)
 // over the account-wide token, which is kept only for management reads
 // (computes / sessions / keys across projects). Falls back to the account-wide
 // token if no project key is configured yet — that fallback stops working once the
 // gateway enforces project-scoped session-create, which is the point.
 func LoadRunToken(ctx context.Context) (string, error) {
-	if k := readCerverEnvKey("CERVER_CLI_APP_KEY"); k != "" {
+	if k := readCerverEnvKey("CERVER_CLI_PROJECT_KEY"); k != "" {
 		return k, nil
 	}
 	if cfg, err := LoadConfig(); err == nil {
-		if k, _ := New(cfg).Get(ctx, "CERVER_CLI_APP_KEY"); k != "" {
+		if k, _ := New(cfg).Get(ctx, "CERVER_CLI_PROJECT_KEY"); k != "" {
 			return k, nil
 		}
 	}

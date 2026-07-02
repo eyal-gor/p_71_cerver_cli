@@ -83,7 +83,7 @@ func (c *Client) Do(ctx context.Context, method, path string, body, out any) err
 // projectKeyRequiredError turns the gateway's strict "sessions need a project-scoped
 // key" 403 (code project_key_required) into a clear, actionable message. This
 // machine's cerver token is account-wide and can't create sessions; the fix is
-// to wire a project-scoped key as CERVER_CLI_APP_KEY, which run/compare use
+// to wire a project-scoped key as CERVER_CLI_PROJECT_KEY, which run/compare use
 // automatically. Returns nil for any other 403 (let the raw error through).
 func projectKeyRequiredError(body []byte) error {
 	var p struct {
@@ -96,6 +96,6 @@ func projectKeyRequiredError(body []byte) error {
 	return fmt.Errorf("%s\n\nThis machine's cerver key is account-wide; sessions now require a project-scoped key. Fix it once:\n"+
 		"  1. cerver projects                           # list your project slugs\n"+
 		"  2. cerver keys create --project <project-slug>   # mint a ck_ project key\n"+
-		"  3. echo 'CERVER_CLI_APP_KEY=<that ck_ key>' >> ~/.cerver/cerver.env\n"+
-		"Then re-run — cerver run/compare pick up CERVER_CLI_APP_KEY automatically.", p.Error)
+		"  3. echo 'CERVER_CLI_PROJECT_KEY=<that ck_ key>' >> ~/.cerver/cerver.env\n"+
+		"Then re-run — cerver run/compare pick up CERVER_CLI_PROJECT_KEY automatically.", p.Error)
 }
