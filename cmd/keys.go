@@ -12,13 +12,13 @@ import (
 )
 
 // Keys is the entry point for `cerver keys ...`. Every API key in cerver is
-// bound to exactly one app — the key IS the app's credential. Sessions, env,
-// and permissions follow that app boundary. Creating a key with --app
-// get-or-creates the app; omit --app and the key falls to your "default" app.
+// bound to exactly one project — the key IS the project's credential. Sessions, env,
+// and permissions follow that project boundary. Creating a key with --project
+// get-or-creates the project; omit --project and the key falls to your "default" project.
 //
-//	cerver keys                                  list (masked, with app)
-//	cerver keys create --app kompany [--label "prod server"]
-//	cerver keys create --app widget --publishable      (pk_ for client HTML)
+//	cerver keys                                  list (masked, with project)
+//	cerver keys create --project kompany [--label "prod server"]
+//	cerver keys create --project widget --publishable      (pk_ for client HTML)
 //	cerver keys delete --prefix ck_1a2b
 func Keys(args []string) error {
 	sub := "list"
@@ -42,20 +42,20 @@ func Keys(args []string) error {
 	}
 }
 
-const keysHelpText = `cerver keys — manage app-scoped API keys
+const keysHelpText = `cerver keys — manage project-scoped API keys
 
-Every key is bound to one app. The app is the boundary: a key's sessions, env,
-and permissions all belong to its app. --app get-or-creates the app on the fly;
-omit it and the key lands in your "default" app.
+Every key is bound to one project. The project is the boundary: a key's sessions, env,
+and permissions all belong to its project. --project get-or-creates the project on the fly;
+omit it and the key lands in your "default" project.
 
 usage:
-  cerver keys                                  list your keys (masked) + their app
-  cerver keys create --app kompany [--label "prod server"]
-  cerver keys create --app widget --publishable      mint a pk_ key for client HTML
+  cerver keys                                  list your keys (masked) + their project
+  cerver keys create --project kompany [--label "prod server"]
+  cerver keys create --project widget --publishable      mint a pk_ key for client HTML
   cerver keys delete --prefix ck_1a2b          revoke a key by prefix
 
 A secret key (ck_) is shown ONCE at creation — copy it then. Publishable keys
-(pk_) are spend-capped and safe to ship in a browser; they require --app.
+(pk_) are spend-capped and safe to ship in a browser; they require --project.
 `
 
 func keysList(args []string) error {
@@ -78,35 +78,35 @@ func keysList(args []string) error {
 		return encodeJSON(os.Stdout, keys)
 	}
 	if len(keys) == 0 {
-		fmt.Fprintln(os.Stderr, "no keys yet — create one with `cerver keys create --app ...`")
+		fmt.Fprintln(os.Stderr, "no keys yet — create one with `cerver keys create --project ...`")
 		return nil
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 	fmt.Fprintln(tw, "KEY\tLABEL\tAPP\tLAST USED")
 	for _, k := range keys {
-		app := "—"
-		if k.AppSlug != nil && *k.AppSlug != "" {
-			app = *k.AppSlug
+		project := "—"
+		if k.ProjectSlug != nil && *k.ProjectSlug != "" {
+			project = *k.ProjectSlug
 		}
 		last := "never"
 		if k.LastUsedAt != nil && *k.LastUsedAt != "" {
 			last = *k.LastUsedAt
 		}
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", k.KeyMasked, k.Label, app, last)
+		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\n", k.KeyMasked, k.Label, project, last)
 	}
 	return tw.Flush()
 }
 
 func keysCreate(args []string) error {
 	fs := flag.NewFlagSet("keys create", flag.ContinueOnError)
-	app := fs.String("app", "", "App slug to bind the key to (auto-created; defaults to your \"default\" app)")
+	project := fs.String("project", "", "Project slug to bind the key to (auto-created; defaults to your \"default\" project)")
 	label := fs.String("label", "", "Human label for the key")
-	publishable := fs.Bool("publishable", false, "Mint a spend-capped pk_ key for client HTML (requires --app)")
+	publishable := fs.Bool("publishable", false, "Mint a spend-capped pk_ key for client HTML (requires --project)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *publishable && *app == "" {
-		return fmt.Errorf("--publishable keys must be bound to an app — pass --app SLUG")
+	if *publishable && *project == "" {
+		return fmt.Errorf("--publishable keys must be bound to a project — pass --project SLUG")
 	}
 	kind := ""
 	if *publishable {
@@ -118,15 +118,15 @@ func keysCreate(args []string) error {
 	if err != nil {
 		return err
 	}
-	created, err := gw.CreateKey(ctx, gateway.KeyCreate{Label: *label, AppSlug: *app, Kind: kind})
+	created, err := gw.CreateKey(ctx, gateway.KeyCreate{Label: *label, ProjectSlug: *project, Kind: kind})
 	if err != nil {
 		return err
 	}
-	appSlug := "default"
-	if created.AppSlug != nil && *created.AppSlug != "" {
-		appSlug = *created.AppSlug
+	projectSlug := "default"
+	if created.ProjectSlug != nil && *created.ProjectSlug != "" {
+		projectSlug = *created.ProjectSlug
 	}
-	fmt.Printf("created %s key for app %q\n", created.Kind, appSlug)
+	fmt.Printf("created %s key for project %q\n", created.Kind, projectSlug)
 	fmt.Printf("  %s\n", created.Key)
 	fmt.Fprintln(os.Stderr, "↑ copy this now — a secret key is shown only once.")
 	return nil

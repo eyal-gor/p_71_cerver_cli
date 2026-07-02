@@ -23,7 +23,7 @@ import (
 //	cerver agents                                   list
 //	cerver agents [--json]
 //	cerver agents show <id>
-//	cerver agents new --name "Reviewer" [--md-file AGENTS.md] [--harness claude] [--model opus] [--workload coding] [--slug reviewer] [--app SLUG] [--config-file cfg.json]
+//	cerver agents new --name "Reviewer" [--md-file AGENTS.md] [--harness claude] [--model opus] [--workload coding] [--slug reviewer] [--project SLUG] [--config-file cfg.json]
 //	cerver agents edit <id> [--name ...] [--md-file ...] [--harness ...] [--model ...] [--workload ...] [--config-file ...]
 //	cerver agents rm <id>
 //	cerver agents pull <id> [--dir .]          write AGENTS.md + agent.json locally
@@ -87,9 +87,9 @@ flags (new / edit):
   --harness H         preferred CLI: claude | codex | grok
   --model M           preferred model (sonnet, opus, gpt-5-codex, …)
   --workload W        workload hint (coding, …)
-  --app SLUG          scope the agent to this app (agents are app-scoped by default)
+  --project SLUG          scope the agent to this project (agents are project-scoped by default)
   --global            make the agent account-wide instead — the explicit opt-out
-                      of app scoping (new: must pass --app or --global)
+                      of project scoping (new: must pass --project or --global)
   --config-file FILE  raw JSON config (overlaid by the flags above)
 
 pull writes <dir>/AGENTS.md and <dir>/agent.json — edit them in your editor,
@@ -103,7 +103,7 @@ then 'push' the same dir to sync. push without an id/slug creates a new agent
 type agentFlags struct {
 	name, slug, md, mdFile   *string
 	harness, model, workload *string
-	app, configFile          *string
+	project, configFile          *string
 }
 
 func registerAgentFlags(fs *flag.FlagSet) agentFlags {
@@ -115,7 +115,7 @@ func registerAgentFlags(fs *flag.FlagSet) agentFlags {
 		harness:    fs.String("harness", "", "Preferred CLI: claude | codex | grok"),
 		model:      fs.String("model", "", "Preferred model (sonnet, opus, gpt-5-codex, …)"),
 		workload:   fs.String("workload", "", "Workload hint (e.g. coding)"),
-		app:        fs.String("app", "", "Scope the agent to one app slug (default: account-wide)"),
+		project:        fs.String("project", "", "Scope the agent to one project slug (default: account-wide)"),
 		configFile: fs.String("config-file", "", "Raw JSON config file (overlaid by --harness/--model/--workload)"),
 	}
 }
@@ -171,7 +171,7 @@ func (af agentFlags) buildConfig() (map[string]any, bool, error) {
 // positional id/slug.
 var agentValueFlags = map[string]bool{
 	"name": true, "slug": true, "md": true, "md-file": true, "harness": true,
-	"model": true, "workload": true, "app": true, "config-file": true, "dir": true,
+	"model": true, "workload": true, "project": true, "config-file": true, "dir": true,
 }
 
 // splitAgentRef pulls the positional id/slug out of a subcommand's args and
@@ -215,7 +215,7 @@ func cfgStr(cfg map[string]any, key string) string {
 func agentsList(args []string) error {
 	fs := flag.NewFlagSet("agents", flag.ContinueOnError)
 	jsonOut := fs.Bool("json", false, "Output JSON")
-	app := fs.String("app", "", "Filter to one app's agents + globals (default: all)")
+	project := fs.String("project", "", "Filter to one project's agents + globals (default: all)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -228,7 +228,7 @@ func agentsList(args []string) error {
 	if err != nil {
 		return err
 	}
-	agents, err := gw.ListAgents(ctx, *app)
+	agents, err := gw.ListAgents(ctx, *project)
 	if err != nil {
 		return err
 	}
@@ -260,7 +260,7 @@ func agentsList(args []string) error {
 		if m == "" {
 			m = "—"
 		}
-		scope := a.AppSlug
+		scope := a.ProjectSlug
 		if scope == "" {
 			scope = "global"
 		}
@@ -293,8 +293,8 @@ func agentsShow(args []string) error {
 		return encodeJSON(os.Stdout, a)
 	}
 	fmt.Printf("%s  (slug %s, %s)\n", a.Name, a.Slug, a.ID)
-	if a.AppSlug != "" {
-		fmt.Printf("scope:  app %s\n", a.AppSlug)
+	if a.ProjectSlug != "" {
+		fmt.Printf("scope:  project %s\n", a.ProjectSlug)
 	} else {
 		fmt.Printf("scope:  global\n")
 	}
@@ -314,21 +314,21 @@ func agentsShow(args []string) error {
 func agentsCreate(args []string) error {
 	fs := flag.NewFlagSet("agents new", flag.ContinueOnError)
 	af := registerAgentFlags(fs)
-	// Agents are app-scoped by default — a global agent must be asked for
+	// Agents are project-scoped by default — a global agent must be asked for
 	// explicitly. This prevents an agent silently leaking account-wide just
-	// because the creator forgot --app.
-	global := fs.Bool("global", false, "Make the agent account-wide (visible in every app). Default is app-scoped via --app.")
+	// because the creator forgot --project.
+	global := fs.Bool("global", false, "Make the agent account-wide (visible in every project). Default is project-scoped via --project.")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *af.name == "" {
 		return fmt.Errorf("--name is required")
 	}
-	if *af.app == "" && !*global {
-		return fmt.Errorf("agents are app-scoped by default — pass --app <slug> to scope it, or --global for an account-wide agent")
+	if *af.project == "" && !*global {
+		return fmt.Errorf("agents are project-scoped by default — pass --project <slug> to scope it, or --global for an account-wide agent")
 	}
-	if *af.app != "" && *global {
-		return fmt.Errorf("--app and --global are mutually exclusive")
+	if *af.project != "" && *global {
+		return fmt.Errorf("--project and --global are mutually exclusive")
 	}
 	md, _, err := af.resolveAgentsMD()
 	if err != nil {
@@ -345,7 +345,7 @@ func agentsCreate(args []string) error {
 		return err
 	}
 	a, err := gw.CreateAgent(ctx, gateway.AgentWrite{
-		Name: *af.name, Slug: *af.slug, AgentsMD: md, Config: cfg, AppSlug: *af.app, Global: *global,
+		Name: *af.name, Slug: *af.slug, AgentsMD: md, Config: cfg, ProjectSlug: *af.project, Global: *global,
 	})
 	if err != nil {
 		return err
@@ -379,7 +379,7 @@ func agentsEdit(args []string) error {
 		return err
 	}
 
-	body := gateway.AgentWrite{Name: *af.name, Slug: *af.slug, AppSlug: *af.app}
+	body := gateway.AgentWrite{Name: *af.name, Slug: *af.slug, ProjectSlug: *af.project}
 	if md, ok, err := af.resolveAgentsMD(); err != nil {
 		return err
 	} else if ok {
@@ -441,7 +441,7 @@ type agentFile struct {
 	Name    string         `json:"name"`
 	Slug    string         `json:"slug"`
 	Config  map[string]any `json:"config,omitempty"`
-	AppSlug string         `json:"app_slug,omitempty"`
+	ProjectSlug string         `json:"project_slug,omitempty"`
 }
 
 func agentsPull(args []string) error {
@@ -471,7 +471,7 @@ func agentsPull(args []string) error {
 	if err := os.WriteFile(mdPath, []byte(a.AgentsMD), 0o644); err != nil {
 		return err
 	}
-	side := agentFile{ID: a.ID, Name: a.Name, Slug: a.Slug, Config: a.Config, AppSlug: a.AppSlug}
+	side := agentFile{ID: a.ID, Name: a.Name, Slug: a.Slug, Config: a.Config, ProjectSlug: a.ProjectSlug}
 	sb, _ := json.MarshalIndent(side, "", "  ")
 	jsonPath := filepath.Join(*dir, "agent.json")
 	if err := os.WriteFile(jsonPath, append(sb, '\n'), 0o644); err != nil {
@@ -529,11 +529,11 @@ func agentsPush(args []string) error {
 
 	body := gateway.AgentWrite{
 		Name: side.Name, Slug: side.Slug, AgentsMD: string(mdBytes),
-		Config: side.Config, AppSlug: side.AppSlug,
-		// An empty app_slug means the sidecar described a global agent — opt in
+		Config: side.Config, ProjectSlug: side.ProjectSlug,
+		// An empty project_slug means the sidecar described a global agent — opt in
 		// explicitly so the gateway (which refuses to default to global) accepts
 		// the pull→push roundtrip.
-		Global: side.AppSlug == "",
+		Global: side.ProjectSlug == "",
 	}
 	if ref != "" {
 		cur, err := gw.ResolveAgent(ctx, ref)

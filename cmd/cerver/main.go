@@ -39,24 +39,24 @@ commands:
   chat       Multi-turn conversation; resume with: cerver chat <sid>
   compare    Run the same prompt across multiple CLIs in parallel.
   computes   List the computes registered to your account.
-  apps       Manage your apps (per-account namespaces for sessions/keys/billing).
-               cerver apps                          # list with this month's stats
-               cerver apps create --name "Kompany" [--slug kompany]
-               cerver apps set-vault --slug kompany --vault ifc_…
-               cerver apps delete --slug kompany
-  keys       Manage app-scoped API keys (every key belongs to one app).
-               cerver keys                          # list (masked) + their app
-               cerver keys create --app kompany [--label "prod server"]
+  projects       Manage your projects (per-account namespaces for sessions/keys/billing).
+               cerver projects                          # list with this month's stats
+               cerver projects create --name "Kompany" [--slug kompany]
+               cerver projects set-vault --slug kompany --vault ifc_…
+               cerver projects delete --slug kompany
+  keys       Manage project-scoped API keys (every key belongs to one project).
+               cerver keys                          # list (masked) + their project
+               cerver keys create --project kompany [--label "prod server"]
                cerver keys delete --prefix ck_1a2b
-  envs       Manage app environments + their repo bindings (CRUD).
-               cerver envs                          # list across all apps
-               cerver envs --app SLUG               # filter
-               cerver envs create --app SLUG --slug prod [--default]
-               cerver envs update --app SLUG --env prod --name "Prod"
-               cerver envs delete --app SLUG --env prod
-               cerver envs repos --app SLUG --env prod
-               cerver envs repos add --app SLUG --env prod --url URL [--primary]
-               cerver envs repos rm  --app SLUG --env prod --repo-id rep_…
+  envs       Manage project environments + their repo bindings (CRUD).
+               cerver envs                          # list across all projects
+               cerver envs --project SLUG               # filter
+               cerver envs create --project SLUG --slug prod [--default]
+               cerver envs update --project SLUG --env prod --name "Prod"
+               cerver envs delete --project SLUG --env prod
+               cerver envs repos --project SLUG --env prod
+               cerver envs repos add --project SLUG --env prod --url URL [--primary]
+               cerver envs repos rm  --project SLUG --env prod --repo-id rep_…
   vaults     Manage your Infisical vaults (per-account secret connections).
                cerver vaults                        # list
                cerver vaults add --label N --client-id ID --client-secret SEC --project-id PID [--default]
@@ -66,8 +66,8 @@ commands:
                cerver vaults delete --id ifc_…
   insights   Run the "read between the lines" agent over recent sessions —
                returns top user asks, stuck patterns, and suggested features.
-                 cerver insights                  # across all apps
-                 cerver insights --app SLUG
+                 cerver insights                  # across all projects
+                 cerver insights --project SLUG
                  cerver insights --limit 50 --json
   sessions   List recent sessions.
   show       Print a session's full transcript (--follow to stream).
@@ -156,8 +156,8 @@ func main() {
 		err = cmd.Envs(args)
 	case "vaults", "vault":
 		err = cmd.Vaults(args)
-	case "apps", "app":
-		err = cmd.Apps(args)
+	case "projects", "project":
+		err = cmd.Projects(args)
 	case "keys", "key":
 		err = cmd.Keys(args)
 	case "agents", "agent":

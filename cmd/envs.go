@@ -19,14 +19,14 @@ import (
 //
 // Verb shape:
 //
-//	cerver envs                              list every env across every app
-//	cerver envs [--app slug] [--json]        list (filtered)
-//	cerver envs create --app slug --slug s [--name N] [--default] [--infisical ifc_]
-//	cerver envs update --app slug --env slug [--name N] [--default] [--infisical ifc_|none]
-//	cerver envs delete --app slug --env slug
-//	cerver envs repos  --app slug --env slug [--json]
-//	cerver envs repos add --app slug --env slug --url URL [--ref R] [--primary]
-//	cerver envs repos rm  --app slug --env slug --repo-id rep_...
+//	cerver envs                              list every env across every project
+//	cerver envs [--project slug] [--json]        list (filtered)
+//	cerver envs create --project slug --slug s [--name N] [--default] [--infisical ifc_]
+//	cerver envs update --project slug --env slug [--name N] [--default] [--infisical ifc_|none]
+//	cerver envs delete --project slug --env slug
+//	cerver envs repos  --project slug --env slug [--json]
+//	cerver envs repos add --project slug --env slug --url URL [--ref R] [--primary]
+//	cerver envs repos rm  --project slug --env slug --repo-id rep_...
 //
 // The default verb (no subcommand) is `list`.
 func Envs(args []string) error {
@@ -55,22 +55,22 @@ func Envs(args []string) error {
 	}
 }
 
-const envsHelpText = `cerver envs — manage app environments
+const envsHelpText = `cerver envs — manage project environments
 
 usage:
-  cerver envs                              list every env across every app
-  cerver envs [--app slug] [--json]
-  cerver envs create --app slug --slug s [--name N] [--default] [--infisical ifc_]
-  cerver envs update --app slug --env slug [--name N] [--default] [--infisical ifc_|none]
-  cerver envs delete --app slug --env slug
-  cerver envs repos  --app slug --env slug [--json]
-  cerver envs repos add --app slug --env slug --url URL [--ref R] [--primary]
-  cerver envs repos rm  --app slug --env slug --repo-id rep_...
+  cerver envs                              list every env across every project
+  cerver envs [--project slug] [--json]
+  cerver envs create --project slug --slug s [--name N] [--default] [--infisical ifc_]
+  cerver envs update --project slug --env slug [--name N] [--default] [--infisical ifc_|none]
+  cerver envs delete --project slug --env slug
+  cerver envs repos  --project slug --env slug [--json]
+  cerver envs repos add --project slug --env slug --url URL [--ref R] [--primary]
+  cerver envs repos rm  --project slug --env slug --repo-id rep_...
 `
 
 func envsList(args []string) error {
 	fs := flag.NewFlagSet("envs list", flag.ContinueOnError)
-	app := fs.String("app", "", "App slug (omit to list every app's envs)")
+	project := fs.String("project", "", "Project slug (omit to list every project's envs)")
 	jsonOut := fs.Bool("json", false, "Emit raw JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -84,37 +84,37 @@ func envsList(args []string) error {
 	}
 
 	type row struct {
-		AppSlug string                `json:"app_slug"`
-		AppName string                `json:"app_name"`
+		ProjectSlug string                `json:"project_slug"`
+		ProjectName string                `json:"project_name"`
 		Env     gateway.Environment   `json:"env"`
 	}
 	var rows []row
 
-	if *app != "" {
-		envs, err := gw.ListEnvironments(ctx, *app)
+	if *project != "" {
+		envs, err := gw.ListEnvironments(ctx, *project)
 		if err != nil {
 			return err
 		}
 		for _, e := range envs {
-			rows = append(rows, row{AppSlug: e.AppSlug, AppName: e.AppName, Env: e})
+			rows = append(rows, row{ProjectSlug: e.ProjectSlug, ProjectName: e.ProjectName, Env: e})
 		}
 	} else {
-		// Fan out across every app on the account so the bare `cerver
+		// Fan out across every project on the account so the bare `cerver
 		// envs` view matches the /dashboard/environments page.
-		apps, err := gw.ListApps(ctx)
+		projects, err := gw.ListProjects(ctx)
 		if err != nil {
 			return err
 		}
-		for _, a := range apps {
+		for _, a := range projects {
 			envs, err := gw.ListEnvironments(ctx, a.Slug)
 			if err != nil {
-				// A single app failing shouldn't blank the whole table;
+				// A single project failing shouldn't blank the whole table;
 				// surface a warning row and keep going.
 				fmt.Fprintf(os.Stderr, "warn: %s envs: %v\n", a.Slug, err)
 				continue
 			}
 			for _, e := range envs {
-				rows = append(rows, row{AppSlug: a.Slug, AppName: a.Name, Env: e})
+				rows = append(rows, row{ProjectSlug: a.Slug, ProjectName: a.Name, Env: e})
 			}
 		}
 	}
@@ -124,7 +124,7 @@ func envsList(args []string) error {
 	}
 
 	if len(rows) == 0 {
-		fmt.Fprintln(os.Stderr, "no environments yet — create one with `cerver envs create --app SLUG --slug prod`")
+		fmt.Fprintln(os.Stderr, "no environments yet — create one with `cerver envs create --project SLUG --slug prod`")
 		return nil
 	}
 
@@ -138,29 +138,29 @@ func envsList(args []string) error {
 		inf := ""
 		if r.Env.InfisicalConfigLabel != nil && *r.Env.InfisicalConfigLabel != "" {
 			inf = *r.Env.InfisicalConfigLabel
-		} else if r.Env.AppInfisicalConfigLabel != nil && *r.Env.AppInfisicalConfigLabel != "" {
-			inf = *r.Env.AppInfisicalConfigLabel + " (app)"
+		} else if r.Env.ProjectInfisicalConfigLabel != nil && *r.Env.ProjectInfisicalConfigLabel != "" {
+			inf = *r.Env.ProjectInfisicalConfigLabel + " (project)"
 		} else {
 			inf = "—"
 		}
 		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%d\t%s\n",
-			r.Env.Slug, r.AppSlug, def, inf, r.Env.RepoCount, r.Env.ID)
+			r.Env.Slug, r.ProjectSlug, def, inf, r.Env.RepoCount, r.Env.ID)
 	}
 	return tw.Flush()
 }
 
 func envsCreate(args []string) error {
 	fs := flag.NewFlagSet("envs create", flag.ContinueOnError)
-	app := fs.String("app", "", "App slug (required)")
+	project := fs.String("project", "", "Project slug (required)")
 	slug := fs.String("slug", "", "Env slug e.g. prod / staging (required)")
 	name := fs.String("name", "", "Env display name (defaults to slug)")
-	def := fs.Bool("default", false, "Mark as the app's default env")
-	infi := fs.String("infisical", "", "Infisical config id to override the app's default")
+	def := fs.Bool("default", false, "Mark as the project's default env")
+	infi := fs.String("infisical", "", "Infisical config id to override the project's default")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *app == "" || *slug == "" {
-		return fmt.Errorf("--app and --slug are required")
+	if *project == "" || *slug == "" {
+		return fmt.Errorf("--project and --slug are required")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -174,17 +174,17 @@ func envsCreate(args []string) error {
 	if *infi != "" {
 		body.InfisicalConfigID = infi
 	}
-	env, err := gw.CreateEnvironment(ctx, *app, body)
+	env, err := gw.CreateEnvironment(ctx, *project, body)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("created %s/%s (id=%s, default=%v)\n", env.AppSlug, env.Slug, env.ID, env.IsDefault)
+	fmt.Printf("created %s/%s (id=%s, default=%v)\n", env.ProjectSlug, env.Slug, env.ID, env.IsDefault)
 	return nil
 }
 
 func envsUpdate(args []string) error {
 	fs := flag.NewFlagSet("envs update", flag.ContinueOnError)
-	app := fs.String("app", "", "App slug (required)")
+	project := fs.String("project", "", "Project slug (required)")
 	envSlug := fs.String("env", "", "Env slug (required)")
 	name := fs.String("name", "", "New display name")
 	def := fs.String("default", "", "set 'true' to mark as default, 'false' to unset")
@@ -192,8 +192,8 @@ func envsUpdate(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *app == "" || *envSlug == "" {
-		return fmt.Errorf("--app and --env are required")
+	if *project == "" || *envSlug == "" {
+		return fmt.Errorf("--project and --env are required")
 	}
 
 	body := gateway.EnvUpdate{}
@@ -219,23 +219,23 @@ func envsUpdate(args []string) error {
 	if err != nil {
 		return err
 	}
-	env, err := gw.UpdateEnvironment(ctx, *app, *envSlug, body)
+	env, err := gw.UpdateEnvironment(ctx, *project, *envSlug, body)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("updated %s/%s (default=%v)\n", env.AppSlug, env.Slug, env.IsDefault)
+	fmt.Printf("updated %s/%s (default=%v)\n", env.ProjectSlug, env.Slug, env.IsDefault)
 	return nil
 }
 
 func envsDelete(args []string) error {
 	fs := flag.NewFlagSet("envs delete", flag.ContinueOnError)
-	app := fs.String("app", "", "App slug (required)")
+	project := fs.String("project", "", "Project slug (required)")
 	envSlug := fs.String("env", "", "Env slug (required)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *app == "" || *envSlug == "" {
-		return fmt.Errorf("--app and --env are required")
+	if *project == "" || *envSlug == "" {
+		return fmt.Errorf("--project and --env are required")
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -244,10 +244,10 @@ func envsDelete(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := gw.DeleteEnvironment(ctx, *app, *envSlug); err != nil {
+	if err := gw.DeleteEnvironment(ctx, *project, *envSlug); err != nil {
 		return err
 	}
-	fmt.Printf("archived %s/%s\n", *app, *envSlug)
+	fmt.Printf("archived %s/%s\n", *project, *envSlug)
 	return nil
 }
 
@@ -273,14 +273,14 @@ func envsRepos(args []string) error {
 
 func envsReposList(args []string) error {
 	fs := flag.NewFlagSet("envs repos list", flag.ContinueOnError)
-	app := fs.String("app", "", "App slug (required)")
+	project := fs.String("project", "", "Project slug (required)")
 	envSlug := fs.String("env", "", "Env slug (required)")
 	jsonOut := fs.Bool("json", false, "Emit raw JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *app == "" || *envSlug == "" {
-		return fmt.Errorf("--app and --env are required")
+	if *project == "" || *envSlug == "" {
+		return fmt.Errorf("--project and --env are required")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -288,7 +288,7 @@ func envsReposList(args []string) error {
 	if err != nil {
 		return err
 	}
-	repos, err := gw.ListEnvRepos(ctx, *app, *envSlug)
+	repos, err := gw.ListEnvRepos(ctx, *project, *envSlug)
 	if err != nil {
 		return err
 	}
@@ -296,7 +296,7 @@ func envsReposList(args []string) error {
 		return encodeJSON(os.Stdout, repos)
 	}
 	if len(repos) == 0 {
-		fmt.Fprintln(os.Stderr, "no repos yet — add one with `cerver envs repos add --app ... --env ... --url ...`")
+		fmt.Fprintln(os.Stderr, "no repos yet — add one with `cerver envs repos add --project ... --env ... --url ...`")
 		return nil
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
@@ -317,7 +317,7 @@ func envsReposList(args []string) error {
 
 func envsReposAdd(args []string) error {
 	fs := flag.NewFlagSet("envs repos add", flag.ContinueOnError)
-	app := fs.String("app", "", "App slug (required)")
+	project := fs.String("project", "", "Project slug (required)")
 	envSlug := fs.String("env", "", "Env slug (required)")
 	repoURL := fs.String("url", "", "Repo URL e.g. https://github.com/o/r.git (required)")
 	ref := fs.String("ref", "", "Optional git ref")
@@ -325,8 +325,8 @@ func envsReposAdd(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *app == "" || *envSlug == "" || *repoURL == "" {
-		return fmt.Errorf("--app, --env and --url are required")
+	if *project == "" || *envSlug == "" || *repoURL == "" {
+		return fmt.Errorf("--project, --env and --url are required")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -334,26 +334,26 @@ func envsReposAdd(args []string) error {
 	if err != nil {
 		return err
 	}
-	rep, err := gw.CreateEnvRepo(ctx, *app, *envSlug, gateway.EnvRepoCreate{
+	rep, err := gw.CreateEnvRepo(ctx, *project, *envSlug, gateway.EnvRepoCreate{
 		RepoURL: *repoURL, RepoRef: *ref, IsPrimary: *primary,
 	})
 	if err != nil {
 		return err
 	}
-	fmt.Printf("added %s (primary=%v) to %s/%s\n", rep.ID, rep.IsPrimary, *app, *envSlug)
+	fmt.Printf("added %s (primary=%v) to %s/%s\n", rep.ID, rep.IsPrimary, *project, *envSlug)
 	return nil
 }
 
 func envsReposRm(args []string) error {
 	fs := flag.NewFlagSet("envs repos rm", flag.ContinueOnError)
-	app := fs.String("app", "", "App slug (required)")
+	project := fs.String("project", "", "Project slug (required)")
 	envSlug := fs.String("env", "", "Env slug (required)")
 	repoID := fs.String("repo-id", "", "Repo id e.g. rep_... (required)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *app == "" || *envSlug == "" || *repoID == "" {
-		return fmt.Errorf("--app, --env and --repo-id are required")
+	if *project == "" || *envSlug == "" || *repoID == "" {
+		return fmt.Errorf("--project, --env and --repo-id are required")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -361,10 +361,10 @@ func envsReposRm(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := gw.DeleteEnvRepo(ctx, *app, *envSlug, *repoID); err != nil {
+	if err := gw.DeleteEnvRepo(ctx, *project, *envSlug, *repoID); err != nil {
 		return err
 	}
-	fmt.Printf("removed %s from %s/%s\n", *repoID, *app, *envSlug)
+	fmt.Printf("removed %s from %s/%s\n", *repoID, *project, *envSlug)
 	return nil
 }
 

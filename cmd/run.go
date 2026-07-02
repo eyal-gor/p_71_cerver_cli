@@ -155,9 +155,9 @@ func Run(args []string) error {
 		// its in-process slot on CLI exit (separate concern).
 		metadata := map[string]any{
 			"cli_tool": *cli,
-			// Identifies the originating app/client to the gateway so
-			// the dashboard's "App" column reads "cerver-cli" instead
-			// of blank. Custom apps (e.g. invest-watch's chat panel)
+			// Identifies the originating project/client to the gateway so
+			// the dashboard's "Project" column reads "cerver-cli" instead
+			// of blank. Custom projects (e.g. invest-watch's chat panel)
 			// set their own metadata.source value.
 			"source": "cerver-cli",
 		}

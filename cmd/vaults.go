@@ -65,8 +65,8 @@ usage:
   cerver vaults delete --id ifc_...
 
 A "vault" is one Infisical project that cerver can read/write on your
-behalf. Bind a vault to an app or environment with:
-  cerver envs update --app SLUG --env ENV --infisical ifc_...
+behalf. Bind a vault to a project or environment with:
+  cerver envs update --project SLUG --env ENV --infisical ifc_...
 `
 
 func vaultsList(args []string) error {

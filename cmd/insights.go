@@ -14,13 +14,13 @@ import (
 // what users keep asking, where they get stuck, what features the
 // product should ship next.
 //
-//	cerver insights                       # default: last 30 sessions across all apps
-//	cerver insights --app SLUG            # filter to one app
+//	cerver insights                       # default: last 30 sessions across all projects
+//	cerver insights --project SLUG            # filter to one project
 //	cerver insights --limit 50            # consider more sessions
 //	cerver insights --json                # raw JSON for piping
 func Insights(args []string) error {
 	fs := flag.NewFlagSet("insights", flag.ContinueOnError)
-	app := fs.String("app", "", "App slug to scope the analysis (omit for everything)")
+	project := fs.String("project", "", "Project slug to scope the analysis (omit for everything)")
 	limit := fs.Int("limit", 0, "Max sessions to consider (server caps at 100)")
 	days := fs.Int("days", 0, "Look-back window in days")
 	jsonOut := fs.Bool("json", false, "Emit raw JSON instead of a formatted report")
@@ -35,7 +35,7 @@ func Insights(args []string) error {
 	if err != nil {
 		return err
 	}
-	report, err := gw.GenerateInsights(ctx, *app, *days, *limit)
+	report, err := gw.GenerateInsights(ctx, *project, *days, *limit)
 	if err != nil {
 		return err
 	}
@@ -51,9 +51,9 @@ func Insights(args []string) error {
 		return nil
 	}
 	fmt.Println()
-	scope := "all apps"
-	if *app != "" {
-		scope = "app " + *app
+	scope := "all projects"
+	if *project != "" {
+		scope = "project " + *project
 	}
 	fmt.Printf("INSIGHTS · %s · %d sessions seen / %d analyzed\n", scope, report.SessionCount, report.AnalyzedSessions)
 	fmt.Println(strings.Repeat("─", 72))

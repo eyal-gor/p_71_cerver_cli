@@ -15,12 +15,12 @@ type InsightsReport struct {
 }
 
 // GenerateInsights asks the gateway to run the analysis agent over the
-// account's recent sessions. AppSlug optional (filters); days/limit
+// account's recent sessions. ProjectSlug optional (filters); days/limit
 // optional (server picks safe defaults).
-func (c *Client) GenerateInsights(ctx context.Context, appSlug string, days, limit int) (*InsightsReport, error) {
+func (c *Client) GenerateInsights(ctx context.Context, projectSlug string, days, limit int) (*InsightsReport, error) {
 	body := map[string]any{}
-	if appSlug != "" {
-		body["app_slug"] = appSlug
+	if projectSlug != "" {
+		body["project_slug"] = projectSlug
 	}
 	if days > 0 {
 		body["days"] = days

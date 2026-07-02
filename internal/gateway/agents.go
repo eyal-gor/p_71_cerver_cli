@@ -17,9 +17,9 @@ type Agent struct {
 	Slug     string         `json:"slug"`
 	AgentsMD string         `json:"agents_md"`
 	Config   map[string]any `json:"config"`
-	// AppSlug is the owning app's slug, or empty for a global agent (usable in
-	// any app + the CLI). Mirrors the API-key global/app-scoped model.
-	AppSlug   string `json:"app_slug"`
+	// ProjectSlug is the owning project's slug, or empty for a global agent (usable in
+	// any project + the CLI). Mirrors the API-key global/project-scoped model.
+	ProjectSlug   string `json:"project_slug"`
 	CreatedAt string `json:"created_at"`
 	UpdatedAt string `json:"updated_at"`
 }
@@ -28,12 +28,12 @@ type agentsResp struct {
 	Agents []Agent `json:"agents"`
 }
 
-// ListAgents returns saved agents, newest first. An appScope (an app slug)
-// narrows to that app's agents plus globals; empty returns everything.
-func (c *Client) ListAgents(ctx context.Context, appScope string) ([]Agent, error) {
+// ListAgents returns saved agents, newest first. An projectScope (a project slug)
+// narrows to that project's agents plus globals; empty returns everything.
+func (c *Client) ListAgents(ctx context.Context, projectScope string) ([]Agent, error) {
 	path := "/v2/agents"
-	if appScope != "" {
-		path += "?app=" + url.QueryEscape(appScope)
+	if projectScope != "" {
+		path += "?project=" + url.QueryEscape(projectScope)
 	}
 	var resp agentsResp
 	if err := c.Do(ctx, "GET", path, nil, &resp); err != nil {
@@ -72,13 +72,13 @@ type AgentWrite struct {
 	Slug     string         `json:"slug,omitempty"`
 	AgentsMD string         `json:"agents_md,omitempty"`
 	Config   map[string]any `json:"config,omitempty"`
-	// AppSlug scopes the agent to an app; empty = global. (omitempty means an
+	// ProjectSlug scopes the agent to a project; empty = global. (omitempty means an
 	// empty value is dropped, so this can't globalize an existing agent — use
 	// the dashboard for that.)
-	AppSlug string `json:"app_slug,omitempty"`
+	ProjectSlug string `json:"project_slug,omitempty"`
 	// Global is the explicit opt-in to an account-wide agent. The gateway
-	// rejects a create that is neither app-scoped nor Global, so this must be
-	// set when AppSlug is empty by intent.
+	// rejects a create that is neither project-scoped nor Global, so this must be
+	// set when ProjectSlug is empty by intent.
 	Global bool `json:"global,omitempty"`
 }
 
