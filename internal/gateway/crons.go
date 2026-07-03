@@ -27,7 +27,10 @@ type CronCreate struct {
 	Prompt    string `json:"prompt,omitempty"`
 	AgentID   string `json:"agent_id,omitempty"`
 	Name      string `json:"name,omitempty"`
-	ComputeID string `json:"compute_id,omitempty"`
+	ComputeID string            `json:"compute_id,omitempty"`
+	URL       string            `json:"url,omitempty"`
+	Method    string            `json:"method,omitempty"`
+	Headers   map[string]string `json:"headers,omitempty"`
 	Harness   string `json:"harness,omitempty"`
 	Model     string `json:"model,omitempty"`
 }

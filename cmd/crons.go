@@ -50,6 +50,7 @@ usage:
   cerver crons --project SLUG                                list
   cerver crons create --project SLUG --schedule "0 9 * * *" --prompt "…" [--on COMPUTE] [--harness claude]
   cerver crons create --project SLUG --schedule "*/15 * * * *" --agent <agent-id>
+  cerver crons create --project SLUG --schedule "* * * * *" --url https://… [--header "x-secret: …"]
   cerver crons run <id> --project SLUG                       fire now (ignores schedule)
   cerver crons rm  <id> --project SLUG
 
@@ -115,6 +116,8 @@ func cronsCreate(args []string) error {
 	on := fs.String("on", "", "Compute id to run on, or \"policy\" to let the project's compute policy place it")
 	harness := fs.String("harness", "", "CLI: claude | codex | grok")
 	model := fs.String("model", "", "Model override")
+	webhookURL := fs.String("url", "", "Webhook cron: https URL to call on schedule (instead of an agent run)")
+	header := fs.String("header", "", "Webhook header, \"Name: value\" (e.g. \"x-cron-secret: …\")")
 	jsonOut := fs.Bool("json", false, "Output JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -122,8 +125,16 @@ func cronsCreate(args []string) error {
 	if *project == "" || *schedule == "" {
 		return fmt.Errorf("--project and --schedule are required")
 	}
-	if *prompt == "" && *agent == "" {
-		return fmt.Errorf("provide --prompt or --agent")
+	if *prompt == "" && *agent == "" && *webhookURL == "" {
+		return fmt.Errorf("provide --prompt, --agent, or --url (webhook)")
+	}
+	var headers map[string]string
+	if *header != "" {
+		parts := strings.SplitN(*header, ":", 2)
+		if len(parts) != 2 {
+			return fmt.Errorf("--header must be \"Name: value\"")
+		}
+		headers = map[string]string{strings.TrimSpace(parts[0]): strings.TrimSpace(parts[1])}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -134,6 +145,7 @@ func cronsCreate(args []string) error {
 	cr, err := gw.CreateCron(ctx, *project, gateway.CronCreate{
 		Schedule: *schedule, Prompt: *prompt, AgentID: *agent, Name: *name,
 		ComputeID: *on, Harness: *harness, Model: *model,
+		URL: *webhookURL, Headers: headers,
 	})
 	if err != nil {
 		return err
