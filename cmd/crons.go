@@ -54,6 +54,8 @@ usage:
   cerver crons rm  <id> --project SLUG
 
 Schedules are 5-field cron expressions in UTC (min hour dom month dow).
+--on policy defers compute placement to the project's compute policy (set via
+routing-policy compute.consume.providers) — offline-relay fallback included.
 Each run is a normal session on the project — its spend cap and attribution
 apply automatically, so a runaway cron can't blow the budget.
 `
@@ -110,7 +112,7 @@ func cronsCreate(args []string) error {
 	prompt := fs.String("prompt", "", "Task to run")
 	agent := fs.String("agent", "", "Saved agent id to run (instead of --prompt)")
 	name := fs.String("name", "", "Cron name")
-	on := fs.String("on", "", "Compute id to run on")
+	on := fs.String("on", "", "Compute id to run on, or \"policy\" to let the project's compute policy place it")
 	harness := fs.String("harness", "", "CLI: claude | codex | grok")
 	model := fs.String("model", "", "Model override")
 	jsonOut := fs.Bool("json", false, "Output JSON")
