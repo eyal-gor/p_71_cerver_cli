@@ -146,11 +146,8 @@ func cronsCreate(args []string) error {
 func cronsRun(args []string) error {
 	fs := flag.NewFlagSet("crons run", flag.ContinueOnError)
 	project := fs.String("project", "", "Project slug (required)")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	rest := fs.Args()
-	if *project == "" || len(rest) == 0 {
+	id := parseIDAndFlags(fs, args)
+	if *project == "" || id == "" {
 		return fmt.Errorf("usage: cerver crons run <id> --project SLUG")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -159,7 +156,7 @@ func cronsRun(args []string) error {
 	if err != nil {
 		return err
 	}
-	sid, err := gw.RunCron(ctx, *project, rest[0])
+	sid, err := gw.RunCron(ctx, *project, id)
 	if err != nil {
 		return err
 	}
@@ -170,11 +167,8 @@ func cronsRun(args []string) error {
 func cronsDelete(args []string) error {
 	fs := flag.NewFlagSet("crons delete", flag.ContinueOnError)
 	project := fs.String("project", "", "Project slug (required)")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-	rest := fs.Args()
-	if *project == "" || len(rest) == 0 {
+	id := parseIDAndFlags(fs, args)
+	if *project == "" || id == "" {
 		return fmt.Errorf("usage: cerver crons rm <id> --project SLUG")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
@@ -183,9 +177,24 @@ func cronsDelete(args []string) error {
 	if err != nil {
 		return err
 	}
-	if err := gw.DeleteCron(ctx, *project, rest[0]); err != nil {
+	if err := gw.DeleteCron(ctx, *project, id); err != nil {
 		return err
 	}
-	fmt.Printf("✓ deleted %s\n", rest[0])
+	fmt.Printf("✓ deleted %s\n", id)
 	return nil
+}
+
+// parseIDAndFlags accepts both `<id> --flags` and `--flags <id>` — Go's flag
+// package stops at the first positional, so a leading id would otherwise
+// swallow the flags.
+func parseIDAndFlags(fs *flag.FlagSet, args []string) string {
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		_ = fs.Parse(args[1:])
+		return args[0]
+	}
+	_ = fs.Parse(args)
+	if fs.NArg() > 0 {
+		return fs.Arg(0)
+	}
+	return ""
 }
