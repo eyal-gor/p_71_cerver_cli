@@ -57,7 +57,9 @@ const vaultsHelpText = `cerver vaults — manage your Infisical vaults (the per-
 usage:
   cerver vaults                                       list
   cerver vaults [--json]
-  cerver vaults add --label N --client-id ID --client-secret SEC --project-id PID
+  cerver vaults add --label N --client-id ID --client-secret SEC --project-id PID   (infisical)
+  cerver vaults add --provider doppler --label N --token dp.st…
+  cerver vaults add --provider cerver  --label N --secret ANTHROPIC_API_KEY=sk-… [--secret X=Y]
                     [--env prod] [--site-url URL] [--default]
   cerver vaults rename --id ifc_... --label NEW
   cerver vaults set-default --id ifc_...
@@ -112,18 +114,51 @@ func vaultsList(args []string) error {
 
 func vaultsAdd(args []string) error {
 	fs := flag.NewFlagSet("vaults add", flag.ContinueOnError)
+	provider := fs.String("provider", "infisical", "Vault provider: infisical | doppler | cerver")
 	label := fs.String("label", "", "Display name e.g. 'kompany' (required)")
-	clientID := fs.String("client-id", "", "Infisical UA client id (required)")
-	clientSecret := fs.String("client-secret", "", "Infisical UA client secret (required; not echoed back)")
-	projectID := fs.String("project-id", "", "Infisical project (workspace) id (required)")
+	clientID := fs.String("client-id", "", "Infisical UA client id")
+	clientSecret := fs.String("client-secret", "", "Infisical UA client secret (not echoed back)")
+	projectID := fs.String("project-id", "", "Infisical project (workspace) id")
 	env := fs.String("env", "prod", "Infisical environment slug")
 	siteURL := fs.String("site-url", "", "Override the Infisical API base URL (self-hosted)")
+	token := fs.String("token", "", "Doppler service token (dp.st…)")
+	var secretKVs multiFlag
+	fs.Var(&secretKVs, "secret", "cerver vault secret NAME=VALUE (repeatable)")
 	def := fs.Bool("default", false, "Make this the account default (unsets the previous default)")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if *label == "" || *clientID == "" || *clientSecret == "" || *projectID == "" {
-		return fmt.Errorf("--label, --client-id, --client-secret and --project-id are required")
+	if *label == "" {
+		return fmt.Errorf("--label is required")
+	}
+	req := gateway.InfisicalConfigCreate{
+		Provider: *provider, Label: *label, Environment: *env, IsDefault: *def,
+	}
+	switch *provider {
+	case "infisical":
+		if *clientID == "" || *clientSecret == "" || *projectID == "" {
+			return fmt.Errorf("infisical vaults need --client-id, --client-secret and --project-id")
+		}
+		req.ClientID, req.ClientSecret, req.ProjectID, req.SiteURL = *clientID, *clientSecret, *projectID, *siteURL
+	case "doppler":
+		if *token == "" {
+			return fmt.Errorf("doppler vaults need --token (a Doppler service token)")
+		}
+		req.Token = *token
+	case "cerver":
+		if len(secretKVs) == 0 {
+			return fmt.Errorf("cerver vaults need at least one --secret NAME=VALUE")
+		}
+		req.Secrets = map[string]string{}
+		for _, kv := range secretKVs {
+			parts := strings.SplitN(kv, "=", 2)
+			if len(parts) != 2 || parts[0] == "" {
+				return fmt.Errorf("--secret must be NAME=VALUE, got %q", kv)
+			}
+			req.Secrets[parts[0]] = parts[1]
+		}
+	default:
+		return fmt.Errorf("unknown --provider %q (infisical | doppler | cerver)", *provider)
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -131,19 +166,20 @@ func vaultsAdd(args []string) error {
 	if err != nil {
 		return err
 	}
-	id, err := gw.CreateInfisicalConfig(ctx, gateway.InfisicalConfigCreate{
-		Label:        *label,
-		ClientID:     *clientID,
-		ClientSecret: *clientSecret,
-		ProjectID:    *projectID,
-		Environment:  *env,
-		SiteURL:      *siteURL,
-		IsDefault:    *def,
-	})
+	id, err := gw.CreateInfisicalConfig(ctx, req)
 	if err != nil {
 		return err
 	}
-	fmt.Printf("added vault %s (%s)\n", *label, id)
+	fmt.Printf("added %s vault %s (%s)\n", *provider, *label, id)
+	return nil
+}
+
+// multiFlag collects a repeatable string flag.
+type multiFlag []string
+
+func (m *multiFlag) String() string { return strings.Join(*m, ",") }
+func (m *multiFlag) Set(v string) error {
+	*m = append(*m, v)
 	return nil
 }
 

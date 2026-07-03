@@ -29,14 +29,19 @@ type infisicalConfigCreateResp struct {
 }
 
 // InfisicalConfigCreate is the body for POST /v2/account/infisical.
+// Vault-agnostic: Provider "infisical" (default) uses the Client*/ProjectID
+// fields; "doppler" takes Token; "cerver" (native vault) takes Secrets.
 type InfisicalConfigCreate struct {
-	Label        string `json:"label"`
-	ClientID     string `json:"client_id"`
-	ClientSecret string `json:"client_secret"`
-	ProjectID    string `json:"project_id"`
-	Environment  string `json:"environment,omitempty"`
-	SiteURL      string `json:"site_url,omitempty"`
-	IsDefault    bool   `json:"is_default,omitempty"`
+	Provider     string            `json:"provider,omitempty"`
+	Label        string            `json:"label"`
+	ClientID     string            `json:"client_id,omitempty"`
+	ClientSecret string            `json:"client_secret,omitempty"`
+	ProjectID    string            `json:"project_id,omitempty"`
+	Environment  string            `json:"environment,omitempty"`
+	SiteURL      string            `json:"site_url,omitempty"`
+	Token        string            `json:"token,omitempty"`
+	Secrets      map[string]string `json:"secrets,omitempty"`
+	IsDefault    bool              `json:"is_default,omitempty"`
 }
 
 // InfisicalConfigUpdate covers PATCH. Pointer-or-nil semantics so we
