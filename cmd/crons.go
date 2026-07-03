@@ -1,0 +1,191 @@
+package cmd
+
+import (
+	"context"
+	"flag"
+	"fmt"
+	"os"
+	"strings"
+	"text/tabwriter"
+	"time"
+
+	"github.com/eyal-gor/p_71_cerver_cli/internal/gateway"
+)
+
+// Crons is the entry point for `cerver crons ...`. A cron is a scheduled agent
+// run attached to a project: on its schedule the gateway fires a normal session
+// for the project, so every run inherits the project's spend cap + attribution.
+//
+//	cerver crons --project SLUG                              list
+//	cerver crons create --project SLUG --schedule "0 9 * * *" --prompt "…" [--on COMPUTE]
+//	cerver crons run <id> --project SLUG                     fire now (test)
+//	cerver crons rm  <id> --project SLUG
+func Crons(args []string) error {
+	sub := "list"
+	rest := args
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		sub = args[0]
+		rest = args[1:]
+	}
+	switch sub {
+	case "list", "ls":
+		return cronsList(rest)
+	case "create", "add", "new":
+		return cronsCreate(rest)
+	case "run", "trigger", "fire":
+		return cronsRun(rest)
+	case "delete", "rm":
+		return cronsDelete(rest)
+	case "help", "-h", "--help":
+		fmt.Print(cronsHelpText)
+		return nil
+	default:
+		return fmt.Errorf("unknown crons subcommand: %s (try `cerver crons help`)", sub)
+	}
+}
+
+const cronsHelpText = `cerver crons — scheduled agent runs for a project
+
+usage:
+  cerver crons --project SLUG                                list
+  cerver crons create --project SLUG --schedule "0 9 * * *" --prompt "…" [--on COMPUTE] [--harness claude]
+  cerver crons create --project SLUG --schedule "*/15 * * * *" --agent <agent-id>
+  cerver crons run <id> --project SLUG                       fire now (ignores schedule)
+  cerver crons rm  <id> --project SLUG
+
+Schedules are 5-field cron expressions in UTC (min hour dom month dow).
+Each run is a normal session on the project — its spend cap and attribution
+apply automatically, so a runaway cron can't blow the budget.
+`
+
+func cronsList(args []string) error {
+	fs := flag.NewFlagSet("crons", flag.ContinueOnError)
+	project := fs.String("project", "", "Project slug (required)")
+	jsonOut := fs.Bool("json", false, "Output JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *project == "" {
+		return fmt.Errorf("--project SLUG is required")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	gw, err := authedClient(ctx)
+	if err != nil {
+		return err
+	}
+	crons, err := gw.ListCrons(ctx, *project)
+	if err != nil {
+		return err
+	}
+	if *jsonOut {
+		return encodeJSON(os.Stdout, crons)
+	}
+	if len(crons) == 0 {
+		fmt.Fprintf(os.Stderr, "no crons yet — create one with `cerver crons create --project %s --schedule \"0 9 * * *\" --prompt ...`\n", *project)
+		return nil
+	}
+	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(tw, "ID\tSCHEDULE\tENABLED\tLAST RUN\tNAME\tPROMPT")
+	for _, cr := range crons {
+		name, prompt, last := "—", "—", "never"
+		if cr.Name != nil && *cr.Name != "" {
+			name = *cr.Name
+		}
+		if cr.Prompt != nil && *cr.Prompt != "" {
+			prompt = truncate(*cr.Prompt, 40)
+		}
+		if cr.LastRunAt != nil && *cr.LastRunAt != "" {
+			last = *cr.LastRunAt
+		}
+		fmt.Fprintf(tw, "%s\t%s\t%v\t%s\t%s\t%s\n", cr.ID, cr.Schedule, cr.Enabled, last, name, prompt)
+	}
+	return tw.Flush()
+}
+
+func cronsCreate(args []string) error {
+	fs := flag.NewFlagSet("crons create", flag.ContinueOnError)
+	project := fs.String("project", "", "Project slug (required)")
+	schedule := fs.String("schedule", "", "5-field cron expression, UTC (required)")
+	prompt := fs.String("prompt", "", "Task to run")
+	agent := fs.String("agent", "", "Saved agent id to run (instead of --prompt)")
+	name := fs.String("name", "", "Cron name")
+	on := fs.String("on", "", "Compute id to run on")
+	harness := fs.String("harness", "", "CLI: claude | codex | grok")
+	model := fs.String("model", "", "Model override")
+	jsonOut := fs.Bool("json", false, "Output JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *project == "" || *schedule == "" {
+		return fmt.Errorf("--project and --schedule are required")
+	}
+	if *prompt == "" && *agent == "" {
+		return fmt.Errorf("provide --prompt or --agent")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	gw, err := authedClient(ctx)
+	if err != nil {
+		return err
+	}
+	cr, err := gw.CreateCron(ctx, *project, gateway.CronCreate{
+		Schedule: *schedule, Prompt: *prompt, AgentID: *agent, Name: *name,
+		ComputeID: *on, Harness: *harness, Model: *model,
+	})
+	if err != nil {
+		return err
+	}
+	if *jsonOut {
+		return encodeJSON(os.Stdout, cr)
+	}
+	fmt.Printf("✓ cron created  %s  (%s)\n", cr.ID, cr.Schedule)
+	return nil
+}
+
+func cronsRun(args []string) error {
+	fs := flag.NewFlagSet("crons run", flag.ContinueOnError)
+	project := fs.String("project", "", "Project slug (required)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	rest := fs.Args()
+	if *project == "" || len(rest) == 0 {
+		return fmt.Errorf("usage: cerver crons run <id> --project SLUG")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	gw, err := authedClient(ctx)
+	if err != nil {
+		return err
+	}
+	sid, err := gw.RunCron(ctx, *project, rest[0])
+	if err != nil {
+		return err
+	}
+	fmt.Printf("✓ fired — session %s\n", sid)
+	return nil
+}
+
+func cronsDelete(args []string) error {
+	fs := flag.NewFlagSet("crons delete", flag.ContinueOnError)
+	project := fs.String("project", "", "Project slug (required)")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	rest := fs.Args()
+	if *project == "" || len(rest) == 0 {
+		return fmt.Errorf("usage: cerver crons rm <id> --project SLUG")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	gw, err := authedClient(ctx)
+	if err != nil {
+		return err
+	}
+	if err := gw.DeleteCron(ctx, *project, rest[0]); err != nil {
+		return err
+	}
+	fmt.Printf("✓ deleted %s\n", rest[0])
+	return nil
+}

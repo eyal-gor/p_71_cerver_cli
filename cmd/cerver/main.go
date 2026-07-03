@@ -57,6 +57,11 @@ commands:
                cerver envs repos --project SLUG --env prod
                cerver envs repos add --project SLUG --env prod --url URL [--primary]
                cerver envs repos rm  --project SLUG --env prod --repo-id rep_…
+  crons      Scheduled agent runs for a project (spend-capped + attributed).
+               cerver crons --project SLUG                          # list
+               cerver crons create --project SLUG --schedule "0 9 * * *" --prompt "…"
+               cerver crons run <id> --project SLUG                 # fire now
+               cerver crons rm  <id> --project SLUG
   vaults     Manage your Infisical vaults (per-account secret connections).
                cerver vaults                        # list
                cerver vaults add --label N --client-id ID --client-secret SEC --project-id PID [--default]
@@ -162,6 +167,8 @@ func main() {
 		err = cmd.Keys(args)
 	case "agents", "agent":
 		err = cmd.Agents(args)
+	case "crons", "cron":
+		err = cmd.Crons(args)
 	case "insights", "insight":
 		err = cmd.Insights(args)
 	case "sessions":
