@@ -26,7 +26,8 @@ func Bridge(args []string) error {
 	if err != nil {
 		return err
 	}
-	flagPath := filepath.Join(home, ".cerver", "bridge")
+	flagPath := filepath.Join(home, ".cerver", "bridge")             // claude → gateway
+	codexFlagPath := filepath.Join(home, ".cerver", "bridge-codex")  // codex → gateway (opt-in)
 
 	switch sub {
 	case "on":
@@ -41,10 +42,23 @@ func Bridge(args []string) error {
 		fmt.Println()
 		fmt.Println("  Your options while the subscription is walled:")
 		fmt.Println("    claude               same tool, now on your vault key via Cerver (pay per token)")
-		fmt.Println("    codex                have a ChatGPT plan? switch tools — it's flat-rate there")
+		fmt.Println("    codex                have a ChatGPT plan? switch tools — runs DIRECT on that
+                         plan, flat-rate, no gateway needed")
 		fmt.Println("    cerver bridge off    when the limit resets, go back to the subscription")
 		return nil
+	case "codex":
+		// Route CODEX through the gateway too (per-token). Only needed when
+		// codex ITSELF is walled — otherwise leave it on its flat-rate plan.
+		if err := os.MkdirAll(filepath.Dir(codexFlagPath), 0o700); err != nil {
+			return err
+		}
+		if err := os.WriteFile(codexFlagPath, []byte("on\n"), 0o600); err != nil {
+			return err
+		}
+		fmt.Println("⚡ codex now routes via the cerver gateway too (per-token). New launches only.")
+		return nil
 	case "off":
+		_ = os.Remove(codexFlagPath)
 		if err := os.Remove(flagPath); err != nil {
 			if os.IsNotExist(err) {
 				fmt.Println("· bridge already off")

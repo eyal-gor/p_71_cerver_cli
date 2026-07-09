@@ -318,7 +318,7 @@ claude() {
   fi
 }
 codex() {
-  if [ -f "$HOME/.cerver/bridge" ]; then
+  if [ -f "$HOME/.cerver/bridge-codex" ]; then
     CERVER_API_KEY="$(grep '^CERVER_API_KEY=' "$HOME/.cerver/cerver.env" 2>/dev/null | cut -d= -f2-)" \
     command codex --profile cerver "$@"
   else
