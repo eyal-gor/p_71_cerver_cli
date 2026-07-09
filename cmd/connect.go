@@ -60,7 +60,10 @@ func Connect(args []string) error {
 		if err := disconnectClaude(*printOnly); err != nil {
 			return err
 		}
-		return disconnectCodex(*printOnly)
+		if err := disconnectCodex(*printOnly); err != nil {
+			return err
+		}
+		return removeShellShims(*printOnly)
 	case "status":
 		return connectStatus()
 	case "help", "-h", "--help":
@@ -71,26 +74,23 @@ func Connect(args []string) error {
 	}
 }
 
-const connectHelpText = `cerver connect — route your coding agents through the cerver gateway
+const connectHelpText = `cerver connect — one-time setup; your subscription stays the default
 
-One command, then you use claude / codex exactly as before. Every request
-flows through gateway.cerver.ai: metered per key, capped by your spending
-limits, paid with the vendor key in your cerver vault.
+Installs the terminal indicator and invisible claude/codex shims. Nothing
+about your daily work changes. When a subscription walls you ("usage limit
+reached"), type:
 
-  cerver connect            configure Claude Code + Codex
-  cerver connect claude     Claude Code only
-  cerver connect codex      Codex only
-  cerver connect status     what's currently routed
-  cerver connect off        restore direct vendor access
+  cerver bridge             new claude/codex launches route via the cerver
+                            gateway (your vault key, any provider) until
+  cerver bridge off         you switch back — or the limit resets
+
+Commands:
+  cerver connect            set up Claude Code + Codex
+  cerver connect claude     Claude Code only (statusline indicator)
+  cerver connect codex      Codex only (cerver profile, default unchanged)
+  cerver connect status     what's installed / routed
+  cerver connect off        remove everything cerver added
     --print                 preview changes without writing
-
-Claude Code: sets env.ANTHROPIC_BASE_URL + ANTHROPIC_API_KEY in
-~/.claude/settings.json (backup written alongside on first change).
-Codex: adds a "cerver" model provider to ~/.codex/config.toml and exports
-CERVER_API_KEY in your shell profile.
-
-Note: with a key configured, the CLIs prefer it over a claude.ai /
-chatgpt.com subscription login. "off" returns you to the subscription.
 `
 
 func gatewayBase() string {
@@ -137,30 +137,23 @@ func connectClaude(key string, printOnly bool) error {
 			return fmt.Errorf("%s is not valid JSON — fix it first (%v)", path, err)
 		}
 	}
-	env, _ := settings["env"].(map[string]any)
-	if env == nil {
-		env = map[string]any{}
-	}
-	env["ANTHROPIC_BASE_URL"] = gatewayBase() + "/v2/proxy/anthropic"
-	env["ANTHROPIC_API_KEY"] = key
-	settings["env"] = env
-
-	// Bottom-of-terminal indicator: routed or not, provider, model, spend.
-	// Installed once; kept on disconnect (it shows "cerver off" then).
+	// NO env flip here: the subscription stays the default. Routing happens
+	// per-launch via the shell shim when bridge mode is on. Connect only
+	// installs the bottom-of-terminal indicator.
 	if _, has := settings["statusLine"]; !has {
 		settings["statusLine"] = map[string]any{
 			"type":    "command",
 			"command": "cerver statusline",
 		}
 	}
+	_ = key
 
 	out, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return err
 	}
 	if printOnly {
-		fmt.Printf("would write %s:\n  env.ANTHROPIC_BASE_URL = %s\n  env.ANTHROPIC_API_KEY = %s…\n",
-			path, gatewayBase()+"/v2/proxy/anthropic", key[:min(8, len(key))])
+		fmt.Printf("would install statusLine (\"cerver statusline\") in %s\n", path)
 		return nil
 	}
 	if readErr == nil {
@@ -175,7 +168,7 @@ func connectClaude(key string, printOnly bool) error {
 	if err := os.WriteFile(path, append(out, '\n'), 0o600); err != nil {
 		return err
 	}
-	fmt.Printf("✓ Claude Code → cerver gateway (%s)\n", path)
+	fmt.Printf("✓ Claude Code: cerver indicator installed (%s)\n", path)
 	return nil
 }
 
@@ -193,27 +186,17 @@ func disconnectClaude(printOnly bool) error {
 	if err := json.Unmarshal(raw, &settings); err != nil {
 		return fmt.Errorf("%s is not valid JSON (%v)", path, err)
 	}
-	env, _ := settings["env"].(map[string]any)
-	if env == nil {
-		fmt.Println("· Claude Code: nothing to disconnect")
-		return nil
-	}
-	base, _ := env["ANTHROPIC_BASE_URL"].(string)
-	if !strings.Contains(base, "/v2/proxy/anthropic") {
-		fmt.Println("· Claude Code: not routed through cerver")
+	sl, _ := settings["statusLine"].(map[string]any)
+	cmdStr, _ := sl["command"].(string)
+	if !strings.Contains(cmdStr, "cerver statusline") {
+		fmt.Println("· Claude Code: nothing cerver-managed to remove")
 		return nil
 	}
 	if printOnly {
-		fmt.Printf("would remove env.ANTHROPIC_BASE_URL + env.ANTHROPIC_API_KEY from %s\n", path)
+		fmt.Printf("would remove the cerver statusLine from %s\n", path)
 		return nil
 	}
-	delete(env, "ANTHROPIC_BASE_URL")
-	delete(env, "ANTHROPIC_API_KEY")
-	if len(env) == 0 {
-		delete(settings, "env")
-	} else {
-		settings["env"] = env
-	}
+	delete(settings, "statusLine")
 	out, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return err
@@ -221,7 +204,7 @@ func disconnectClaude(printOnly bool) error {
 	if err := os.WriteFile(path, append(out, '\n'), 0o600); err != nil {
 		return err
 	}
-	fmt.Println("✓ Claude Code disconnected — back to direct Anthropic / subscription login")
+	fmt.Println("✓ Claude Code: cerver statusline removed")
 	return nil
 }
 
@@ -263,21 +246,24 @@ func connectCodex(key string, printOnly bool) error {
 	}
 	cleaned := stripManagedBlock(existing, codexBlockStart, codexBlockEnd)
 
-	// TOML: top-level keys must precede tables, so model_provider goes in a
-	// managed block at the TOP; the provider table goes at the BOTTOM.
-	top := codexBlockStart + "\nmodel_provider = \"cerver\"\n" + codexBlockEnd + "\n"
+	// Provider + profile tables only — NO top-level model_provider, so the
+	// default stays the user's subscription. Bridge launches use
+	// `codex --profile cerver` via the shell shim.
 	bottom := "\n" + codexBlockStart + `
 [model_providers.cerver]
 name = "Cerver Gateway"
 base_url = "` + gatewayBase() + `/v2/proxy/openai"
 env_key = "CERVER_API_KEY"
 wire_api = "responses"
+
+[profiles.cerver]
+model_provider = "cerver"
 ` + codexBlockEnd + "\n"
 
-	next := top + strings.TrimLeft(cleaned, "\n") + bottom
+	next := strings.TrimLeft(cleaned, "\n") + bottom
 	if printOnly {
-		fmt.Printf("would write %s with a cerver model provider (base_url %s)\n", path, gatewayBase()+"/v2/proxy/openai")
-		return shellExportCerverKey(key, true)
+		fmt.Printf("would add a cerver provider profile to %s (default stays direct)\n", path)
+		return installShellShims(true)
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
@@ -285,8 +271,9 @@ wire_api = "responses"
 	if err := os.WriteFile(path, []byte(next), 0o600); err != nil {
 		return err
 	}
-	fmt.Printf("✓ Codex → cerver gateway (%s)\n", path)
-	return shellExportCerverKey(key, false)
+	fmt.Printf("✓ Codex: cerver profile added (%s) — default unchanged\n", path)
+	_ = key
+	return installShellShims(false)
 }
 
 func disconnectCodex(printOnly bool) error {
@@ -315,19 +302,44 @@ func disconnectCodex(printOnly bool) error {
 	return nil
 }
 
-// Codex reads the key from the environment (env_key), so export it in the
-// shell profile inside a managed block.
-func shellExportCerverKey(key string, printOnly bool) error {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return err
-	}
-	profile := filepath.Join(home, ".zshrc")
+// Shell shims: transparent claude()/codex() functions in the profile.
+// Default launches are untouched; when ~/.cerver/bridge exists they route
+// through the gateway. The user never touches an env var.
+func shellShimBlock() string {
+	gw := gatewayBase()
+	return codexBlockStart + `
+claude() {
+  if [ -f "$HOME/.cerver/bridge" ]; then
+    ANTHROPIC_BASE_URL="` + gw + `/v2/proxy/anthropic" \
+    ANTHROPIC_API_KEY="$(grep '^CERVER_API_KEY=' "$HOME/.cerver/cerver.env" 2>/dev/null | cut -d= -f2-)" \
+    command claude "$@"
+  else
+    command claude "$@"
+  fi
+}
+codex() {
+  if [ -f "$HOME/.cerver/bridge" ]; then
+    CERVER_API_KEY="$(grep '^CERVER_API_KEY=' "$HOME/.cerver/cerver.env" 2>/dev/null | cut -d= -f2-)" \
+    command codex --profile cerver "$@"
+  else
+    command codex "$@"
+  fi
+}
+` + codexBlockEnd + "\n"
+}
+
+func shellProfilePath() string {
+	home, _ := os.UserHomeDir()
 	if shell := os.Getenv("SHELL"); strings.Contains(shell, "bash") {
-		profile = filepath.Join(home, ".bashrc")
+		return filepath.Join(home, ".bashrc")
 	}
+	return filepath.Join(home, ".zshrc")
+}
+
+func installShellShims(printOnly bool) error {
+	profile := shellProfilePath()
 	if printOnly {
-		fmt.Printf("would export CERVER_API_KEY in %s\n", profile)
+		fmt.Printf("would install claude/codex bridge shims in %s\n", profile)
 		return nil
 	}
 	existing := ""
@@ -335,11 +347,32 @@ func shellExportCerverKey(key string, printOnly bool) error {
 		existing = string(raw)
 	}
 	cleaned := stripManagedBlock(existing, codexBlockStart, codexBlockEnd)
-	block := "\n" + codexBlockStart + "\nexport CERVER_API_KEY=\"" + key + "\"\n" + codexBlockEnd + "\n"
-	if err := os.WriteFile(profile, []byte(strings.TrimRight(cleaned, "\n")+"\n"+block), 0o600); err != nil {
+	next := strings.TrimRight(cleaned, "\n") + "\n\n" + shellShimBlock()
+	if err := os.WriteFile(profile, []byte(next), 0o600); err != nil {
 		return err
 	}
-	fmt.Printf("✓ CERVER_API_KEY exported in %s (new terminals only)\n", profile)
+	fmt.Printf("✓ bridge shims installed in %s (new terminals)\n", profile)
+	return nil
+}
+
+func removeShellShims(printOnly bool) error {
+	profile := shellProfilePath()
+	raw, err := os.ReadFile(profile)
+	if err != nil {
+		return nil
+	}
+	if !strings.Contains(string(raw), codexBlockStart) {
+		return nil
+	}
+	if printOnly {
+		fmt.Printf("would remove bridge shims from %s\n", profile)
+		return nil
+	}
+	cleaned := strings.TrimRight(stripManagedBlock(string(raw), codexBlockStart, codexBlockEnd), "\n") + "\n"
+	if err := os.WriteFile(profile, []byte(cleaned), 0o600); err != nil {
+		return err
+	}
+	fmt.Println("✓ bridge shims removed")
 	return nil
 }
 

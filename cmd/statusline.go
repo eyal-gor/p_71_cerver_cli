@@ -43,24 +43,34 @@ func Statusline(args []string) error {
 
 	base := os.Getenv("ANTHROPIC_BASE_URL")
 	routed := strings.Contains(base, "/v2/proxy/")
+	bridgeOn := false
+	if home, err := os.UserHomeDir(); err == nil {
+		if _, err := os.Stat(filepath.Join(home, ".cerver", "bridge")); err == nil {
+			bridgeOn = true
+		}
+	}
 
 	const (
 		orange = "\033[38;5;208m"
+		yellow = "\033[33m"
 		dim    = "\033[2m"
 		reset  = "\033[0m"
 	)
 
-	if !routed {
-		fmt.Printf("%s○ cerver off · direct anthropic · %s%s\n", dim, model, reset)
-		return nil
+	switch {
+	case routed:
+		spend := todaysSpend()
+		line := fmt.Sprintf("%s⚡ cerver bridge%s → anthropic · %s", orange, reset, model)
+		if spend != "" {
+			line += dim + " · " + spend + " today" + reset
+		}
+		fmt.Println(line)
+	case bridgeOn:
+		// Bridge armed but THIS session predates it — it still runs direct.
+		fmt.Printf("%s⏳ bridge armed — restart claude to route via cerver%s · %s\n", yellow, reset, model)
+	default:
+		fmt.Printf("%s○ subscription · direct anthropic · %s%s\n", dim, model, reset)
 	}
-
-	spend := todaysSpend()
-	line := fmt.Sprintf("%s⚡ cerver%s → anthropic · %s", orange, reset, model)
-	if spend != "" {
-		line += dim + " · " + spend + " today" + reset
-	}
-	fmt.Println(line)
 	return nil
 }
 
