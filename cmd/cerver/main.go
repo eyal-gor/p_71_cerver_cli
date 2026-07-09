@@ -45,7 +45,8 @@ commands:
                cerver projects set-vault --slug kompany --vault ifc_…
                cerver projects delete --slug kompany
   keys       Manage project-scoped API keys (every key belongs to one project).
-               cerver keys                          # list (masked) + their project
+               cerver connect            route claude/codex through the cerver gateway
+  cerver keys                          # list (masked) + their project
                cerver keys create --project kompany [--label "prod server"]
                cerver keys delete --prefix ck_1a2b
   envs       Manage project environments + their repo bindings (CRUD).
@@ -185,6 +186,8 @@ func main() {
 		err = cmd.Suggestions(args)
 	case "test":
 		err = cmd.Test(args)
+	case "connect":
+		err = cmd.Connect(args)
 	case "update", "self-update":
 		err = cmd.Update(args)
 	case "help", "-h", "--help":
