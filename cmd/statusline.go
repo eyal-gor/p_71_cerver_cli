@@ -57,19 +57,27 @@ func Statusline(args []string) error {
 		reset  = "\033[0m"
 	)
 
+	// Provider the session ultimately talks to — inferred from the model id
+	// (statusline runs inside Claude Code, but bridge failover can land the
+	// request elsewhere later).
+	provider := "anthropic"
+	if strings.HasPrefix(strings.ToLower(payload.Model.ID), "gpt") {
+		provider = "openai"
+	}
+
 	switch {
 	case routed:
 		spend := todaysSpend()
-		line := fmt.Sprintf("%s⚡ cerver bridge%s → anthropic · %s", orange, reset, model)
+		line := fmt.Sprintf("%sCerver Gateway%s %s⚡ active%s → %s · %s", orange, reset, orange, reset, provider, model)
 		if spend != "" {
 			line += dim + " · " + spend + " today" + reset
 		}
 		fmt.Println(line)
 	case bridgeOn:
 		// Bridge armed but THIS session predates it — it still runs direct.
-		fmt.Printf("%s⏳ bridge armed — restart claude to route via cerver%s · %s\n", yellow, reset, model)
+		fmt.Printf("%sCerver Gateway ⏳ armed — restart claude to route%s · %s\n", yellow, reset, model)
 	default:
-		fmt.Printf("%s○ subscription · direct anthropic · %s%s\n", dim, model, reset)
+		fmt.Printf("%sCerver · direct to %s · %s · limit hit? cerver bridge%s\n", dim, provider, model, reset)
 	}
 	return nil
 }

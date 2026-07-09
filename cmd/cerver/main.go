@@ -134,6 +134,15 @@ billing modes:
   --bill sub     force subscription on this call
   --bill api     force api key on this call
   --bill <cli>=<mode>,<cli>=<mode>  per-CLI override for compare
+
+Gateway & bridge (keep working when a subscription hits its limit):
+  cerver connect            one-time setup: terminal indicator + claude/codex shims
+  cerver bridge             route new claude/codex launches via the Cerver Gateway
+  cerver bridge off         back to your subscription
+  cerver connect status     what's installed / routed
+  The bottom bar in Claude Code always shows where requests go:
+    Cerver · direct to anthropic          your subscription, untouched
+    Cerver Gateway ⚡ active → anthropic   routed via Cerver: metered, capped
 `
 
 func main() {
