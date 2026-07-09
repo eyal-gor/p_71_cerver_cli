@@ -395,13 +395,16 @@ func shellShimBlock() string {
 	daemonBase := daemonBaseURL()
 	_ = gw
 	return codexBlockStart + `
+# Cerver gateway. Claude Code points at a local bridge daemon so
+# ` + "`cerver bridge`" + ` can toggle routing live (no restart): daemon off ->
+# your subscription, on -> the Cerver gateway. This is an EXPORT, not a
+# shell function, so nothing (incl. Claude Code's own shell snapshot) can
+# shadow it — every child process inherits it.
+command -v cerver >/dev/null 2>&1 && cerver daemon --ensure >/dev/null 2>&1
+export ANTHROPIC_BASE_URL="` + daemonBase + `"
 _cerver_routing_key() {
   cat "$HOME/.cerver/gateway.key" 2>/dev/null || \
     grep '^CERVER_API_KEY=' "$HOME/.cerver/cerver.env" 2>/dev/null | cut -d= -f2-
-}
-claude() {
-  cerver daemon --ensure >/dev/null 2>&1
-  ANTHROPIC_BASE_URL="` + daemonBase + `" command claude "$@"
 }
 codex() {
   if [ -f "$HOME/.cerver/bridge-codex" ]; then
