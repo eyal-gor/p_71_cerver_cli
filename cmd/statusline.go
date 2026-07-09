@@ -90,7 +90,19 @@ func Statusline(args []string) error {
 		// connect). One last restart moves it onto live switching.
 		fmt.Printf("%sCerver Gateway ⏳ armed — restart claude once for live switching%s · %s%s\n", yellow, reset, model, projTag)
 	default:
-		fmt.Printf("%sCerver · subscription · %s · cerver connect to enable the gateway%s%s\n", dim, model, reset, projTag)
+		// Distinguish "never connected" from "connected, but this session
+		// predates the daemon" — the latter just needs one restart.
+		connected := false
+		if home, err := os.UserHomeDir(); err == nil {
+			if _, e := os.Stat(filepath.Join(home, ".cerver", "gateway.key")); e == nil {
+				connected = true
+			}
+		}
+		if connected {
+			fmt.Printf("%sCerver · subscription · %s · restart claude once to activate live routing%s%s\n", dim, model, reset, projTag)
+		} else {
+			fmt.Printf("%sCerver · subscription · %s · cerver connect to enable the gateway%s%s\n", dim, model, reset, projTag)
+		}
 	}
 	return nil
 }
