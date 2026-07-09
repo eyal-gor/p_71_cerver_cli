@@ -42,8 +42,7 @@ func Bridge(args []string) error {
 		fmt.Println()
 		fmt.Println("  Your options while the subscription is walled:")
 		fmt.Println("    claude               same tool, now on your vault key via Cerver (pay per token)")
-		fmt.Println("    codex                have a ChatGPT plan? switch tools — runs DIRECT on that
-                         plan, flat-rate, no gateway needed")
+		fmt.Println("    codex                ChatGPT plan? switch tools — runs DIRECT there, flat-rate")
 		fmt.Println("    cerver bridge off    when the limit resets, go back to the subscription")
 		return nil
 	case "codex":
