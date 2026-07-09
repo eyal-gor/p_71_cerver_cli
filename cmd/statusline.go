@@ -42,7 +42,8 @@ func Statusline(args []string) error {
 	}
 
 	base := os.Getenv("ANTHROPIC_BASE_URL")
-	routed := strings.Contains(base, "/v2/proxy/")
+	throughDaemon := strings.Contains(base, "8788")
+	routedDirect := strings.Contains(base, "/v2/proxy/")
 	bridgeOn := false
 	if home, err := os.UserHomeDir(); err == nil {
 		if _, err := os.Stat(filepath.Join(home, ".cerver", "bridge")); err == nil {
@@ -72,18 +73,24 @@ func Statusline(args []string) error {
 	}
 
 	switch {
-	case routed:
+	case (throughDaemon || routedDirect) && bridgeOn:
+		// Live through the daemon (or legacy direct) — routed right now.
 		spend := todaysSpend()
 		line := fmt.Sprintf("%sCerver Gateway%s %s⚡ active%s → %s · %s", orange, reset, orange, reset, provider, model)
 		if spend != "" {
 			line += dim + " · " + spend + " today" + reset
 		}
 		fmt.Println(line + projTag)
+	case throughDaemon && !bridgeOn:
+		// On the daemon but bridge off — subscription now, one command to flip
+		// live (no restart). This is the good steady state.
+		fmt.Printf("%sCerver · subscription · %s · cerver bridge to route (instant)%s%s\n", dim, model, reset, projTag)
 	case bridgeOn:
-		// Bridge armed but THIS session predates it — it still runs direct.
-		fmt.Printf("%sCerver Gateway ⏳ armed — restart claude to route%s · %s%s\n", yellow, reset, model, projTag)
+		// Bridge on but this session isn't on the daemon yet (started before
+		// connect). One last restart moves it onto live switching.
+		fmt.Printf("%sCerver Gateway ⏳ armed — restart claude once for live switching%s · %s%s\n", yellow, reset, model, projTag)
 	default:
-		fmt.Printf("%sCerver · direct to %s · %s · limit hit? cerver bridge%s%s\n", dim, provider, model, reset, projTag)
+		fmt.Printf("%sCerver · subscription · %s · cerver connect to enable the gateway%s%s\n", dim, model, reset, projTag)
 	}
 	return nil
 }

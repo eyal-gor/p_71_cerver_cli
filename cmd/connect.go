@@ -68,6 +68,7 @@ func Connect(args []string) error {
 			}
 		}
 		if !*printOnly {
+			_ = Daemon([]string{"--ensure"})
 			proj, scope := connectWhoami()
 			if scope == "project" {
 				fmt.Printf("\nRouted traffic lands in project: %s (cost, caps & redaction apply here).\n", proj)
@@ -391,19 +392,16 @@ func disconnectCodex(printOnly bool) error {
 // through the gateway. The user never touches an env var.
 func shellShimBlock() string {
 	gw := gatewayBase()
+	daemonBase := daemonBaseURL()
+	_ = gw
 	return codexBlockStart + `
 _cerver_routing_key() {
   cat "$HOME/.cerver/gateway.key" 2>/dev/null || \
     grep '^CERVER_API_KEY=' "$HOME/.cerver/cerver.env" 2>/dev/null | cut -d= -f2-
 }
 claude() {
-  if [ -f "$HOME/.cerver/bridge" ]; then
-    ANTHROPIC_BASE_URL="` + gw + `/v2/proxy/anthropic" \
-    ANTHROPIC_API_KEY="$(_cerver_routing_key)" \
-    command claude "$@"
-  else
-    command claude "$@"
-  fi
+  cerver daemon --ensure >/dev/null 2>&1
+  ANTHROPIC_BASE_URL="` + daemonBase + `" command claude "$@"
 }
 codex() {
   if [ -f "$HOME/.cerver/bridge-codex" ]; then

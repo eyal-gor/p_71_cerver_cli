@@ -206,6 +206,8 @@ func main() {
 		err = cmd.Statusline(args)
 	case "bridge":
 		err = cmd.Bridge(args)
+	case "daemon":
+		err = cmd.Daemon(args)
 	case "update", "self-update":
 		err = cmd.Update(args)
 	case "help", "-h", "--help":

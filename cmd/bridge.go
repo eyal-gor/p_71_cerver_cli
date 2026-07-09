@@ -37,8 +37,8 @@ func Bridge(args []string) error {
 		if err := os.WriteFile(flagPath, []byte(time.Now().UTC().Format(time.RFC3339)+"\n"), 0o600); err != nil {
 			return err
 		}
-		fmt.Println("⚡ bridge ON — new claude/codex launches route via the cerver gateway.")
-		fmt.Println("  Already-open sessions keep their current routing; restart them to bridge.")
+		fmt.Println("⚡ bridge ON — Claude Code now routes via the cerver gateway (takes effect")
+		fmt.Println("  on your next message — no restart, if you launched claude after connecting).")
 		fmt.Println()
 		fmt.Println("  Your options while the subscription is walled:")
 		fmt.Println("    claude               same tool, now on your vault key via Cerver (pay per token)")
@@ -65,7 +65,7 @@ func Bridge(args []string) error {
 			}
 			return err
 		}
-		fmt.Println("○ bridge OFF — new launches go direct on your subscription again.")
+		fmt.Println("○ bridge OFF — back on your subscription, from your next message. No restart.")
 		return nil
 	case "status":
 		if st, err := os.Stat(flagPath); err == nil {
