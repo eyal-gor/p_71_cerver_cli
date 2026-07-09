@@ -100,10 +100,7 @@ func currentProject() string {
 		b, _ := os.ReadFile(cachePath)
 		return strings.TrimSpace(string(b))
 	}
-	key := os.Getenv("CERVER_API_KEY")
-	if key == "" {
-		key = readEnvKey(filepath.Join(home, ".cerver", "cerver.env"), "CERVER_API_KEY")
-	}
+	key := routingKeyForStatus()
 	if key == "" {
 		return ""
 	}
@@ -126,6 +123,24 @@ func currentProject() string {
 	return proj
 }
 
+// routingKeyForStatus prefers the bound project key (gateway.key) so the
+// statusline reflects the project traffic actually routes through.
+func routingKeyForStatus() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	if b, err := os.ReadFile(filepath.Join(home, ".cerver", "gateway.key")); err == nil {
+		if k := strings.TrimSpace(string(b)); k != "" {
+			return k
+		}
+	}
+	if v := os.Getenv("CERVER_API_KEY"); v != "" {
+		return v
+	}
+	return readEnvKey(filepath.Join(home, ".cerver", "cerver.env"), "CERVER_API_KEY")
+}
+
 // todaysSpend returns today's account spend ("$0.42") from the gateway,
 // cached on disk for 60s — the statusline re-renders constantly and must
 // never hammer the API or block the UI (750ms budget, 250ms timeout here).
@@ -140,10 +155,7 @@ func todaysSpend() string {
 		return strings.TrimSpace(string(b))
 	}
 
-	key := os.Getenv("CERVER_API_KEY")
-	if key == "" {
-		key = readEnvKey(filepath.Join(home, ".cerver", "cerver.env"), "CERVER_API_KEY")
-	}
+	key := routingKeyForStatus()
 	if key == "" {
 		return ""
 	}

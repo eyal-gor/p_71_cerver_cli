@@ -33,15 +33,29 @@ func Connect(args []string) error {
 	}
 	fs := flag.NewFlagSet("connect", flag.ContinueOnError)
 	printOnly := fs.Bool("print", false, "show changes without writing")
+	projectFlag := fs.String("project", "", "bind routed traffic to this project (mints/reuses a project key)")
 	if err := fs.Parse(rest); err != nil {
 		return err
 	}
 
 	switch sub {
 	case "all", "claude", "codex":
-		key, err := connectKey()
+		// A global key can't scope cost/caps/redaction — routing needs a
+		// PROJECT key. Mint/reuse one when --project is given; otherwise
+		// require that a project routing key is already bound.
+		if *projectFlag != "" && !*printOnly {
+			if err := bindProjectRoutingKey(*projectFlag); err != nil {
+				return err
+			}
+		}
+		key, err := routingKey()
 		if err != nil {
 			return err
+		}
+		if _, scope := connectWhoami(); scope == "global" && !*printOnly {
+			return fmt.Errorf("your key is GLOBAL — routing needs a project key.\n" +
+				"Run:  cerver connect --project <name>\n" +
+				"(mints/reuses a project key so cost, caps and redaction apply)")
 		}
 		if sub == "all" || sub == "claude" {
 			if err := connectClaude(key, *printOnly); err != nil {
@@ -109,7 +123,14 @@ func gatewayBase() string {
 	return "https://gateway.cerver.ai"
 }
 
-func connectKey() (string, error) {
+func routingKeyPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".cerver", "gateway.key")
+}
+
+// adminKey is the account/global key used to MINT project keys and manage
+// the account (from cerver.env / env). Not used for routing.
+func adminKey() (string, error) {
 	if v := os.Getenv("CERVER_API_KEY"); v != "" {
 		return v, nil
 	}
@@ -122,6 +143,60 @@ func connectKey() (string, error) {
 		return "", fmt.Errorf("no cerver key found — run `cerver login` first")
 	}
 	return key, nil
+}
+
+// routingKey is the key gateway traffic actually uses: the bound project
+// key (~/.cerver/gateway.key) if present, else the admin key as fallback.
+func routingKey() (string, error) {
+	if b, err := os.ReadFile(routingKeyPath()); err == nil {
+		if k := strings.TrimSpace(string(b)); k != "" {
+			return k, nil
+		}
+	}
+	return adminKey()
+}
+
+// connectKey kept as an alias for callers that want the routing key.
+func connectKey() (string, error) { return routingKey() }
+
+// bindProjectRoutingKey mints (or reuses) a project-bound key for slug via
+// the gateway, using the admin key, and stores it as the routing key.
+func bindProjectRoutingKey(slug string) error {
+	admin, err := adminKey()
+	if err != nil {
+		return err
+	}
+	body, _ := json.Marshal(map[string]any{
+		"project_slug": slug,
+		"label":        "gateway-" + slug,
+		"reuse":        true,
+	})
+	req, _ := http.NewRequest("POST", gatewayBase()+"/v2/auth/keys", strings.NewReader(string(body)))
+	req.Header.Set("Authorization", "Bearer "+admin)
+	req.Header.Set("Content-Type", "application/json")
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("minting project key failed: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("minting project key for %q failed (HTTP %d) — does the project exist on your account?", slug, resp.StatusCode)
+	}
+	var out struct {
+		Key string `json:"key"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil || out.Key == "" {
+		return fmt.Errorf("minting project key: unexpected response")
+	}
+	if err := os.MkdirAll(filepath.Dir(routingKeyPath()), 0o700); err != nil {
+		return err
+	}
+	if err := os.WriteFile(routingKeyPath(), []byte(out.Key+"\n"), 0o600); err != nil {
+		return err
+	}
+	fmt.Printf("✓ Bound routed traffic to project: %s\n", slug)
+	return nil
 }
 
 // ── Claude Code (~/.claude/settings.json) ────────────────────────────────
@@ -317,10 +392,14 @@ func disconnectCodex(printOnly bool) error {
 func shellShimBlock() string {
 	gw := gatewayBase()
 	return codexBlockStart + `
+_cerver_routing_key() {
+  cat "$HOME/.cerver/gateway.key" 2>/dev/null || \
+    grep '^CERVER_API_KEY=' "$HOME/.cerver/cerver.env" 2>/dev/null | cut -d= -f2-
+}
 claude() {
   if [ -f "$HOME/.cerver/bridge" ]; then
     ANTHROPIC_BASE_URL="` + gw + `/v2/proxy/anthropic" \
-    ANTHROPIC_API_KEY="$(grep '^CERVER_API_KEY=' "$HOME/.cerver/cerver.env" 2>/dev/null | cut -d= -f2-)" \
+    ANTHROPIC_API_KEY="$(_cerver_routing_key)" \
     command claude "$@"
   else
     command claude "$@"
@@ -328,7 +407,7 @@ claude() {
 }
 codex() {
   if [ -f "$HOME/.cerver/bridge-codex" ]; then
-    CERVER_API_KEY="$(grep '^CERVER_API_KEY=' "$HOME/.cerver/cerver.env" 2>/dev/null | cut -d= -f2-)" \
+    CERVER_API_KEY="$(_cerver_routing_key)" \
     command codex --profile cerver "$@"
   else
     command codex "$@"
