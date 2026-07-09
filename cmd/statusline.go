@@ -76,8 +76,9 @@ func Statusline(args []string) error {
 		}
 		fmt.Println(line + projTag)
 	case throughDaemon && !bridgeOn:
-		// Live steady state: on your subscription, one word from routing.
-		fmt.Printf("%sCerver · subscription · %s%s\n", dim, model, projTag)
+		// Live steady state: request goes DIRECT to the vendor (your
+		// subscription); the opposite end of the same axis is "gateway".
+		fmt.Printf("%sCerver · direct · %s%s\n", dim, model, projTag)
 	default:
 		// Not on the daemon yet (pre-connect or a session that predates it).
 		connected := false
@@ -90,7 +91,7 @@ func Statusline(args []string) error {
 		if connected {
 			hint = " · restart claude to enable"
 		}
-		fmt.Printf("%sCerver · subscription · %s%s%s%s\n", dim, model, hint, reset, projTag)
+		fmt.Printf("%sCerver · direct · %s%s%s%s\n", dim, model, hint, reset, projTag)
 	}
 	return nil
 }
