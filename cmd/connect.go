@@ -106,7 +106,7 @@ reached"), type:
 
   cerver bridge             new claude/codex launches route via the cerver
                             gateway (your vault key, any provider) until
-  cerver bridge off         you switch back — or the limit resets
+  cerver gateway off         you switch back — or the limit resets
 
 Commands:
   cerver connect            set up Claude Code + Codex

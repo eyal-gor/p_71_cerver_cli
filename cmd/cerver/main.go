@@ -28,10 +28,11 @@ commands:
   logout     Revoke the local key server-side and delete cerver.env.
   connect    One-time setup: Claude Code bottom-bar indicator + gateway shims.
                Your subscriptions stay the default — nothing changes day to day.
-  bridge     Subscription hit its limit? Route new claude/codex launches
-               through the Cerver Gateway until it resets.
-                 cerver bridge          # on — keep working, pay per token
-                 cerver bridge off      # back to your subscription
+  gateway    Route Claude Code through Cerver (metered, capped, redacted)
+               or go direct on your subscription. Flips instantly, no restart.
+                 cerver gateway on      # route through Cerver
+                 cerver gateway off     # direct on your subscription
+                 cerver gateway help    # what this means
   run        Send a single prompt to one CLI on one compute.
                cerver run --agent reviewer "review my last commit"
   agents     Save reusable agent definitions (AGENTS.md + config). Apply
@@ -204,6 +205,8 @@ func main() {
 		err = cmd.Connect(args)
 	case "statusline":
 		err = cmd.Statusline(args)
+	case "gateway":
+		err = cmd.Gateway(args)
 	case "bridge":
 		err = cmd.Bridge(args)
 	case "daemon":
