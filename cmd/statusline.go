@@ -78,7 +78,8 @@ func Statusline(args []string) error {
 	case throughDaemon && !bridgeOn:
 		// Live steady state: request goes DIRECT to the vendor (your
 		// subscription); the opposite end of the same axis is "gateway".
-		fmt.Printf("%sCerver · Gateway off · %s%s · ? cerver gateway help%s\n", dim, model, projTag, reset)
+		help := oscLink("https://cerver.ai/gateway", "Cerver Help")
+		fmt.Printf("%sCerver · Gateway off · %s%s%s · %s%s\n", dim, model, projTag, dim, help, reset)
 	default:
 		// Not on the daemon yet (pre-connect or a session that predates it).
 		connected := false
@@ -133,6 +134,13 @@ func currentProject() string {
 
 // routingKeyForStatus prefers the bound project key (gateway.key) so the
 // statusline reflects the project traffic actually routes through.
+// oscLink wraps text in an OSC 8 terminal hyperlink (clickable in iTerm2,
+// kitty, WezTerm, etc.). Terminals that don't support it just show the text.
+func oscLink(url, text string) string {
+	esc := string(rune(27))
+	return esc + "]8;;" + url + esc + "\\" + text + esc + "]8;;" + esc + "\\"
+}
+
 func routingKeyForStatus() string {
 	home, err := os.UserHomeDir()
 	if err != nil {
