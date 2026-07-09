@@ -65,6 +65,12 @@ func Statusline(args []string) error {
 		provider = "openai"
 	}
 
+	proj := currentProject()
+	projTag := ""
+	if proj != "" {
+		projTag = dim + " · " + proj + reset
+	}
+
 	switch {
 	case routed:
 		spend := todaysSpend()
@@ -72,14 +78,52 @@ func Statusline(args []string) error {
 		if spend != "" {
 			line += dim + " · " + spend + " today" + reset
 		}
-		fmt.Println(line)
+		fmt.Println(line + projTag)
 	case bridgeOn:
 		// Bridge armed but THIS session predates it — it still runs direct.
-		fmt.Printf("%sCerver Gateway ⏳ armed — restart claude to route%s · %s\n", yellow, reset, model)
+		fmt.Printf("%sCerver Gateway ⏳ armed — restart claude to route%s · %s%s\n", yellow, reset, model, projTag)
 	default:
-		fmt.Printf("%sCerver · direct to %s · %s · limit hit? cerver bridge%s\n", dim, provider, model, reset)
+		fmt.Printf("%sCerver · direct to %s · %s · limit hit? cerver bridge%s%s\n", dim, provider, model, reset, projTag)
 	}
 	return nil
+}
+
+// currentProject returns the project this key is bound to ("global" hidden),
+// via /v2/auth/whoami, cached on disk 5 min (rarely changes).
+func currentProject() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	cachePath := filepath.Join(home, ".cerver", "project.cache")
+	if st, err := os.Stat(cachePath); err == nil && time.Since(st.ModTime()) < 5*time.Minute {
+		b, _ := os.ReadFile(cachePath)
+		return strings.TrimSpace(string(b))
+	}
+	key := os.Getenv("CERVER_API_KEY")
+	if key == "" {
+		key = readEnvKey(filepath.Join(home, ".cerver", "cerver.env"), "CERVER_API_KEY")
+	}
+	if key == "" {
+		return ""
+	}
+	client := &http.Client{Timeout: 250 * time.Millisecond}
+	req, _ := http.NewRequest("GET", gatewayBase()+"/v2/auth/whoami", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	resp, err := client.Do(req)
+	if err != nil {
+		return ""
+	}
+	defer resp.Body.Close()
+	var out struct {
+		ProjectSlug string `json:"project_slug"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&out) != nil {
+		return ""
+	}
+	proj := out.ProjectSlug
+	_ = os.WriteFile(cachePath, []byte(proj+"\n"), 0o600)
+	return proj
 }
 
 // todaysSpend returns today's account spend ("$0.42") from the gateway,
