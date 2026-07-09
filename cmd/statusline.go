@@ -58,51 +58,39 @@ func Statusline(args []string) error {
 		reset  = "\033[0m"
 	)
 
-	// Provider the session ultimately talks to — inferred from the model id
-	// (statusline runs inside Claude Code, but bridge failover can land the
-	// request elsewhere later).
-	provider := "anthropic"
-	if strings.HasPrefix(strings.ToLower(payload.Model.ID), "gpt") {
-		provider = "openai"
-	}
-
 	proj := currentProject()
 	projTag := ""
 	if proj != "" {
-		projTag = dim + " · " + proj + reset
+		projTag = dim + " · Project: " + proj + reset
 	}
 
+	// The second segment is a MODE flag, parallel to model/project:
+	//   subscription  — running on your plan, Cerver standing by
+	//   gateway       — routing through Cerver (metered/capped/redacted)
 	switch {
 	case (throughDaemon || routedDirect) && bridgeOn:
-		// Live through the daemon (or legacy direct) — routed right now.
 		spend := todaysSpend()
-		line := fmt.Sprintf("%sCerver Gateway%s %s⚡ active%s → %s · %s", orange, reset, orange, reset, provider, model)
+		line := fmt.Sprintf("%sCerver ·%s %s⚡ gateway%s %s· %s%s", dim, reset, orange, reset, dim, model, reset)
 		if spend != "" {
 			line += dim + " · " + spend + " today" + reset
 		}
 		fmt.Println(line + projTag)
 	case throughDaemon && !bridgeOn:
-		// On the daemon but bridge off — subscription now, one command to flip
-		// live (no restart). This is the good steady state.
-		fmt.Printf("%sCerver · subscription · %s · cerver bridge to route (instant)%s%s\n", dim, model, reset, projTag)
-	case bridgeOn:
-		// Bridge on but this session isn't on the daemon yet (started before
-		// connect). One last restart moves it onto live switching.
-		fmt.Printf("%sCerver Gateway ⏳ armed — restart claude once for live switching%s · %s%s\n", yellow, reset, model, projTag)
+		// Live steady state: on your subscription, one word from routing.
+		fmt.Printf("%sCerver · subscription · %s%s\n", dim, model, projTag)
 	default:
-		// Distinguish "never connected" from "connected, but this session
-		// predates the daemon" — the latter just needs one restart.
+		// Not on the daemon yet (pre-connect or a session that predates it).
 		connected := false
 		if home, err := os.UserHomeDir(); err == nil {
 			if _, e := os.Stat(filepath.Join(home, ".cerver", "gateway.key")); e == nil {
 				connected = true
 			}
 		}
+		hint := " · cerver connect to enable"
 		if connected {
-			fmt.Printf("%sCerver · subscription · %s · restart claude once to activate live routing%s%s\n", dim, model, reset, projTag)
-		} else {
-			fmt.Printf("%sCerver · subscription · %s · cerver connect to enable the gateway%s%s\n", dim, model, reset, projTag)
+			hint = " · restart claude to enable"
 		}
+		fmt.Printf("%sCerver · subscription · %s%s%s%s\n", dim, model, hint, reset, projTag)
 	}
 	return nil
 }
