@@ -4,9 +4,11 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // Connect wires the machine's coding agents through the cerver gateway.
@@ -52,6 +54,13 @@ func Connect(args []string) error {
 			}
 		}
 		if !*printOnly {
+			proj, scope := connectWhoami()
+			if scope == "project" {
+				fmt.Printf("\nRouted traffic lands in project: %s (cost, caps & redaction apply here).\n", proj)
+			} else if scope == "global" {
+				fmt.Println("\nHeads up: your key is GLOBAL — traffic isn't scoped to a project, so")
+				fmt.Println("per-project cost/caps/redaction won't apply. Bind a project key to fix that.")
+			}
 			fmt.Println("\nDone. New terminals pick this up automatically; current Claude Code")
 			fmt.Println("sessions need a restart. Verify with: cerver connect status")
 		}
@@ -396,7 +405,43 @@ func connectStatus() error {
 	}
 	fmt.Printf("Claude Code  %s\n", claudeState)
 	fmt.Printf("Codex        %s\n", codexState)
+
+	// Where does routed traffic land? Cost, caps and redaction are all
+	// per-project, so this is the important line.
+	proj, scope := connectWhoami()
+	if scope == "project" {
+		fmt.Printf("Project      %s  (cost, caps & redaction apply here)\n", proj)
+	} else if scope == "global" {
+		fmt.Println("Project      (global key — traffic is account-wide, not scoped to a project)")
+		fmt.Println("             → bind a project key for per-project cost/caps/redaction:")
+		fmt.Println("               cerver keys create --project <name>, then re-run cerver login with it")
+	}
 	return nil
+}
+
+// connectWhoami returns (projectSlug, scope) for the active key via the
+// gateway. scope is "project" | "global" | "" (unreachable).
+func connectWhoami() (string, string) {
+	key, err := connectKey()
+	if err != nil || key == "" {
+		return "", ""
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	req, _ := http.NewRequest("GET", gatewayBase()+"/v2/auth/whoami", nil)
+	req.Header.Set("Authorization", "Bearer "+key)
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", ""
+	}
+	defer resp.Body.Close()
+	var out struct {
+		ProjectSlug string `json:"project_slug"`
+		Scope       string `json:"scope"`
+	}
+	if json.NewDecoder(resp.Body).Decode(&out) != nil {
+		return "", ""
+	}
+	return out.ProjectSlug, out.Scope
 }
 
 func min(a, b int) int {
