@@ -188,6 +188,8 @@ func main() {
 		err = cmd.Test(args)
 	case "connect":
 		err = cmd.Connect(args)
+	case "statusline":
+		err = cmd.Statusline(args)
 	case "update", "self-update":
 		err = cmd.Update(args)
 	case "help", "-h", "--help":

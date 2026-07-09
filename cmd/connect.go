@@ -145,6 +145,15 @@ func connectClaude(key string, printOnly bool) error {
 	env["ANTHROPIC_API_KEY"] = key
 	settings["env"] = env
 
+	// Bottom-of-terminal indicator: routed or not, provider, model, spend.
+	// Installed once; kept on disconnect (it shows "cerver off" then).
+	if _, has := settings["statusLine"]; !has {
+		settings["statusLine"] = map[string]any{
+			"type":    "command",
+			"command": "cerver statusline",
+		}
+	}
+
 	out, err := json.MarshalIndent(settings, "", "  ")
 	if err != nil {
 		return err
