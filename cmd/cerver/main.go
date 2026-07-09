@@ -26,6 +26,12 @@ usage: cerver <command> [flags] [args]
 commands:
   login      Sign in (device-code flow) and write ~/.cerver/cerver.env.
   logout     Revoke the local key server-side and delete cerver.env.
+  connect    One-time setup: Claude Code bottom-bar indicator + gateway shims.
+               Your subscriptions stay the default — nothing changes day to day.
+  bridge     Subscription hit its limit? Route new claude/codex launches
+               through the Cerver Gateway until it resets.
+                 cerver bridge          # on — keep working, pay per token
+                 cerver bridge off      # back to your subscription
   run        Send a single prompt to one CLI on one compute.
                cerver run --agent reviewer "review my last commit"
   agents     Save reusable agent definitions (AGENTS.md + config). Apply
@@ -45,7 +51,6 @@ commands:
                cerver projects set-vault --slug kompany --vault ifc_…
                cerver projects delete --slug kompany
   keys       Manage project-scoped API keys (every key belongs to one project).
-               cerver connect            route claude/codex through the cerver gateway
   cerver keys                          # list (masked) + their project
                cerver keys create --project kompany [--label "prod server"]
                cerver keys delete --prefix ck_1a2b
