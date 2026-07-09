@@ -70,7 +70,7 @@ func Statusline(args []string) error {
 	switch {
 	case (throughDaemon || routedDirect) && bridgeOn:
 		spend := todaysSpend()
-		line := fmt.Sprintf("%sCerver ·%s %s⚡ gateway on%s %s· %s%s", dim, reset, orange, reset, dim, model, reset)
+		line := fmt.Sprintf("%sCerver ·%s %s⚡ Gateway on%s %s· %s%s", dim, reset, orange, reset, dim, model, reset)
 		if spend != "" {
 			line += dim + " · " + spend + " today" + reset
 		}
@@ -78,7 +78,7 @@ func Statusline(args []string) error {
 	case throughDaemon && !bridgeOn:
 		// Live steady state: request goes DIRECT to the vendor (your
 		// subscription); the opposite end of the same axis is "gateway".
-		fmt.Printf("%sCerver · gateway off · %s%s\n", dim, model, projTag)
+		fmt.Printf("%sCerver · Gateway off · %s%s · ? cerver gateway help%s\n", dim, model, projTag, reset)
 	default:
 		// Not on the daemon yet (pre-connect or a session that predates it).
 		connected := false
@@ -91,7 +91,7 @@ func Statusline(args []string) error {
 		if connected {
 			hint = " · restart claude to enable"
 		}
-		fmt.Printf("%sCerver · gateway off · %s%s%s%s\n", dim, model, hint, reset, projTag)
+		fmt.Printf("%sCerver · Gateway off · %s%s%s%s\n", dim, model, hint, reset, projTag)
 	}
 	return nil
 }
