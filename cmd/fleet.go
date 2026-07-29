@@ -106,8 +106,15 @@ func fleetSnapshot(ctx context.Context, gw *gateway.Client, limit int) (*fleetBo
 			defer wg.Done()
 			sem <- struct{}{}
 			defer func() { <-sem }()
-			s, err := gw.GetSessionTail(ctx, list[i].SessionID, 1)
+			s, err := gw.GetSessionTail(ctx, list[i].SessionID, 4)
 			if err != nil || len(s.Transcript) == 0 {
+				return
+			}
+			// Prefer what the agent said over trailing system events
+			// (session_completed JSON etc.).
+			if txt := s.LastAssistantText(); txt != "" {
+				tails[i] = lastLine(txt)
+				roles[i] = "assistant"
 				return
 			}
 			last := s.Transcript[len(s.Transcript)-1]
