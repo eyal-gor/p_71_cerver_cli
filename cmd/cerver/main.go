@@ -1,9 +1,10 @@
 // cerver — drive cerver sessions from the terminal.
 //
 // Subcommands (v1):
-//   cerver run [--cli claude|codex|grok] [--on <compute>] [--bill api|sub] "prompt"
-//   cerver compare "prompt" <cli> <compute> [<cli> <compute> …]
-//   cerver computes [--json]
+//
+//	cerver run [--cli claude|codex|grok] [--on <compute>] [--bill api|sub] "prompt"
+//	cerver compare "prompt" <cli> <compute> [<cli> <compute> …]
+//	cerver computes [--json]
 //
 // Reads UA creds from ~/.cerver/infisical.env. Fetches CERVER_API_TOKEN
 // (and provider keys when --bill api) at call time. Talks to
@@ -82,6 +83,8 @@ commands:
                  cerver insights --project SLUG
                  cerver insights --limit 50 --json
   sessions   List recent sessions.
+  fleet      Agent-manager board: awaiting input / working / completed,
+               one headline per session (--watch to live-refresh).
   show       Print a session's full transcript (--follow to stream).
   peek       One-screen snapshot of a session (status + last reply).
   move       Move a live session to a different compute.
@@ -189,6 +192,8 @@ func main() {
 		err = cmd.Insights(args)
 	case "sessions":
 		err = cmd.Sessions(args)
+	case "fleet":
+		err = cmd.Fleet(args)
 	case "show":
 		err = cmd.Show(args)
 	case "peek":
