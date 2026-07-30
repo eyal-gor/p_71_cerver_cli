@@ -649,7 +649,7 @@ func fleetMascot(frame int) []string {
 	return []string{
 		" ╭──────╮",
 		" │ " + eyes + " │",
-		" │  ‿‿  │",
+		" │ ╰──╯ │",
 		" ╰──────╯",
 		"   ╹  ╹",
 	}
