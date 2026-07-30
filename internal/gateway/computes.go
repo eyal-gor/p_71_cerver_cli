@@ -8,6 +8,13 @@ type Compute struct {
 	Provider string `json:"provider"`
 	Status   string `json:"status"`
 	Scope    string `json:"scope"`
+	Kind     string `json:"kind"`
+	// LastHeartbeatAt is the relay's real liveness signal — Status can
+	// report "ready" long after the relay died.
+	LastHeartbeatAt string `json:"last_heartbeat_at"`
+	Capabilities    struct {
+		CliTools []string `json:"cli_tools"`
+	} `json:"capabilities"`
 }
 
 type computesResp struct {

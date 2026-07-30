@@ -406,15 +406,20 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 	// once, synchronously, before the loop starts — the map is then
 	// read-only, so goroutines can use it without locking.
 	computeNames := map[string]string{}
+	var relayComputes []gateway.Compute
 	{
 		reqCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		if cs, err := gw.ListComputes(reqCtx); err == nil {
+			relayComputes = cs
 			for _, c := range cs {
 				computeNames[c.ID] = c.Label
 			}
 		}
 		cancel()
 	}
+	relayCh := make(chan []gateway.Compute, 1)
+	relayTick := time.NewTicker(30 * time.Second)
+	defer relayTick.Stop()
 
 	loadBoard := func() {
 		if boardBusy {
@@ -616,7 +621,7 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 			if projLabel == "" {
 				projLabel = "all projects"
 			}
-			drawBoard(board, items, selected, &boardTop, input, launchMsg, frame, boardLoading, projLabel)
+			drawBoard(board, items, selected, &boardTop, input, launchMsg, frame, boardLoading, projLabel, relayStatusLine(relayComputes))
 		case "projects":
 			drawProjects(projects, projSel, curProject)
 		case "details":
@@ -907,6 +912,19 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 			} else if selectedID != "" {
 				loadSession(selectedID, sessName)
 			}
+		case cs := <-relayCh:
+			relayComputes = cs
+			for _, c := range cs {
+				computeNames[c.ID] = c.Label
+			}
+		case <-relayTick.C:
+			go func() {
+				reqCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+				defer cancel()
+				if cs, err := gw.ListComputes(reqCtx); err == nil {
+					relayCh <- cs
+				}
+			}()
 		case <-spin.C:
 			frame++
 		}
@@ -1015,7 +1033,7 @@ func recentWithin(iso string, d time.Duration) bool {
 	return err == nil && time.Since(t) < d
 }
 
-func drawBoard(b *fleetBoard, items []boardItem, selected int, top *int, input, launchMsg string, frame int, loading bool, projLabel string) {
+func drawBoard(b *fleetBoard, items []boardItem, selected int, top *int, input, launchMsg string, frame int, loading bool, projLabel, relayLine string) {
 	lines, cols := termSize()
 	var sb strings.Builder
 	// Home + per-line erase (\x1b[K) + erase-below (\x1b[J) instead of a
@@ -1052,7 +1070,7 @@ func drawBoard(b *fleetBoard, items []boardItem, selected int, top *int, input, 
 			projLine = inv + "project: " + projLabel + " ▾" + reset
 		}
 		sb.WriteString(fmt.Sprintf("%s   %s%s", m[3], projLine, eol))
-		sb.WriteString(m[4] + eol)
+		sb.WriteString(fmt.Sprintf("%s   %s%s", m[4], relayLine, eol))
 		sb.WriteString(eol)
 		logoRows = len(m) + 1
 		fleetHit.projectRow = 4
@@ -1063,8 +1081,9 @@ func drawBoard(b *fleetBoard, items []boardItem, selected int, top *int, input, 
 			small = inv + "project: " + projLabel + " ▾" + reset
 		}
 		sb.WriteString(fmt.Sprintf("%scerver fleet%s · %s · %s%s", bold, reset, counts, small, eol))
+		sb.WriteString(relayLine + eol)
 		fleetHit.projectRow = 1
-		contentRow = 2
+		contentRow = 3
 	}
 
 	// Column widths from the live terminal.
@@ -1445,6 +1464,49 @@ func drawDetails(slug string, envs, wfs []string, loading bool, frame int) {
 	sb.WriteString("\x1b[J")
 	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%se open environments · w open workflows · tab projects · esc back · ctrl-c quit%s\x1b[K", lines, dim, reset))
 	os.Stdout.WriteString(sb.String())
+}
+
+// relayStatusLine: liveness of the local relay and which harnesses it
+// can run — judged by heartbeat freshness, because compute Status can
+// say "ready" long after the relay process died.
+func relayStatusLine(computes []gateway.Compute) string {
+	dim, green, red, reset := "\x1b[2m", "\x1b[32m", "\x1b[31m", "\x1b[0m"
+	var best *gateway.Compute
+	var bestAge time.Duration
+	for i := range computes {
+		c := &computes[i]
+		if c.Kind != "local" {
+			continue
+		}
+		t, err := time.Parse(time.RFC3339, c.LastHeartbeatAt)
+		if err != nil {
+			continue
+		}
+		age := time.Since(t)
+		if best == nil || age < bestAge {
+			best, bestAge = c, age
+		}
+	}
+	if best == nil {
+		return dim + "relay " + red + "○" + reset + dim + " not installed — curl -fsSL cerver.ai/install.sh | bash" + reset
+	}
+	if bestAge > 3*time.Minute {
+		return fmt.Sprintf("%srelay %s○%s%s %s · offline %s — agents can't run until it's back%s",
+			dim, red, reset, dim, best.Label, shortDur(bestAge), reset)
+	}
+	line := fmt.Sprintf("%srelay %s●%s %s", dim, green, reset+dim, best.Label)
+	avail := map[string]bool{}
+	for _, t := range best.Capabilities.CliTools {
+		avail[t] = true
+	}
+	for _, h := range []string{"claude", "codex", "grok"} {
+		if avail[h] {
+			line += " · " + reset + green + "✓" + reset + dim + " " + harnessLabel(h)
+		} else {
+			line += " · ✗ " + harnessLabel(h)
+		}
+	}
+	return line + reset
 }
 
 // shortDur: compact duration for status text — 3m, 2h, 1d.
