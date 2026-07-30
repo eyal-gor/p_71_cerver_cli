@@ -492,7 +492,7 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int) error 
 			}
 			drawBoard(board, rows, selected, &boardTop, input, launchMsg, frame, boardLoading)
 		case "session":
-			drawSession(sessTitle, sessLines, scroll, sessInput, launchMsg, frame, sessActive(), sessLoading)
+			drawSession(sessTitle, sessLines, &scroll, sessInput, launchMsg, frame, sessActive(), sessLoading)
 		}
 
 		select {
@@ -890,7 +890,7 @@ func wrapLine(s string, width int) []string {
 	return out
 }
 
-func drawSession(title string, content []string, scroll int, input, msg string, frame int, active, loading bool) {
+func drawSession(title string, content []string, scroll *int, input, msg string, frame int, active, loading bool) {
 	lines, cols := termSize()
 	dim, bold, reset := "\x1b[2m", "\x1b[1m", "\x1b[0m"
 	eol := "\x1b[K\r\n"
@@ -909,13 +909,20 @@ func drawSession(title string, content []string, scroll int, input, msg string, 
 	}
 
 	// scroll counts lines up from the bottom; 0 = pinned to newest.
-	end := len(content) - scroll
-	if end > len(content) {
-		end = len(content)
+	// Clamped to the content so you can't scroll past the top — the
+	// counter used to run free, freezing the view while "N lines below"
+	// grew on a transcript with nothing left to show.
+	maxScroll := len(content) - viewport
+	if maxScroll < 0 {
+		maxScroll = 0
 	}
-	if end < viewport {
-		end = min(viewport, len(content))
+	if *scroll > maxScroll {
+		*scroll = maxScroll
 	}
+	if *scroll < 0 {
+		*scroll = 0
+	}
+	end := len(content) - *scroll
 	start := end - viewport
 	if start < 0 {
 		start = 0
@@ -945,8 +952,8 @@ func drawSession(title string, content []string, scroll int, input, msg string, 
 	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s\x1b[K", lines-2, inputBar(input, "reply to this agent…", cols)))
 	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s%s%s\x1b[K", lines-1, bold, truncate(title, cols-1), reset))
 	pos := ""
-	if scroll > 0 {
-		pos = fmt.Sprintf(" · %d lines below", scroll)
+	if *scroll > 0 {
+		pos = fmt.Sprintf(" · %d lines below", *scroll)
 	}
 	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s↑↓ scroll · type + enter reply · ←/esc back · ctrl-c quit%s%s\x1b[K", lines, dim, reset, pos))
 	os.Stdout.WriteString(sb.String())
@@ -969,16 +976,22 @@ func fleetReadKeys(out chan<- keyEvent) {
 			out <- keyEvent{k: keyEnter}
 		case b[0] == 127 || b[0] == 8: // Backspace / Ctrl-H
 			out <- keyEvent{k: keyBackspace}
-		case b[0] == 27: // ESC sequences
+		case b[0] == 27: // ESC sequences — a fast autorepeat can pack
+			// several arrows into one read, so emit one event apiece.
 			s := string(b)
-			switch {
-			case strings.HasSuffix(s, "A"):
+			ups := strings.Count(s, "A")
+			downs := strings.Count(s, "B")
+			backs := strings.Count(s, "D")
+			for i := 0; i < ups; i++ {
 				out <- keyEvent{k: keyUp}
-			case strings.HasSuffix(s, "B"):
+			}
+			for i := 0; i < downs; i++ {
 				out <- keyEvent{k: keyDown}
-			case strings.HasSuffix(s, "D"): // ← and shift+← ("[1;2D") both go back
+			}
+			if backs > 0 {
 				out <- keyEvent{k: keyBack}
-			case n == 1: // bare Esc
+			}
+			if n == 1 { // bare Esc
 				out <- keyEvent{k: keyBack}
 			}
 		default:
