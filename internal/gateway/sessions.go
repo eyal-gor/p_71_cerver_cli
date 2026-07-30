@@ -278,6 +278,25 @@ func (c *Client) Login(ctx context.Context, email string) (*LoginResp, error) {
 	return &out, nil
 }
 
+// CompletedExitCode parses the most recent session_completed event's
+// exit_code. found=false when no such event is on the transcript (older
+// relays, or the CLI is still running).
+func (s *Session) CompletedExitCode() (code int, found bool) {
+	for i := len(s.Transcript) - 1; i >= 0; i-- {
+		if s.Transcript[i].Kind != "session_completed" {
+			continue
+		}
+		var payload struct {
+			ExitCode *int `json:"exit_code"`
+		}
+		if json.Unmarshal([]byte(s.Transcript[i].Content), &payload) == nil && payload.ExitCode != nil {
+			return *payload.ExitCode, true
+		}
+		return 0, false
+	}
+	return 0, false
+}
+
 // LastAssistantText pulls the most recent assistant text entry (skips
 // tool_use / tool_result).
 func (s *Session) LastAssistantText() string {
