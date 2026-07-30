@@ -515,6 +515,7 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 				}
 				return v
 			}
+			project, _ := s.Metadata["project_slug"].(string)
 			harness, _ := s.Metadata["cli_tool"].(string)
 			harness = harnessLabel(harness)
 			model, _ := s.Metadata["cli_model"].(string)
@@ -526,7 +527,7 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 				}
 			}
 			snap.title = strings.Join([]string{
-				name, pick(harness), pick(model), pick(compute), pick(s.Status), shortID(id),
+				name, pick(project), pick(harness), pick(model), pick(compute), pick(s.Status), shortID(id),
 			}, " · ")
 			sessCh <- snap
 		}()
