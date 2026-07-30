@@ -776,6 +776,14 @@ func renderTranscript(s *gateway.Session, cols int) []string {
 	}
 	var out []string
 	for _, e := range s.Transcript {
+		// Relay bookkeeping: after every turn a session_completed system
+		// event lands in the transcript (exit code, duration, usage).
+		// It's plumbing, not conversation — hide it. Other system events
+		// (errors etc.) stay visible.
+		if e.Role == "system" && strings.HasPrefix(strings.TrimSpace(e.Content), "{") &&
+			strings.Contains(e.Content, `"session_completed"`) {
+			continue
+		}
 		label := e.Role
 		style := ""
 		switch {
