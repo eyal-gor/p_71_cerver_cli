@@ -882,6 +882,13 @@ func drawSession(title string, content []string, scroll int, input, msg string, 
 	if viewport < 3 {
 		viewport = 3
 	}
+	// While the agent owes a reply, render a pending bubble exactly where
+	// the answer will appear — the real message replaces it on arrival.
+	if active || msg == "sending…" {
+		content = append(append([]string{}, content...),
+			"", dim+"── agent ──"+reset, dim+"  "+spinnerFor(frame)+" thinking…"+reset)
+	}
+
 	// scroll counts lines up from the bottom; 0 = pinned to newest.
 	end := len(content) - scroll
 	if end > len(content) {
@@ -899,18 +906,15 @@ func drawSession(title string, content []string, scroll int, input, msg string, 
 	}
 	sb.WriteString("\x1b[J")
 
-	// Status line priority: in-flight operation → transcript loading →
-	// waiting on the agent (the thinking spinner outranks static
-	// confirmations like "✳ sent", which only show when nothing is
-	// actually happening).
+	// Status line: thinking/sending render inline as the pending bubble
+	// above; this line only carries loads and non-transient messages.
 	status := ""
 	switch {
+	case msg == "sending…": // inline bubble covers it
 	case inProgress(msg):
 		status = spinnerFor(frame) + " " + msg
 	case loading:
 		status = spinnerFor(frame) + " loading transcript…"
-	case active:
-		status = spinnerFor(frame) + " agent is thinking…"
 	case msg != "":
 		status = msg
 	}
