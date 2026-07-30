@@ -635,6 +635,16 @@ func flattenBoard(b *fleetBoard) []fleetRow {
 
 var spinFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
+// fleetLogo: the big banner atop the board, Claude-Code style. Only
+// rendered when the terminal has room for it.
+var fleetLogo = []string{
+	" ██████ ███████ ██████  ██    ██ ███████ ██████ ",
+	"██      ██      ██   ██ ██    ██ ██      ██   ██",
+	"██      █████   ██████  ██    ██ █████   ██████ ",
+	"██      ██      ██   ██  ██  ██  ██      ██   ██",
+	" ██████ ███████ ██   ██   ████   ███████ ██   ██",
+}
+
 func spinnerFor(frame int) string { return spinFrames[frame%len(spinFrames)] }
 
 // inProgress: only the known in-flight status messages animate — a
@@ -681,6 +691,15 @@ func drawBoard(b *fleetBoard, rows []fleetRow, selected int, top *int, input, la
 	sb.WriteString("\x1b[H")
 	dim, yellow, green, red, bold, inv, reset := "\x1b[2m", "\x1b[33m", "\x1b[32m", "\x1b[31m", "\x1b[1m", "\x1b[7m", "\x1b[0m"
 	eol := "\x1b[K\r\n"
+
+	logoRows := 0
+	if cols >= 52 && lines >= 22 {
+		for _, ln := range fleetLogo {
+			sb.WriteString(green + ln + reset + eol)
+		}
+		sb.WriteString(eol) // breathing room under the banner
+		logoRows = len(fleetLogo) + 1
+	}
 
 	nA, nW, nDone := 0, 0, 0
 	if b != nil {
@@ -744,7 +763,7 @@ func drawBoard(b *fleetBoard, rows []fleetRow, selected int, top *int, input, la
 	// Pass 2: window `budget` lines, nudging the stored offset only as far
 	// as needed to keep the selection visible (with one line of margin so
 	// the next row is always peeking).
-	budget := lines - 8 // header + indicators + status + launch bar + footer + slack
+	budget := lines - 8 - logoRows // logo + header + indicators + status + launch bar + footer + slack
 	if budget < 3 {
 		budget = 3
 	}
