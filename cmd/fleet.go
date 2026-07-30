@@ -289,9 +289,13 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int) error 
 	if err := sttyRaw(); err != nil {
 		return err
 	}
-	fmt.Print("\x1b[?1049h\x1b[?25l") // alt screen, hide cursor
+	// Alt screen + hidden cursor + SGR mouse reporting: wheel events
+	// reach the app as escape sequences (and scroll the view) instead of
+	// iTerm scrolling its window over the alternate screen, which shows
+	// ghost frames.
+	fmt.Print("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h")
 	defer func() {
-		fmt.Print("\x1b[?25h\x1b[?1049l") // show cursor, main screen
+		fmt.Print("\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l")
 		sttyRestore(saved)
 	}()
 
@@ -635,14 +639,20 @@ func flattenBoard(b *fleetBoard) []fleetRow {
 
 var spinFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
-// fleetLogo: the big banner atop the board, Claude-Code style. Only
-// rendered when the terminal has room for it.
-var fleetLogo = []string{
-	" ██████ ███████ ██████  ██    ██ ███████ ██████ ",
-	"██      ██      ██   ██ ██    ██ ██      ██   ██",
-	"██      █████   ██████  ██    ██ █████   ██████ ",
-	"██      ██      ██   ██  ██  ██  ██      ██   ██",
-	" ██████ ███████ ██   ██   ████   ███████ ██   ██",
+// fleetMascot: a little server buddy atop the board, Claude-Code
+// style. Eyes blink every few seconds (driven by the spinner frame).
+func fleetMascot(frame int) []string {
+	eyes := "●  ●"
+	if frame%25 < 2 {
+		eyes = "─  ─"
+	}
+	return []string{
+		" ╭──────╮",
+		" │ " + eyes + " │",
+		" │  ‿‿  │",
+		" ╰──────╯",
+		"   ╹  ╹",
+	}
 }
 
 func spinnerFor(frame int) string { return spinFrames[frame%len(spinFrames)] }
@@ -692,15 +702,6 @@ func drawBoard(b *fleetBoard, rows []fleetRow, selected int, top *int, input, la
 	dim, yellow, green, red, bold, inv, reset := "\x1b[2m", "\x1b[33m", "\x1b[32m", "\x1b[31m", "\x1b[1m", "\x1b[7m", "\x1b[0m"
 	eol := "\x1b[K\r\n"
 
-	logoRows := 0
-	if cols >= 52 && lines >= 22 {
-		for _, ln := range fleetLogo {
-			sb.WriteString(green + ln + reset + eol)
-		}
-		sb.WriteString(eol) // breathing room under the banner
-		logoRows = len(fleetLogo) + 1
-	}
-
 	nA, nW, nDone := 0, 0, 0
 	if b != nil {
 		nA, nW, nDone = len(b.Awaiting), len(b.Working), len(b.Completed)+len(b.Failed)
@@ -709,7 +710,23 @@ func drawBoard(b *fleetBoard, rows []fleetRow, selected int, top *int, input, la
 	if loading {
 		loadTag = "  " + dim + spinnerFor(frame) + reset
 	}
-	sb.WriteString(fmt.Sprintf("%scerver fleet%s · %d awaiting input · %d working · %d completed%s%s", bold, reset, nA, nW, nDone, loadTag, eol))
+	counts := fmt.Sprintf("%d awaiting input · %d working · %d completed%s", nA, nW, nDone, loadTag)
+
+	logoRows := 0
+	if cols >= 56 && lines >= 20 {
+		// Mascot left, title + counts to its right — like the Claude
+		// Code welcome block.
+		m := fleetMascot(frame)
+		sb.WriteString(green + m[0] + reset + eol)
+		sb.WriteString(fmt.Sprintf("%s%s%s   %scerver fleet%s%s", green, m[1], reset, bold, reset, eol))
+		sb.WriteString(fmt.Sprintf("%s%s%s   %s%s%s%s", green, m[2], reset, dim, counts, reset, eol))
+		sb.WriteString(green + m[3] + reset + eol)
+		sb.WriteString(green + m[4] + reset + eol)
+		sb.WriteString(eol)
+		logoRows = len(m) + 1
+	} else {
+		sb.WriteString(fmt.Sprintf("%scerver fleet%s · %s%s", bold, reset, counts, eol))
+	}
 
 	// Column widths from the live terminal.
 	nameW := 24
@@ -763,7 +780,7 @@ func drawBoard(b *fleetBoard, rows []fleetRow, selected int, top *int, input, la
 	// Pass 2: window `budget` lines, nudging the stored offset only as far
 	// as needed to keep the selection visible (with one line of margin so
 	// the next row is always peeking).
-	budget := lines - 8 - logoRows // logo + header + indicators + status + launch bar + footer + slack
+	budget := lines - 7 - logoRows // header block + indicators + status + launch bar + footer + slack
 	if budget < 3 {
 		budget = 3
 	}
@@ -961,6 +978,9 @@ func drawSession(title string, content []string, scroll *int, input, msg string,
 
 // ── raw-mode plumbing (stdlib-only, via stty) ────────────────────────
 
+// mouseSeq: SGR mouse report — \x1b[<code;x;yM (press/wheel) or m (release).
+var mouseSeq = regexp.MustCompile(`\x1b\[<(\d+);\d+;\d+[Mm]`)
+
 func fleetReadKeys(out chan<- keyEvent) {
 	buf := make([]byte, 64)
 	for {
@@ -979,6 +999,20 @@ func fleetReadKeys(out chan<- keyEvent) {
 		case b[0] == 27: // ESC sequences — a fast autorepeat can pack
 			// several arrows into one read, so emit one event apiece.
 			s := string(b)
+			// SGR mouse events first: wheel up/down scroll (two lines per
+			// notch feels natural); clicks are ignored. Strip them so the
+			// arrow-key counting below never sees their digits.
+			for _, m := range mouseSeq.FindAllStringSubmatch(s, -1) {
+				switch m[1] {
+				case "64":
+					out <- keyEvent{k: keyUp}
+					out <- keyEvent{k: keyUp}
+				case "65":
+					out <- keyEvent{k: keyDown}
+					out <- keyEvent{k: keyDown}
+				}
+			}
+			s = mouseSeq.ReplaceAllString(s, "")
 			ups := strings.Count(s, "A")
 			downs := strings.Count(s, "B")
 			backs := strings.Count(s, "D")
