@@ -307,6 +307,7 @@ const (
 	keyTab       // project switcher
 	keyRight     // project details
 	keyClick     // left mouse click (x, y set)
+	keyResend    // Ctrl-R: nudge — resend the last user message
 )
 
 // keyEvent carries the parsed key plus the rune for keyRune events and
@@ -351,8 +352,8 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 	// animating while we wait for the gateway.
 	boardCh := make(chan *fleetBoard, 1)
 	type sessSnap struct {
-		id, title, status, lastRole, lastAt string
-		lines                               []string
+		id, title, status, lastRole, lastAt, lastUser string
+		lines                                         []string
 	}
 	sessCh := make(chan sessSnap, 1)
 
@@ -377,6 +378,7 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 	sessLastRole := ""
 	sessLastAt := ""
 	sessCancelled := false // Esc dismissed the wait on the pending turn
+	sessLastUser := ""     // last user message — Ctrl-R resends it
 	boardLoading := true
 	sessLoading := false
 	collapsed := map[string]bool{} // folded board groups
@@ -489,6 +491,12 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 			if len(s.Transcript) > 0 {
 				snap.lastRole = s.Transcript[len(s.Transcript)-1].Role
 				snap.lastAt = s.Transcript[len(s.Transcript)-1].At
+			}
+			for i := len(s.Transcript) - 1; i >= 0; i-- {
+				if s.Transcript[i].Role == "user" {
+					snap.lastUser = strings.TrimSpace(s.Transcript[i].Content)
+					break
+				}
 			}
 			// Fixed slots — harness · model · compute always present (with
 			// — when unknown) so each position reads unambiguously.
@@ -614,7 +622,12 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 		case "details":
 			drawDetails(detailSlug, detailEnvs, detailWfs, detailLoading, frame)
 		case "session":
-			drawSession(sessTitle, sessLines, &scroll, sessInput, launchMsg, frame, sessActive() && !sessCancelled, sessLoading)
+			owed := sessLastRole == "user" && !sessCancelled && sessStatus != "failed" && sessStatus != "terminated"
+			quiet := time.Duration(0)
+			if t, err := time.Parse(time.RFC3339, sessLastAt); err == nil {
+				quiet = time.Since(t)
+			}
+			drawSession(sessTitle, sessLines, &scroll, sessInput, launchMsg, frame, sessActive() && !sessCancelled, sessLoading, owed, quiet)
 		}
 
 		select {
@@ -809,8 +822,15 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 					if text := strings.TrimSpace(sessInput); text != "" && selectedID != "" {
 						sessInput = ""
 						sessCancelled = false
+						sessLastUser = text
 						launchMsg = "sending…"
 						sendReply(selectedID, text)
+					}
+				case keyResend:
+					if sessLastUser != "" && selectedID != "" {
+						sessCancelled = false
+						launchMsg = "sending…"
+						sendReply(selectedID, sessLastUser)
 					}
 				case keyBack:
 					switch {
@@ -860,6 +880,7 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 				sessStatus = s.status
 				sessLastRole = s.lastRole
 				sessLastAt = s.lastAt
+				sessLastUser = s.lastUser
 				// The agent has answered — cancelled-wait state and any
 				// lingering "✳ sent" note are stale the moment the reply
 				// is on screen.
@@ -931,19 +952,28 @@ func boardItems(b *fleetBoard, collapsed map[string]bool) []boardItem {
 
 var spinFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
 
-// fleetMascot: a little server buddy atop the board, Claude-Code
-// style. Eyes blink every few seconds (driven by the spinner frame).
+// fleetMascot: a square little server buddy atop the board. One eye
+// per model company (landing palette), blinking every few seconds; the
+// ground strip is the landing page's colorful divider.
 func fleetMascot(frame int) []string {
-	eyes := "●   ●"
+	const (
+		cBlue   = "\x1b[38;2;42;120;214m"
+		cOrange = "\x1b[38;2;235;104;52m"
+		cGreen  = "\x1b[38;2;27;175;122m"
+		cYellow = "\x1b[38;2;237;161;0m"
+		cReset  = "\x1b[0m"
+	)
+	eyeL, eyeR := cBlue+"■"+cReset, cOrange+"■"+cReset
 	if frame%25 < 2 {
-		eyes = "─   ─"
+		eyeL, eyeR = cBlue+"─"+cReset, cOrange+"─"+cReset
 	}
+	strip := " " + cBlue + "▀▀" + cOrange + "▀▀" + cGreen + "▀▀" + cYellow + "▀▀" + cReset
 	return []string{
-		"   ▄▀▀▀▀▀▄",
-		"  ▐ " + eyes + " ▌",
-		"  ▐   ◡   ▌",
-		"   ▀▄▄▄▄▄▀",
-		"   ▔▔▔▔▔▔▔",
+		" ▛▀▀▀▀▀▀▀▜",
+		" ▌ " + eyeL + "   " + eyeR + " ▐",
+		" ▌   " + cYellow + "◡" + cReset + "   ▐",
+		" ▙▄▄▄▄▄▄▄▟",
+		strip,
 	}
 }
 
@@ -1014,15 +1044,15 @@ func drawBoard(b *fleetBoard, items []boardItem, selected int, top *int, input, 
 		// Mascot left, title + counts to its right — like the Claude
 		// Code welcome block. The project line is a click target.
 		m := fleetMascot(frame)
-		sb.WriteString(green + m[0] + reset + eol)
-		sb.WriteString(fmt.Sprintf("%s%s%s   %scerver fleet%s%s", green, m[1], reset, bold, reset, eol))
-		sb.WriteString(fmt.Sprintf("%s%s%s   %s%s%s%s", green, m[2], reset, dim, counts, reset, eol))
+		sb.WriteString(m[0] + eol)
+		sb.WriteString(fmt.Sprintf("%s   %scerver fleet%s%s", m[1], bold, reset, eol))
+		sb.WriteString(fmt.Sprintf("%s   %s%s%s%s", m[2], dim, counts, reset, eol))
 		projLine := fmt.Sprintf("%sproject:%s %s%s ▾%s %s(tab or click to switch)%s", dim, reset, bold, projLabel, reset, dim, reset)
 		if projSelected {
 			projLine = inv + "project: " + projLabel + " ▾" + reset
 		}
-		sb.WriteString(fmt.Sprintf("%s%s%s   %s%s", green, m[3], reset, projLine, eol))
-		sb.WriteString(green + m[4] + reset + eol)
+		sb.WriteString(fmt.Sprintf("%s   %s%s", m[3], projLine, eol))
+		sb.WriteString(m[4] + eol)
 		sb.WriteString(eol)
 		logoRows = len(m) + 1
 		fleetHit.projectRow = 4
@@ -1216,7 +1246,19 @@ func renderTranscript(s *gateway.Session, cols int) []string {
 		width = 40
 	}
 	var out []string
+	prevUser := ""
 	for _, e := range s.Transcript {
+		// cerver run registers the task at create AND sends it as the
+		// first input — the same text lands twice back-to-back. Show it
+		// once.
+		if e.Role == "user" {
+			if strings.TrimSpace(e.Content) == prevUser {
+				continue
+			}
+			prevUser = strings.TrimSpace(e.Content)
+		} else if e.Role == "assistant" {
+			prevUser = ""
+		}
 		// Relay bookkeeping: after every turn a session_completed system
 		// event lands in the transcript (exit code, duration, usage).
 		// It's plumbing, not conversation — hide it. Other system events
@@ -1289,7 +1331,7 @@ func wrapLine(s string, width int) []string {
 	return out
 }
 
-func drawSession(title string, content []string, scroll *int, input, msg string, frame int, active, loading bool) {
+func drawSession(title string, content []string, scroll *int, input, msg string, frame int, active, loading, owed bool, quiet time.Duration) {
 	lines, cols := termSize()
 	dim, bold, reset := "\x1b[2m", "\x1b[1m", "\x1b[0m"
 	eol := "\x1b[K\r\n"
@@ -1302,9 +1344,20 @@ func drawSession(title string, content []string, scroll *int, input, msg string,
 	}
 	// While the agent owes a reply, render a pending bubble exactly where
 	// the answer will appear — the real message replaces it on arrival.
-	if active || msg == "sending…" {
+	// Long silences say so and offer the nudge; very stale ones (the
+	// relay never woke an agent) drop the spinner but keep the hint.
+	if active || owed || msg == "sending…" {
+		think := spinnerFor(frame) + " thinking…"
+		switch {
+		case msg == "sending…":
+			// fresh send — plain thinking bubble
+		case active && quiet > 90*time.Second:
+			think = spinnerFor(frame) + " still quiet · " + shortDur(quiet) + " — ctrl-r resends your message"
+		case !active && owed:
+			think = "no reply · quiet " + shortDur(quiet) + " — ctrl-r resends your message"
+		}
 		content = append(append([]string{}, content...),
-			"", dim+"── agent ──"+reset, dim+"  "+spinnerFor(frame)+" thinking…"+reset)
+			"", dim+"── agent ──"+reset, dim+"  "+think+reset)
 	}
 
 	// scroll counts lines up from the bottom; 0 = pinned to newest.
@@ -1394,6 +1447,19 @@ func drawDetails(slug string, envs, wfs []string, loading bool, frame int) {
 	os.Stdout.WriteString(sb.String())
 }
 
+// shortDur: compact duration for status text — 3m, 2h, 1d.
+func shortDur(d time.Duration) string {
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	}
+	return fmt.Sprintf("%dd", int(d.Hours()/24))
+}
+
 // openURL opens a link in the default browser (macOS `open`, else xdg-open).
 func openURL(u string) {
 	cmd := "open"
@@ -1455,6 +1521,8 @@ func fleetReadKeys(out chan<- keyEvent) {
 		switch {
 		case b[0] == 3: // Ctrl-C
 			out <- keyEvent{k: keyQuit}
+		case b[0] == 0x12: // Ctrl-R
+			out <- keyEvent{k: keyResend}
 		case b[0] == '\t':
 			out <- keyEvent{k: keyTab}
 		case b[0] == '\r' || b[0] == '\n':
