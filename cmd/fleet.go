@@ -332,6 +332,7 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int) error 
 	sessStatus := ""
 	sessLastRole := ""
 	sessLastAt := ""
+	sessCancelled := false // Esc dismissed the wait on the pending turn
 	boardLoading := true
 	sessLoading := false
 	boardBusy := false
@@ -496,7 +497,7 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int) error 
 			}
 			drawBoard(board, rows, selected, &boardTop, input, launchMsg, frame, boardLoading)
 		case "session":
-			drawSession(sessTitle, sessLines, &scroll, sessInput, launchMsg, frame, sessActive(), sessLoading)
+			drawSession(sessTitle, sessLines, &scroll, sessInput, launchMsg, frame, sessActive() && !sessCancelled, sessLoading)
 		}
 
 		select {
@@ -536,6 +537,7 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int) error 
 						scroll = 0
 						sessInput = ""
 						launchMsg = ""
+						sessCancelled = false
 						sessLoading = true
 						loadSession(r.SessionID, r.Name)
 					}
@@ -561,13 +563,22 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int) error 
 				case keyEnter:
 					if text := strings.TrimSpace(sessInput); text != "" && selectedID != "" {
 						sessInput = ""
+						sessCancelled = false
 						launchMsg = "sending…"
 						sendReply(selectedID, text)
 					}
 				case keyBack:
-					if sessInput != "" {
+					switch {
+					case sessInput != "":
 						sessInput = ""
-					} else {
+					case sessActive() && !sessCancelled:
+						// Cancel the wait on the pending message. There is
+						// no relay-side interrupt (yet), so the agent may
+						// still finish in the background — but the UI
+						// stops waiting on it.
+						sessCancelled = true
+						launchMsg = "✕ stopped waiting — the agent may still answer in the background"
+					default:
 						view = "board"
 						launchMsg = ""
 					}
@@ -596,10 +607,14 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int) error 
 				sessStatus = s.status
 				sessLastRole = s.lastRole
 				sessLastAt = s.lastAt
-				// The agent has answered — a lingering "✳ sent" note is
-				// stale the moment the reply is on screen.
-				if s.lastRole == "assistant" && !inProgress(launchMsg) {
-					launchMsg = ""
+				// The agent has answered — cancelled-wait state and any
+				// lingering "✳ sent" note are stale the moment the reply
+				// is on screen.
+				if s.lastRole == "assistant" {
+					sessCancelled = false
+					if !inProgress(launchMsg) {
+						launchMsg = ""
+					}
 				}
 				if s.title != "" {
 					sessTitle = s.title
@@ -642,16 +657,16 @@ var spinFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧"
 // fleetMascot: a little server buddy atop the board, Claude-Code
 // style. Eyes blink every few seconds (driven by the spinner frame).
 func fleetMascot(frame int) []string {
-	eyes := "●  ●"
+	eyes := "●   ●"
 	if frame%25 < 2 {
-		eyes = "─  ─"
+		eyes = "─   ─"
 	}
 	return []string{
-		" ╭──────╮",
+		" ╭───────╮",
 		" │ " + eyes + " │",
-		" │ ╰──╯ │",
-		" ╰──────╯",
-		"   ╹  ╹",
+		" │   ◡   │",
+		" ╰───────╯",
+		"    ╹ ╹",
 	}
 }
 
