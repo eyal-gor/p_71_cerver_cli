@@ -164,6 +164,9 @@ func main() {
 
 	var err error
 	switch cmdName {
+	case "version", "--version", "-v":
+		fmt.Println("cerver " + cmd.VersionString())
+		return
 	case "login":
 		err = cmd.Login(args)
 	case "logout":

@@ -1,6 +1,9 @@
 package cmd
 
-import "runtime/debug"
+import (
+	"runtime/debug"
+	"strings"
+)
 
 // baseVersion is the release line shown in the fleet header. Bump on
 // release; local builds append the short commit (and * when dirty).
@@ -23,7 +26,9 @@ func VersionString() string {
 	if !ok {
 		return v
 	}
-	if mv := bi.Main.Version; mv != "" && mv != "(devel)" {
+	// Real tags only — pseudo-versions (v0.0.0-2026…-abc123) read as
+	// noise in a header badge; those fall through to base+revision.
+	if mv := bi.Main.Version; mv != "" && mv != "(devel)" && !strings.HasPrefix(mv, "v0.0.0-") {
 		return mv
 	}
 	rev, dirty := "", false
