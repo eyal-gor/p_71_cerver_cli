@@ -287,6 +287,7 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int) error 
 	// UI state. view: "board" | "session".
 	view := "board"
 	selected := 0
+	boardTop := 0
 	selectedID := ""
 	scroll := 0 // session view: lines scrolled UP from the bottom
 	var board *fleetBoard
@@ -326,7 +327,7 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int) error 
 			if len(rows) > 0 {
 				selectedID = rows[selected].SessionID
 			}
-			drawBoard(board, rows, selected)
+			drawBoard(board, rows, selected, &boardTop)
 		case "session":
 			drawSession(sessTitle, sessLines, scroll)
 		}
@@ -406,7 +407,7 @@ func flattenBoard(b *fleetBoard) []fleetRow {
 	return out
 }
 
-func drawBoard(b *fleetBoard, rows []fleetRow, selected int) {
+func drawBoard(b *fleetBoard, rows []fleetRow, selected int, top *int) {
 	lines, cols := termSize()
 	var sb strings.Builder
 	sb.WriteString("\x1b[H\x1b[2J")
@@ -426,20 +427,18 @@ func drawBoard(b *fleetBoard, rows []fleetRow, selected int) {
 		headW = 20
 	}
 
-	budget := lines - 4 // header + footer + slack
-	used := 0
-	prevGroup := ""
+	// Pass 1: build every display line (group headers + rows), noting
+	// which line carries the selected row, so pass 2 can window the list
+	// around the selection — the board auto-scrolls with ↑/↓.
 	groupTitle := map[string]string{"awaiting": "Awaiting input", "working": "Working", "failed": "Failed", "completed": "Completed"}
 	groupDot := map[string]string{"awaiting": yellow + "✳", "working": green + "●", "failed": red + "○", "completed": dim + "·"}
+	var display []string
+	selLine := 0
+	prevGroup := ""
 	for i, r := range rows {
-		if used >= budget-1 {
-			sb.WriteString(fmt.Sprintf("%s … %d more%s\r\n", dim, len(rows)-i, reset))
-			break
-		}
 		if r.group != prevGroup {
-			sb.WriteString(fmt.Sprintf("\r\n%s%s%s\r\n", dim, groupTitle[r.group], reset))
+			display = append(display, "", dim+groupTitle[r.group]+reset)
 			prevGroup = r.group
-			used += 2
 		}
 		head := r.Headline
 		if head == "" {
@@ -457,12 +456,45 @@ func drawBoard(b *fleetBoard, rows []fleetRow, selected int) {
 				strings.TrimLeft(groupDot[r.group], "\x1b[0123456789;m"),
 				nameW, truncate(r.Name, nameW), headW, truncate(head, headW), r.Harness, r.Age)
 			line = inv + plainLine + reset
+			selLine = len(display)
 		}
-		sb.WriteString(line + "\r\n")
-		used++
+		display = append(display, line)
 	}
 	if len(rows) == 0 {
-		sb.WriteString(fmt.Sprintf("\r\n%s no sessions — cerver run \"task\" starts one%s\r\n", dim, reset))
+		display = append(display, "", dim+" no sessions — cerver run \"task\" starts one"+reset)
+	}
+
+	// Pass 2: window `budget` lines, nudging the stored offset only as far
+	// as needed to keep the selection visible (with one line of margin so
+	// the next row is always peeking).
+	budget := lines - 5 // header + footer + overflow indicators + slack
+	if budget < 3 {
+		budget = 3
+	}
+	if *top > selLine-2 {
+		*top = selLine - 2 // keep the group header above the selection visible
+	}
+	if *top < selLine-budget+2 {
+		*top = selLine - budget + 2
+	}
+	if *top > len(display)-budget {
+		*top = len(display) - budget
+	}
+	if *top < 0 {
+		*top = 0
+	}
+	end := *top + budget
+	if end > len(display) {
+		end = len(display)
+	}
+	if *top > 0 {
+		sb.WriteString(fmt.Sprintf("%s ↑ %d above%s\r\n", dim, *top, reset))
+	}
+	for _, ln := range display[*top:end] {
+		sb.WriteString(ln + "\r\n")
+	}
+	if end < len(display) {
+		sb.WriteString(fmt.Sprintf("%s ↓ %d below%s\r\n", dim, len(display)-end, reset))
 	}
 
 	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s↑↓ select · enter open · q quit%s", lines, dim, reset))
