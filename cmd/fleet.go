@@ -109,6 +109,20 @@ type fleetBoard struct {
 	Completed []fleetRow `json:"completed"`
 }
 
+// harnessLabel maps a cli_tool id to the product it actually runs —
+// the harness is Claude Code (not the model "claude"), etc.
+func harnessLabel(cli string) string {
+	switch cli {
+	case "claude":
+		return "claude code"
+	case "codex":
+		return "codex"
+	case "grok":
+		return "grok build"
+	}
+	return cli
+}
+
 // questionTail: the awaiting-input heuristic — the agent's last words
 // read like a question aimed at the human.
 var questionTail = regexp.MustCompile(`\?\s*$`)
@@ -179,7 +193,7 @@ func fleetSnapshot(ctx context.Context, gw *gateway.Client, limit int, source st
 			SessionID: s.SessionID,
 			Name:      s.SessionName,
 			Headline:  headline,
-			Harness:   s.CliTool(),
+			Harness:   harnessLabel(s.CliTool()),
 			Status:    s.Status,
 			Age:       humanTime(s.UpdatedAt),
 		}
@@ -258,7 +272,7 @@ func fleetRenderPlain(b *fleetBoard) {
 			if head == "" {
 				head = "—"
 			}
-			fmt.Printf(" %s%s%s %s%-26s%s %-60s %s%-7s %s%s\n",
+			fmt.Printf(" %s%s%s %s%-26s%s %-60s %s%-12s %s%s\n",
 				dotColor, dot, reset,
 				bold, truncate(r.Name, 26), reset,
 				truncate(head, 60),
@@ -438,6 +452,7 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 				return v
 			}
 			harness, _ := s.Metadata["cli_tool"].(string)
+			harness = harnessLabel(harness)
 			model, _ := s.Metadata["cli_model"].(string)
 			compute := ""
 			if s.ComputeID != "" {
@@ -853,7 +868,7 @@ func drawBoard(b *fleetBoard, items []boardItem, selected int, top *int, input, 
 
 	// Column widths from the live terminal.
 	nameW := 24
-	metaW := 8 + 8 // harness + age
+	metaW := 12 + 8 // harness + age
 	headW := cols - nameW - metaW - 6
 	if headW < 20 {
 		headW = 20
@@ -887,7 +902,7 @@ func drawBoard(b *fleetBoard, items []boardItem, selected int, top *int, input, 
 		if head == "" {
 			head = "—"
 		}
-		line := fmt.Sprintf("  %s%s %s%-*s%s %-*s %s%-7s %-7s%s",
+		line := fmt.Sprintf("  %s%s %s%-*s%s %-*s %s%-12s %-7s%s",
 			groupDot[r.group], reset,
 			bold, nameW, truncate(r.Name, nameW), reset,
 			headW, truncate(head, headW),
@@ -896,7 +911,7 @@ func drawBoard(b *fleetBoard, items []boardItem, selected int, top *int, input, 
 			// Inverse video for the highlight; a plain dot so the whole
 			// row inverts uniformly.
 			dot := map[string]string{"awaiting": "✳", "working": spinnerFor(frame), "failed": "○", "completed": "·"}[r.group]
-			plainLine := fmt.Sprintf("  %s %-*s %-*s %-7s %-7s",
+			plainLine := fmt.Sprintf("  %s %-*s %-*s %-12s %-7s",
 				dot, nameW, truncate(r.Name, nameW), headW, truncate(head, headW), r.Harness, r.Age)
 			line = inv + plainLine + reset
 			selLine = len(display)
