@@ -75,8 +75,17 @@ func (c *Client) CreateSession(ctx context.Context, req SessionCreate) (string, 
 // SendInput pushes a user message to a session. Without this the agent
 // stays in `prepared` and never spawns the CLI.
 func (c *Client) SendInput(ctx context.Context, sessionID, content string) error {
-	return c.Do(ctx, "POST", fmt.Sprintf("/v2/sessions/%s/input", sessionID),
-		map[string]string{"content": content, "role": "user"}, nil)
+	return c.SendInputImages(ctx, sessionID, content, nil)
+}
+
+// SendInputImages is SendInput with base64-encoded image attachments.
+// The relay writes them to temp files and hands the paths to the CLI.
+func (c *Client) SendInputImages(ctx context.Context, sessionID, content string, images []string) error {
+	body := map[string]any{"content": content, "role": "user"}
+	if len(images) > 0 {
+		body["images"] = images
+	}
+	return c.Do(ctx, "POST", fmt.Sprintf("/v2/sessions/%s/input", sessionID), body, nil)
 }
 
 // SwitchTool continues the same session with a different CLI. The

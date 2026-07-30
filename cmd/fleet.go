@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"net/url"
@@ -308,6 +309,7 @@ const (
 	keyRight     // project details
 	keyClick     // left mouse click (x, y set)
 	keyResend    // Ctrl-R: nudge — resend the last user message
+	keyToggleTools // Ctrl-T: expand/collapse tool payloads in the session view
 )
 
 // keyEvent carries the parsed key plus the rune for keyRune events and
@@ -354,6 +356,7 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 	type sessSnap struct {
 		id, title, status, lastRole, lastAt, lastUser string
 		lines                                         []string
+		sess                                          *gateway.Session
 	}
 	sessCh := make(chan sessSnap, 1)
 
@@ -401,6 +404,8 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 	sessBusy := false
 	var board *fleetBoard
 	var sessLines []string
+	var sessData *gateway.Session // last-loaded session, for re-render on ctrl-t
+	showTools := false            // tool payloads collapsed by default
 
 	// Compute labels for the session header (id → human name). Loaded
 	// once, synchronously, before the loop starts — the map is then
@@ -491,8 +496,7 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 				sessCh <- sessSnap{id: id, lines: []string{"failed to load session: " + err.Error()}}
 				return
 			}
-			_, cols := termSize()
-			snap := sessSnap{id: id, lines: renderTranscript(s, cols), status: s.Status}
+			snap := sessSnap{id: id, sess: s, status: s.Status}
 			if len(s.Transcript) > 0 {
 				snap.lastRole = s.Transcript[len(s.Transcript)-1].Role
 				snap.lastAt = s.Transcript[len(s.Transcript)-1].At
@@ -568,16 +572,16 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 
 	// sendReply pushes a follow-up into the open session — the agent
 	// continues in place, same as `cerver chat`.
-	sendReply := func(id, text string) {
+	sendReply := func(id, text string, images []string) {
 		go func() {
 			tok, err := infisical.LoadRunToken(ctx)
 			if err != nil || tok == "" {
 				launched <- "reply failed: no credentials"
 				return
 			}
-			reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			reqCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 			defer cancel()
-			if err := gateway.New(tok).SendInput(reqCtx, id, text); err != nil {
+			if err := gateway.New(tok).SendInputImages(reqCtx, id, text, images); err != nil {
 				launched <- "reply failed: " + err.Error()
 				return
 			}
@@ -827,15 +831,28 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 					if text := strings.TrimSpace(sessInput); text != "" && selectedID != "" {
 						sessInput = ""
 						sessCancelled = false
+						text, images, imgNote := extractDroppedImages(text)
+						if text == "" && len(images) > 0 {
+							text = "Look at the attached image."
+						}
 						sessLastUser = text
 						launchMsg = "sending…"
-						sendReply(selectedID, text)
+						if imgNote != "" {
+							launchMsg = "sending… " + imgNote
+						}
+						sendReply(selectedID, text, images)
 					}
 				case keyResend:
 					if sessLastUser != "" && selectedID != "" {
 						sessCancelled = false
 						launchMsg = "sending…"
-						sendReply(selectedID, sessLastUser)
+						sendReply(selectedID, sessLastUser, nil)
+					}
+				case keyToggleTools:
+					showTools = !showTools
+					if sessData != nil {
+						_, cols := termSize()
+						sessLines = renderTranscript(sessData, cols, showTools)
 					}
 				case keyBack:
 					switch {
@@ -881,7 +898,13 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 			sessBusy = false
 			sessLoading = false
 			if view == "session" && s.id == selectedID {
-				sessLines = s.lines
+				sessData = s.sess
+				if s.sess != nil {
+					_, cols := termSize()
+					sessLines = renderTranscript(s.sess, cols, showTools)
+				} else {
+					sessLines = s.lines
+				}
 				sessStatus = s.status
 				sessLastRole = s.lastRole
 				sessLastAt = s.lastAt
@@ -1257,8 +1280,11 @@ func drawProjects(projects []gateway.Project, sel int, cur string) {
 
 // renderTranscript flattens a session's transcript into display lines:
 // role-labelled, word-wrapped, tool/thinking entries dimmed — the
-// "see how it thinks" view.
-func renderTranscript(s *gateway.Session, cols int) []string {
+// "see how it thinks" view. Tool payloads (tool_use/tool_result) are
+// noise at full size — a single grep result can fill the screen — so
+// unless showTools is set they collapse to a one-line preview and
+// ctrl-t expands them.
+func renderTranscript(s *gateway.Session, cols int, showTools bool) []string {
 	dim, cyan, bold, reset := "\x1b[2m", "\x1b[36m", "\x1b[1m", "\x1b[0m"
 	width := cols - 4
 	if width < 40 {
@@ -1301,6 +1327,33 @@ func renderTranscript(s *gateway.Session, cols int) []string {
 			}
 			style = dim
 		}
+		if !showTools && (e.Kind == "tool_use" || e.Kind == "tool_result") {
+			preview := ""
+			lineCount := 0
+			for _, ln := range strings.Split(strings.TrimSpace(e.Content), "\n") {
+				ln = strings.TrimSpace(ln)
+				if ln == "" {
+					continue
+				}
+				lineCount++
+				if preview == "" {
+					preview = ln
+				}
+			}
+			maxPrev := width - len(label) - 16
+			if maxPrev < 12 {
+				maxPrev = 12
+			}
+			if r := []rune(preview); len(r) > maxPrev {
+				preview = string(r[:maxPrev]) + "…"
+			}
+			line := fmt.Sprintf("%s▸ %s · %s", dim, label, preview)
+			if lineCount > 1 {
+				line += fmt.Sprintf(" (+%d lines)", lineCount-1)
+			}
+			out = append(out, line+reset, "")
+			continue
+		}
 		out = append(out, fmt.Sprintf("%s── %s ──%s", style, label, reset))
 		body := strings.TrimSpace(e.Content)
 		if body == "" {
@@ -1321,6 +1374,43 @@ func renderTranscript(s *gateway.Session, cols int) []string {
 		out = []string{dim + "empty transcript" + reset}
 	}
 	return out
+}
+
+// extractDroppedImages pulls image-file paths out of a reply typed (or
+// drag-dropped — the terminal pastes the path) into the session input,
+// returning the text without them, the images base64-encoded for the
+// input API, and a short note for the status line. Paths must exist on
+// disk and carry an image extension; anything else stays in the text.
+func extractDroppedImages(text string) (string, []string, string) {
+	// iTerm/Terminal escape spaces in dropped paths as "\ ".
+	marked := strings.ReplaceAll(text, "\\ ", "\x00")
+	var keep []string
+	var images []string
+	for _, tok := range strings.Fields(marked) {
+		path := strings.Trim(strings.ReplaceAll(tok, "\x00", " "), `"'`)
+		ext := strings.ToLower(filepath.Ext(path))
+		isImg := ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".gif" || ext == ".webp"
+		if isImg && len(images) < 4 {
+			if st, err := os.Stat(path); err == nil && !st.IsDir() && st.Size() <= 8<<20 {
+				if data, err := os.ReadFile(path); err == nil {
+					mime := map[string]string{
+						".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+						".gif": "image/gif", ".webp": "image/webp",
+					}[ext]
+					images = append(images, "data:"+mime+";base64,"+base64.StdEncoding.EncodeToString(data))
+					continue
+				}
+			}
+		}
+		keep = append(keep, strings.ReplaceAll(tok, "\x00", "\\ "))
+	}
+	note := ""
+	if len(images) == 1 {
+		note = "📎 1 image"
+	} else if len(images) > 1 {
+		note = fmt.Sprintf("📎 %d images", len(images))
+	}
+	return strings.TrimSpace(strings.Join(keep, " ")), images, note
 }
 
 func wrapLine(s string, width int) []string {
@@ -1426,7 +1516,7 @@ func drawSession(title string, content []string, scroll *int, input, msg string,
 	if *scroll > 0 {
 		pos = fmt.Sprintf(" · %d lines below", *scroll)
 	}
-	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s↑↓ scroll · type + enter reply · ←/esc back · ctrl-c quit%s%s\x1b[K", lines, dim, reset, pos))
+	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s↑↓ scroll · type + enter reply · drop an image to attach · ctrl-t tool detail · ←/esc back · ctrl-c quit%s%s\x1b[K", lines, dim, reset, pos))
 	os.Stdout.WriteString(sb.String())
 }
 
@@ -1585,6 +1675,8 @@ func fleetReadKeys(out chan<- keyEvent) {
 			out <- keyEvent{k: keyQuit}
 		case b[0] == 0x12: // Ctrl-R
 			out <- keyEvent{k: keyResend}
+		case b[0] == 0x14: // Ctrl-T
+			out <- keyEvent{k: keyToggleTools}
 		case b[0] == '\t':
 			out <- keyEvent{k: keyTab}
 		case b[0] == '\r' || b[0] == '\n':
