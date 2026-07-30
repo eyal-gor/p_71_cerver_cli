@@ -305,6 +305,7 @@ const (
 	keyRune      // printable character → the launch bar
 	keyBackspace // delete in the launch bar
 	keyTab       // project switcher
+	keyRight     // project details
 )
 
 // keyEvent carries the parsed key plus the rune for keyRune events.
@@ -379,6 +380,18 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 	curProject := project          // "" = all projects
 	var projects []gateway.Project // for the Tab switcher
 	projSel := 0
+
+	// Project details view (→ from the picker or a scoped board):
+	// environment + workflow names, with browser deep-links for more.
+	type detailSnap struct {
+		slug string
+		envs []string
+		wfs  []string
+	}
+	detailCh := make(chan detailSnap, 1)
+	detailSlug := ""
+	detailLoading := false
+	var detailEnvs, detailWfs []string
 	boardBusy := false
 	sessBusy := false
 	var board *fleetBoard
@@ -412,6 +425,37 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 				b = nil // receiver keeps the previous board
 			}
 			boardCh <- b
+		}()
+	}
+
+	loadDetails := func(slug string) {
+		detailSlug = slug
+		detailLoading = true
+		detailEnvs, detailWfs = nil, nil
+		go func() {
+			reqCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+			defer cancel()
+			snap := detailSnap{slug: slug}
+			if envs, err := gw.ListEnvironments(reqCtx, slug); err == nil {
+				for _, e := range envs {
+					n := e.Name
+					if n == "" {
+						n = e.Slug
+					}
+					snap.envs = append(snap.envs, n)
+				}
+			}
+			var resp struct {
+				Workflows []struct {
+					Name string `json:"name"`
+				} `json:"workflows"`
+			}
+			if err := gw.Do(reqCtx, "GET", "/v2/projects/"+url.PathEscape(slug)+"/workflows", nil, &resp); err == nil {
+				for _, w := range resp.Workflows {
+					snap.wfs = append(snap.wfs, w.Name)
+				}
+			}
+			detailCh <- snap
 		}()
 	}
 
@@ -559,6 +603,8 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 			drawBoard(board, items, selected, &boardTop, input, launchMsg, frame, boardLoading, projLabel)
 		case "projects":
 			drawProjects(projects, projSel, curProject)
+		case "details":
+			drawDetails(detailSlug, detailEnvs, detailWfs, detailLoading, frame)
 		case "session":
 			drawSession(sessTitle, sessLines, &scroll, sessInput, launchMsg, frame, sessActive() && !sessCancelled, sessLoading)
 		}
@@ -614,6 +660,11 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 							projSel = i + 1 // slot 0 is "all projects"
 						}
 					}
+				case keyRight:
+					if curProject != "" {
+						view = "details"
+						loadDetails(curProject)
+					}
 				case keyBack: // Esc clears the launch bar
 					input = ""
 				case keyQuit:
@@ -641,8 +692,31 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 					board = nil
 					boardLoading = true
 					loadBoard()
+				case keyRight:
+					if projSel > 0 && projSel <= len(projects) {
+						view = "details"
+						loadDetails(projects[projSel-1].Slug)
+					}
 				case keyBack, keyTab:
 					view = "board"
+				case keyQuit:
+					return nil
+				}
+			case "details":
+				switch ev.k {
+				case keyRune:
+					switch ev.r {
+					case 'e':
+						openURL("https://cerver.ai/dashboard/environments")
+						launchMsg = "opened environments in the browser"
+					case 'w':
+						openURL("https://cerver.ai/dashboard/workflows")
+						launchMsg = "opened workflows in the browser"
+					}
+				case keyBack:
+					view = "board"
+				case keyTab:
+					view = "projects"
 				case keyQuit:
 					return nil
 				}
@@ -700,6 +774,12 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 						}
 					}
 				}
+			}
+		case d := <-detailCh:
+			if d.slug == detailSlug {
+				detailLoading = false
+				detailEnvs = d.envs
+				detailWfs = d.wfs
 			}
 		case s := <-sessCh:
 			sessBusy = false
@@ -1010,7 +1090,7 @@ func drawProjects(projects []gateway.Project, sel int, cur string) {
 		sb.WriteString(dim + "  loading projects…" + reset + eol)
 	}
 	sb.WriteString("\x1b[J")
-	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s↑↓ select · enter switch · esc cancel · ctrl-c quit%s\x1b[K", lines, dim, reset))
+	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s↑↓ select · enter switch · → details · esc cancel · ctrl-c quit%s\x1b[K", lines, dim, reset))
 	_ = cols
 	os.Stdout.WriteString(sb.String())
 }
@@ -1167,6 +1247,51 @@ func drawSession(title string, content []string, scroll *int, input, msg string,
 	os.Stdout.WriteString(sb.String())
 }
 
+// drawDetails: names-only view of a project's environments and
+// workflows; the dashboard has the full story, one keypress away.
+func drawDetails(slug string, envs, wfs []string, loading bool, frame int) {
+	lines, _ := termSize()
+	dim, green, bold, reset := "\x1b[2m", "\x1b[32m", "\x1b[1m", "\x1b[0m"
+	eol := "\x1b[K\r\n"
+	var sb strings.Builder
+	sb.WriteString("\x1b[H")
+	sb.WriteString(fmt.Sprintf("%s%s%s · project details%s%s", bold, slug, reset, eol, eol))
+
+	section := func(title string, names []string) {
+		sb.WriteString(dim + title + reset + eol)
+		if loading {
+			sb.WriteString("  " + dim + spinnerFor(frame) + " loading…" + reset + eol)
+		} else if len(names) == 0 {
+			sb.WriteString("  " + dim + "none" + reset + eol)
+		} else {
+			max := 12
+			for i, n := range names {
+				if i >= max {
+					sb.WriteString(fmt.Sprintf("  %s… %d more%s%s", dim, len(names)-max, reset, eol))
+					break
+				}
+				sb.WriteString("  " + green + "·" + reset + " " + n + eol)
+			}
+		}
+		sb.WriteString(eol)
+	}
+	section("environments", envs)
+	section("workflows", wfs)
+	sb.WriteString(dim + "more details live in the dashboard — one keypress takes you there" + reset + eol)
+	sb.WriteString("\x1b[J")
+	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%se open environments · w open workflows · tab projects · esc back · ctrl-c quit%s\x1b[K", lines, dim, reset))
+	os.Stdout.WriteString(sb.String())
+}
+
+// openURL opens a link in the default browser (macOS `open`, else xdg-open).
+func openURL(u string) {
+	cmd := "open"
+	if _, err := exec.LookPath("xdg-open"); err == nil {
+		cmd = "xdg-open"
+	}
+	_ = exec.Command(cmd, u).Start()
+}
+
 // ── raw-mode plumbing (stdlib-only, via stty) ────────────────────────
 
 // loadFleetProject / saveFleetProject: the picker's last choice lives in
@@ -1237,6 +1362,9 @@ func fleetReadKeys(out chan<- keyEvent) {
 			ups := strings.Count(s, "A")
 			downs := strings.Count(s, "B")
 			backs := strings.Count(s, "D")
+			if strings.Contains(s, "C") {
+				out <- keyEvent{k: keyRight}
+			}
 			for i := 0; i < ups; i++ {
 				out <- keyEvent{k: keyUp}
 			}
