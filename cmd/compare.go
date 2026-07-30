@@ -146,8 +146,11 @@ func Compare(args []string) error {
 		compute string
 		reply   string
 		usage   *gateway.Usage
-		elapsed int // model run time (from the relay) — shown in the header
-		legWall int // end-to-end wall for this leg (create + run + poll)
+		// elapsed only measures the post-input poll wait — with an 8s poll
+		// interval it reads ~3s for every leg regardless of real speed, so
+		// legWall (create + run + poll) is what we show and share.
+		elapsed int
+		legWall int
 		mode    string
 		err     error
 	}
@@ -245,7 +248,7 @@ func Compare(args []string) error {
 			fmt.Printf("==== %s (error) ====\n%s\n\n", legLabel(r.cli, r.model, r.compute), r.err)
 			continue
 		}
-		fmt.Println(output.Header(r.cli, r.elapsed, r.mode, r.usage))
+		fmt.Println(output.Header(r.cli, r.legWall, r.mode, r.usage))
 		if r.model != "" {
 			fmt.Printf("  model %s · on %s\n", r.model, r.compute)
 		} else {
@@ -280,9 +283,9 @@ func Compare(args []string) error {
 			if r.err != nil {
 				continue
 			}
-			latency := r.elapsed
+			latency := r.legWall
 			if latency == 0 {
-				latency = r.legWall
+				latency = r.elapsed
 			}
 			payload.Results = append(payload.Results, shareResult{
 				CLI:       r.cli,
