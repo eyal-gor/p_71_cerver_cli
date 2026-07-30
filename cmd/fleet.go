@@ -310,6 +310,7 @@ const (
 	keyClick     // left mouse click (x, y set)
 	keyResend    // Ctrl-R: nudge — resend the last user message
 	keyToggleTools // Ctrl-T: expand/collapse tool payloads in the session view
+	keyPaste       // bracketed paste — s carries the whole pasted text
 )
 
 // keyEvent carries the parsed key plus the rune for keyRune events and
@@ -317,6 +318,7 @@ const (
 type keyEvent struct {
 	k    fleetKey
 	r    rune
+	s    string // keyPaste payload
 	x, y int
 }
 
@@ -340,9 +342,9 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 	// reach the app as escape sequences (and scroll the view) instead of
 	// iTerm scrolling its window over the alternate screen, which shows
 	// ghost frames.
-	fmt.Print("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h")
+	fmt.Print("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h\x1b[?2004h")
 	defer func() {
-		fmt.Print("\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l")
+		fmt.Print("\x1b[?2004l\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l")
 		sttyRestore(saved)
 	}()
 
@@ -656,6 +658,8 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 					}
 				case keyRune:
 					input += string(ev.r)
+				case keyPaste:
+					input += strings.ReplaceAll(strings.ReplaceAll(strings.TrimRight(ev.s, "\r\n"), "\r\n", "\n"), "\r", "\n")
 				case keyBackspace:
 					if r := []rune(input); len(r) > 0 {
 						input = string(r[:len(r)-1])
@@ -824,6 +828,8 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 					}
 				case keyRune:
 					sessInput += string(ev.r)
+				case keyPaste:
+					sessInput += strings.ReplaceAll(strings.ReplaceAll(strings.TrimRight(ev.s, "\r\n"), "\r\n", "\n"), "\r", "\n")
 				case keyBackspace:
 					if r := []rune(sessInput); len(r) > 0 {
 						sessInput = string(r[:len(r)-1])
@@ -1036,7 +1042,11 @@ func inputBar(input, placeholder string, cols int) string {
 		body = green + "❯ " + reset + bg + dim + placeholder
 		visible = 2 + len([]rune(placeholder))
 	} else {
-		shown := truncate(input, cols-5)
+		flat := strings.ReplaceAll(input, "\n", " ⏎ ")
+		if nl := strings.Count(input, "\n"); nl > 0 {
+			flat = fmt.Sprintf("(%d lines) ", nl+1) + flat
+		}
+		shown := truncate(flat, cols-5)
 		body = green + "❯ " + reset + bg + bold + shown + reset + bg + dim + "█"
 		visible = 2 + len([]rune(shown)) + 1
 	}
@@ -1715,13 +1725,42 @@ func saveFleetProject(slug string) {
 var mouseSeq = regexp.MustCompile(`\x1b\[<(\d+);(\d+);(\d+)([Mm])`)
 
 func fleetReadKeys(out chan<- keyEvent) {
-	buf := make([]byte, 64)
+	buf := make([]byte, 8192)
+	var paste []byte  // non-nil while inside a bracketed paste
+	const pasteStart, pasteEnd = "\x1b[200~", "\x1b[201~"
 	for {
 		n, err := os.Stdin.Read(buf)
 		if err != nil || n == 0 {
 			return
 		}
 		b := buf[:n]
+		// Bracketed paste: everything between ESC[200~ and ESC[201~ is
+		// one literal blob — newlines inside must NOT act as Enter.
+		if paste != nil {
+			paste = append(paste, b...)
+			if i := strings.Index(string(paste), pasteEnd); i >= 0 {
+				out <- keyEvent{k: keyPaste, s: string(paste[:i])}
+				rest := append([]byte(nil), paste[i+len(pasteEnd):]...)
+				paste = nil
+				if len(rest) > 0 {
+					b = rest
+				} else {
+					continue
+				}
+			} else {
+				continue
+			}
+		}
+		if i := strings.Index(string(b), pasteStart); i >= 0 {
+			// Feed anything before the marker through the normal path on
+			// the next loop; in practice pastes arrive marker-first.
+			paste = append([]byte(nil), b[i+len(pasteStart):]...)
+			if j := strings.Index(string(paste), pasteEnd); j >= 0 {
+				out <- keyEvent{k: keyPaste, s: string(paste[:j])}
+				paste = nil
+			}
+			continue
+		}
 		switch {
 		case b[0] == 3: // Ctrl-C
 			out <- keyEvent{k: keyQuit}
