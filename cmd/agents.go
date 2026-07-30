@@ -14,20 +14,20 @@ import (
 	"github.com/eyal-gor/p_71_cerver_cli/internal/gateway"
 )
 
-// Agents is the entry point for `cerver agents ...`. A saved agent is a
+// Agents is the entry point for `cerver define-agents ...`. A saved agent is a
 // reusable definition — an AGENTS.md (instructions dropped into the session
 // workspace) plus a config map (preferred harness/model, workload). Apply one
 // to a run with `cerver run --agent <id> "..."`; the gateway injects the
 // AGENTS.md and applies the config defaults (explicit --cli/--model still win).
 //
-//	cerver agents                                   list
-//	cerver agents [--json]
-//	cerver agents show <id>
-//	cerver agents new --name "Reviewer" [--md-file AGENTS.md] [--harness claude] [--model opus] [--workload coding] [--slug reviewer] [--project SLUG] [--config-file cfg.json]
-//	cerver agents edit <id> [--name ...] [--md-file ...] [--harness ...] [--model ...] [--workload ...] [--config-file ...]
-//	cerver agents rm <id>
-//	cerver agents pull <id> [--dir .]          write AGENTS.md + agent.json locally
-//	cerver agents push [<id>] [--dir .]        create/update from local AGENTS.md (+ agent.json)
+//	cerver define-agents                                   list
+//	cerver define-agents [--json]
+//	cerver define-agents show <id>
+//	cerver define-agents new --name "Reviewer" [--md-file AGENTS.md] [--harness claude] [--model opus] [--workload coding] [--slug reviewer] [--project SLUG] [--config-file cfg.json]
+//	cerver define-agents edit <id> [--name ...] [--md-file ...] [--harness ...] [--model ...] [--workload ...] [--config-file ...]
+//	cerver define-agents rm <id>
+//	cerver define-agents pull <id> [--dir .]          write AGENTS.md + agent.json locally
+//	cerver define-agents push [<id>] [--dir .]        create/update from local AGENTS.md (+ agent.json)
 func Agents(args []string) error {
 	sub := "list"
 	rest := args
@@ -55,14 +55,14 @@ func Agents(args []string) error {
 		return nil
 	default:
 		// Not a known subcommand → treat the whole thing as a free-text search of
-		// the list, so `cerver agents reviewer` finds agents by name/id and prints
-		// their ids. (Use `cerver agents list <query>` if a query collides with a
+		// the list, so `cerver define-agents reviewer` finds agents by name/id and prints
+		// their ids. (Use `cerver define-agents list <query>` if a query collides with a
 		// subcommand name.)
 		return agentsList(args)
 	}
 }
 
-const agentsHelpText = `cerver agents — save reusable agent definitions (AGENTS.md + config)
+const agentsHelpText = `cerver define-agents — save reusable agent definitions (AGENTS.md + config)
 
 An agent bundles an AGENTS.md (instructions dropped into the session workspace)
 with config defaults (harness/model/workload). Apply one to a run:
@@ -70,15 +70,15 @@ with config defaults (harness/model/workload). Apply one to a run:
   cerver run --agent <id> "do the thing"
 
 usage:
-  cerver agents                                   list your agents
-  cerver agents <query>                           search by name/id (find the id)
-  cerver agents [--json]
-  cerver agents show <id>                    print config + AGENTS.md
-  cerver agents new --name "Reviewer" [flags]     create
-  cerver agents edit <id> [flags]            update (only passed fields)
-  cerver agents rm <id>                      delete
-  cerver agents pull <id> [--dir .]          write AGENTS.md + agent.json
-  cerver agents push [<id>] [--dir .]        create/update from local files
+  cerver define-agents                                   list your agents
+  cerver define-agents <query>                           search by name/id (find the id)
+  cerver define-agents [--json]
+  cerver define-agents show <id>                    print config + AGENTS.md
+  cerver define-agents new --name "Reviewer" [flags]     create
+  cerver define-agents edit <id> [flags]            update (only passed fields)
+  cerver define-agents rm <id>                      delete
+  cerver define-agents pull <id> [--dir .]          write AGENTS.md + agent.json
+  cerver define-agents push [<id>] [--dir .]        create/update from local files
 
 flags (new / edit):
   --name N            display name
@@ -220,7 +220,7 @@ func agentsList(args []string) error {
 		return err
 	}
 	// Optional free-text query — substring-match name/id/slug so you can find an
-	// agent's id (`cerver agents reviewer`) then pass that id to --agent.
+	// agent's id (`cerver define-agents reviewer`) then pass that id to --agent.
 	query := strings.ToLower(strings.Join(fs.Args(), " "))
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -245,7 +245,7 @@ func agentsList(args []string) error {
 		return encodeJSON(os.Stdout, agents)
 	}
 	if len(agents) == 0 {
-		fmt.Fprintln(os.Stderr, "no agents yet — create one with `cerver agents new --name ...`")
+		fmt.Fprintln(os.Stderr, "no agents yet — create one with `cerver define-agents new --name ...`")
 		return nil
 	}
 	tw := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
@@ -277,7 +277,7 @@ func agentsShow(args []string) error {
 		return err
 	}
 	if ref == "" {
-		return fmt.Errorf("usage: cerver agents show <id>")
+		return fmt.Errorf("usage: cerver define-agents show <id>")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -363,7 +363,7 @@ func agentsEdit(args []string) error {
 		return err
 	}
 	if ref == "" {
-		return fmt.Errorf("usage: cerver agents edit <id> [flags]")
+		return fmt.Errorf("usage: cerver define-agents edit <id> [flags]")
 	}
 	passed := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { passed[f.Name] = true })
@@ -415,7 +415,7 @@ func agentsDelete(args []string) error {
 		return err
 	}
 	if ref == "" {
-		return fmt.Errorf("usage: cerver agents rm <id>")
+		return fmt.Errorf("usage: cerver define-agents rm <id>")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
@@ -452,7 +452,7 @@ func agentsPull(args []string) error {
 		return err
 	}
 	if ref == "" {
-		return fmt.Errorf("usage: cerver agents pull <id> [--dir .]")
+		return fmt.Errorf("usage: cerver define-agents pull <id> [--dir .]")
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()

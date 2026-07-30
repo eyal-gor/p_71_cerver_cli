@@ -36,14 +36,14 @@ commands:
                  cerver gateway help    # what this means
   run        Send a single prompt to one CLI on one compute.
                cerver run --agent reviewer "review my last commit"
-  agents     Save reusable agent definitions (AGENTS.md + config). Apply
-               one to a run with: cerver run --agent <id>
-                 cerver agents                       # list
-                 cerver agents new --name "Reviewer" --md-file AGENTS.md --harness claude
-                 cerver agents show <id>
-                 cerver agents pull <id>        # write AGENTS.md + agent.json
-                 cerver agents push [<id>]      # sync local files up
-                 cerver agents rm <id>
+  define-agents  Save reusable agent definitions (AGENTS.md + config).
+               Apply one to a run with: cerver run --agent <id>
+                 cerver define-agents                # list
+                 cerver define-agents new --name "Reviewer" --md-file AGENTS.md --harness claude
+                 cerver define-agents show <id>
+                 cerver define-agents pull <id> # write AGENTS.md + agent.json
+                 cerver define-agents push [<id>]  # sync local files up
+                 cerver define-agents rm <id>
   chat       Multi-turn conversation; resume with: cerver chat <sid>
   compare    Run the same prompt across multiple CLIs in parallel.
   computes   List the computes registered to your account.
@@ -83,8 +83,9 @@ commands:
                  cerver insights --project SLUG
                  cerver insights --limit 50 --json
   sessions   List recent sessions.
-  fleet      Agent-manager board: awaiting input / working / completed,
+  agents     Agent-manager board: awaiting input / working / completed,
                one headline per session (--watch to live-refresh).
+               ('fleet' still works as an alias.)
   show       Print a session's full transcript (--follow to stream).
   peek       One-screen snapshot of a session (status + last reply).
   move       Move a live session to a different compute.
@@ -187,7 +188,7 @@ func main() {
 		err = cmd.Projects(args)
 	case "keys", "key":
 		err = cmd.Keys(args)
-	case "agents", "agent":
+	case "define-agents", "define-agent":
 		err = cmd.Agents(args)
 	case "crons", "cron":
 		err = cmd.Crons(args)
@@ -195,7 +196,7 @@ func main() {
 		err = cmd.Insights(args)
 	case "sessions":
 		err = cmd.Sessions(args)
-	case "fleet":
+	case "agents", "agent", "fleet":
 		err = cmd.Fleet(args)
 	case "show":
 		err = cmd.Show(args)

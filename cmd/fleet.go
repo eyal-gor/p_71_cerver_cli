@@ -257,7 +257,7 @@ func fleetRenderPlain(b *fleetBoard) {
 		dim, yellow, green, red, bold, reset = "\x1b[2m", "\x1b[33m", "\x1b[32m", "\x1b[31m", "\x1b[1m", "\x1b[0m"
 	}
 
-	fmt.Printf("%scerver fleet%s · %d awaiting input · %d working · %d completed\n",
+	fmt.Printf("%scerver agents%s · %d awaiting input · %d working · %d completed\n",
 		bold, reset, len(b.Awaiting), len(b.Working), len(b.Completed)+len(b.Failed))
 
 	group := func(title, dot, dotColor string, rows []fleetRow, max int) {
@@ -1087,7 +1087,7 @@ func drawBoard(b *fleetBoard, items []boardItem, selected int, top *int, input, 
 		// Code welcome block. The project line is a click target.
 		m := fleetMascot(frame)
 		sb.WriteString(m[0] + eol)
-		sb.WriteString(fmt.Sprintf("%s   %scerver fleet%s%s", m[1], bold, reset, eol))
+		sb.WriteString(fmt.Sprintf("%s   %scerver agents%s%s", m[1], bold, reset, eol))
 		sb.WriteString(fmt.Sprintf("%s   %s%s%s%s", m[2], dim, counts, reset, eol))
 		projLine := fmt.Sprintf("%sproject:%s %s%s ▾%s %s(tab or click to switch)%s", dim, reset, bold, projLabel, reset, dim, reset)
 		if projSelected {
@@ -1104,7 +1104,7 @@ func drawBoard(b *fleetBoard, items []boardItem, selected int, top *int, input, 
 		if projSelected {
 			small = inv + "project: " + projLabel + " ▾" + reset
 		}
-		sb.WriteString(fmt.Sprintf("%scerver fleet%s · %s · %s%s", bold, reset, counts, small, eol))
+		sb.WriteString(fmt.Sprintf("%scerver agents%s · %s · %s%s", bold, reset, counts, small, eol))
 		sb.WriteString(relayLine + eol)
 		fleetHit.projectRow = 1
 		contentRow = 3
