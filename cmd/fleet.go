@@ -1231,6 +1231,10 @@ func drawBoard(b *fleetBoard, items []boardItem, selected int, top *int, input, 
 	}
 	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s\x1b[K", lines-1, inputBar(input, "describe a task for a new agent…", cols)))
 	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s↑↓ select · enter open/fold · type + enter launch · tab project · ctrl-c quit%s\x1b[K", lines, dim, reset))
+	vs := VersionString()
+	if col := cols - len(vs); col > 1 {
+		sb.WriteString(fmt.Sprintf("\x1b[1;%dH%s%s%s", col+1, dim, vs, reset))
+	}
 	os.Stdout.WriteString(sb.String())
 }
 
@@ -1488,8 +1492,14 @@ func drawSession(title string, content []string, scroll *int, input, msg string,
 	eol := "\x1b[K\r\n"
 	var sb strings.Builder
 	sb.WriteString("\x1b[H")
+	// Row 1: version badge, right-aligned — same corner as the board.
+	vs := VersionString()
+	if pad := cols - len(vs); pad > 1 {
+		sb.WriteString(strings.Repeat(" ", pad) + dim + vs + reset)
+	}
+	sb.WriteString(eol)
 
-	viewport := lines - 6 // bottom chrome: info line + status + reply bar + footer + slack
+	viewport := lines - 7 // top badge row + bottom chrome: info line + status + reply bar + footer + slack
 	if viewport < 3 {
 		viewport = 3
 	}
