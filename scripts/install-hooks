@@ -3,5 +3,6 @@
 set -e
 root="$(git rev-parse --git-common-dir)"
 mkdir -p "$root/hooks"
-ln -sf ../../scripts/bump-version "$root/hooks/pre-commit"
+cp scripts/bump-version "$root/hooks/pre-commit"
+chmod +x "$root/hooks/pre-commit"
 echo "pre-commit hook installed → scripts/bump-version"
