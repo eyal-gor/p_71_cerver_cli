@@ -301,9 +301,25 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int) error 
 	scroll := 0 // session view: lines scrolled UP from the bottom
 	input := "" // launch bar contents
 	launchMsg := ""
+	sessInput := "" // session view reply bar
+	sessName := ""
 	var board *fleetBoard
 	var sessLines []string
 	var sessTitle string
+
+	// Compute labels for the session header (id → human name). Loaded
+	// once, synchronously, before the loop starts — the map is then
+	// read-only, so the UI goroutine can use it without locking.
+	computeNames := map[string]string{}
+	{
+		reqCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		if cs, err := gw.ListComputes(reqCtx); err == nil {
+			for _, c := range cs {
+				computeNames[c.ID] = c.Label
+			}
+		}
+		cancel()
+	}
 
 	// launchTask starts a new agent in the background — same defaults as
 	// `cerver run`: claude, first ready local relay, project-scoped key.
@@ -360,6 +376,44 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int) error 
 		}
 		_, cols := termSize()
 		sessLines = renderTranscript(s, cols)
+		parts := []string{sessName}
+		if v, ok := s.Metadata["cli_tool"].(string); ok && v != "" {
+			parts = append(parts, v)
+		}
+		if v, ok := s.Metadata["cli_model"].(string); ok && v != "" {
+			parts = append(parts, v)
+		}
+		if s.ComputeID != "" {
+			label := computeNames[s.ComputeID]
+			if label == "" {
+				label = shortID(s.ComputeID)
+			}
+			parts = append(parts, label)
+		}
+		if s.Status != "" {
+			parts = append(parts, s.Status)
+		}
+		parts = append(parts, shortID(id))
+		sessTitle = strings.Join(parts, " · ")
+	}
+
+	// sendReply pushes a follow-up into the open session — the agent
+	// continues in place, same as `cerver chat`.
+	sendReply := func(id, text string) {
+		go func() {
+			tok, err := infisical.LoadRunToken(ctx)
+			if err != nil || tok == "" {
+				launched <- "reply failed: no credentials"
+				return
+			}
+			reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
+			if err := gateway.New(tok).SendInput(reqCtx, id, text); err != nil {
+				launched <- "reply failed: " + err.Error()
+				return
+			}
+			launched <- "✳ sent — the agent is on it"
+		}()
 	}
 
 	fetchBoard()
@@ -378,7 +432,7 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int) error 
 			}
 			drawBoard(board, rows, selected, &boardTop, input, launchMsg)
 		case "session":
-			drawSession(sessTitle, sessLines, scroll)
+			drawSession(sessTitle, sessLines, scroll, sessInput, launchMsg)
 		}
 
 		select {
@@ -410,10 +464,12 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int) error 
 						launchTask(task)
 					} else if len(rows) > 0 {
 						r := rows[selected]
+						sessName = r.Name
 						sessTitle = fmt.Sprintf("%s · %s · %s · %s", r.Name, r.Harness, r.Status, shortID(r.SessionID))
 						sessLines = []string{"loading…"}
 						view = "session"
 						scroll = 0
+						sessInput = ""
 						fetchSession(r.SessionID)
 					}
 				case keyBack: // Esc clears the launch bar
@@ -430,25 +486,33 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int) error 
 						scroll--
 					}
 				case keyRune:
-					switch ev.r {
-					case 'q':
-						return nil
-					case 'k':
-						scroll++
-					case 'j':
-						if scroll > 0 {
-							scroll--
-						}
+					sessInput += string(ev.r)
+				case keyBackspace:
+					if r := []rune(sessInput); len(r) > 0 {
+						sessInput = string(r[:len(r)-1])
+					}
+				case keyEnter:
+					if text := strings.TrimSpace(sessInput); text != "" && selectedID != "" {
+						sessInput = ""
+						launchMsg = "sending…"
+						sendReply(selectedID, text)
 					}
 				case keyBack:
-					view = "board"
+					if sessInput != "" {
+						sessInput = ""
+					} else {
+						view = "board"
+						launchMsg = ""
+					}
 				case keyQuit:
 					return nil
 				}
 			}
 		case msg := <-launched:
 			launchMsg = msg
-			if view == "board" {
+			if view == "session" && selectedID != "" {
+				fetchSession(selectedID)
+			} else {
 				prev := selectedID
 				fetchBoard()
 				for i, r := range flattenBoard(board) {
@@ -669,14 +733,14 @@ func wrapLine(s string, width int) []string {
 	return out
 }
 
-func drawSession(title string, content []string, scroll int) {
-	lines, _ := termSize()
-	dim, bold, reset := "\x1b[2m", "\x1b[1m", "\x1b[0m"
+func drawSession(title string, content []string, scroll int, input, msg string) {
+	lines, cols := termSize()
+	dim, green, bold, reset := "\x1b[2m", "\x1b[32m", "\x1b[1m", "\x1b[0m"
 	var sb strings.Builder
 	sb.WriteString("\x1b[H\x1b[2J")
 	sb.WriteString(fmt.Sprintf("%s%s%s\r\n\r\n", bold, title, reset))
 
-	viewport := lines - 4
+	viewport := lines - 7 // header + status + reply bar + footer + slack
 	if viewport < 3 {
 		viewport = 3
 	}
@@ -696,11 +760,19 @@ func drawSession(title string, content []string, scroll int) {
 		sb.WriteString(ln + "\r\n")
 	}
 
+	if msg != "" {
+		sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s%s%s", lines-2, dim, truncate(msg, cols-1), reset))
+	}
+	if input == "" {
+		sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s❯ %sreply to this agent…%s", lines-1, green, dim, reset))
+	} else {
+		sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s❯%s %s%s█%s", lines-1, green, reset, truncate(input, cols-4), dim, reset))
+	}
 	pos := ""
 	if scroll > 0 {
 		pos = fmt.Sprintf(" · %d lines below", scroll)
 	}
-	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s↑↓ scroll · ←/shift+←/esc back · q quit%s%s", lines, dim, pos, reset))
+	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s↑↓ scroll · type + enter reply · ←/esc back · ctrl-c quit%s%s", lines, dim, pos, reset))
 	os.Stdout.WriteString(sb.String())
 }
 
