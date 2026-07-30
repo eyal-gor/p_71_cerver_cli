@@ -311,6 +311,7 @@ const (
 	keyResend    // Ctrl-R: nudge — resend the last user message
 	keyToggleTools // Ctrl-T: expand/collapse tool payloads in the session view
 	keyPaste       // bracketed paste — s carries the whole pasted text
+	keyHover       // mouse moved — x, y carry the pointer cell
 )
 
 // keyEvent carries the parsed key plus the rune for keyRune events and
@@ -342,9 +343,9 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 	// reach the app as escape sequences (and scroll the view) instead of
 	// iTerm scrolling its window over the alternate screen, which shows
 	// ghost frames.
-	fmt.Print("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h\x1b[?2004h")
+	fmt.Print("\x1b[?1049h\x1b[?25l\x1b[?1003h\x1b[?1006h\x1b[?2004h")
 	defer func() {
-		fmt.Print("\x1b[?2004l\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l")
+		fmt.Print("\x1b[?2004l\x1b[?1003l\x1b[?1006l\x1b[?25h\x1b[?1049l")
 		sttyRestore(saved)
 	}()
 
@@ -407,6 +408,7 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 	var board *fleetBoard
 	var sessLines []string
 	var sessData *gateway.Session // last-loaded session, for re-render on ctrl-t
+	hoverY := -1                  // pointer row (1-based) from mouse motion
 	showTools := false            // tool payloads collapsed by default
 
 	// Compute labels for the session header (id → human name). Loaded
@@ -639,11 +641,15 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 			if t, err := time.Parse(time.RFC3339, sessLastAt); err == nil {
 				quiet = time.Since(t)
 			}
-			drawSession(sessTitle, sessLines, &scroll, sessInput, launchMsg, frame, sessActive() && !sessCancelled, sessLoading, owed, quiet)
+			drawSession(sessTitle, sessLines, &scroll, sessInput, launchMsg, frame, sessActive() && !sessCancelled, sessLoading, owed, quiet, hoverY)
 		}
 
 		select {
 		case ev := <-keys:
+			if ev.k == keyHover {
+				hoverY = ev.y
+				continue
+			}
 			switch view {
 			case "board":
 				items := boardItems(board, collapsed)
@@ -1496,7 +1502,7 @@ func wrapLine(s string, width int) []string {
 	return out
 }
 
-func drawSession(title string, content []string, scroll *int, input, msg string, frame int, active, loading, owed bool, quiet time.Duration) {
+func drawSession(title string, content []string, scroll *int, input, msg string, frame int, active, loading, owed bool, quiet time.Duration, hoverY int) {
 	lines, cols := termSize()
 	dim, bold, reset := "\x1b[2m", "\x1b[1m", "\x1b[0m"
 	eol := "\x1b[K\r\n"
@@ -1573,12 +1579,16 @@ func drawSession(title string, content []string, scroll *int, input, msg string,
 		sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s%s%s\x1b[K", lines-3, dim, truncate(status, cols-1), reset))
 	}
 	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s\x1b[K", lines-2, inputBar(input, "reply to this agent…", cols)))
-	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s%s%s\x1b[K", lines-1, bold, truncate(title, cols-1), reset))
+	idStyle, hintStyle := dim, dim
+	if hoverY >= lines-3 {
+		idStyle, hintStyle = bold, ""
+	}
+	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s%s%s\x1b[K", lines-1, idStyle, truncate(title, cols-1), reset))
 	pos := ""
 	if *scroll > 0 {
 		pos = fmt.Sprintf(" · %d lines below", *scroll)
 	}
-	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s↑↓ scroll · type + enter reply · drop an image to attach · ctrl-t tool detail · ←/esc back · ctrl-c quit%s%s\x1b[K", lines, dim, reset, pos))
+	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s↑↓ scroll · type + enter reply · drop an image to attach · ctrl-t tool detail · ←/esc back · ctrl-c quit%s%s\x1b[K", lines, hintStyle, reset, pos))
 	os.Stdout.WriteString(sb.String())
 }
 
@@ -1726,6 +1736,7 @@ var mouseSeq = regexp.MustCompile(`\x1b\[<(\d+);(\d+);(\d+)([Mm])`)
 
 func fleetReadKeys(out chan<- keyEvent) {
 	buf := make([]byte, 8192)
+	lastHoverY := -1
 	var paste []byte  // non-nil while inside a bracketed paste
 	const pasteStart, pasteEnd = "\x1b[200~", "\x1b[201~"
 	for {
@@ -1788,6 +1799,13 @@ func fleetReadKeys(out chan<- keyEvent) {
 				case m[1] == "65":
 					out <- keyEvent{k: keyDown}
 					out <- keyEvent{k: keyDown}
+				case m[1] == "35" && m[4] == "M": // motion, no button
+					x, _ := strconv.Atoi(m[2])
+					y, _ := strconv.Atoi(m[3])
+					if y != lastHoverY {
+						lastHoverY = y
+						out <- keyEvent{k: keyHover, x: x, y: y}
+					}
 				case m[1] == "0" && m[4] == "M": // left press
 					x, _ := strconv.Atoi(m[2])
 					y, _ := strconv.Atoi(m[3])
