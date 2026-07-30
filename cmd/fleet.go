@@ -4,8 +4,10 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -36,8 +38,19 @@ func Fleet(args []string) error {
 	watch := fs.Bool("watch", false, "Plain mode: redraw every 5s")
 	plain := fs.Bool("plain", false, "Print the board once, no interactivity")
 	jsonOut := fs.Bool("json", false, "Emit grouped JSON instead of the board")
+	projFlag := fs.String("project", "", "Project slug to scope the board to (empty = last used; \"all\" = every project)")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	// Project scope: --project wins and is remembered; otherwise the last
+	// choice from the picker (Tab) persists across runs.
+	project := loadFleetProject()
+	if *projFlag != "" {
+		project = *projFlag
+		if project == "all" {
+			project = ""
+		}
+		saveFleetProject(project)
 	}
 
 	ctx := context.Background()
@@ -52,12 +65,12 @@ func Fleet(args []string) error {
 
 	interactive := !*plain && !*watch && !*jsonOut && stdoutIsTTY() && stdinIsTTY()
 	if interactive {
-		return fleetInteractive(ctx, gw, *limit)
+		return fleetInteractive(ctx, gw, *limit, project)
 	}
 
 	for {
 		reqCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-		board, err := fleetSnapshot(reqCtx, gw, *limit)
+		board, err := fleetSnapshot(reqCtx, gw, *limit, project)
 		cancel()
 		if err != nil {
 			return err
@@ -100,8 +113,20 @@ type fleetBoard struct {
 // read like a question aimed at the human.
 var questionTail = regexp.MustCompile(`\?\s*$`)
 
-func fleetSnapshot(ctx context.Context, gw *gateway.Client, limit int) (*fleetBoard, error) {
-	list, err := gw.ListSessions(ctx, limit)
+func fleetSnapshot(ctx context.Context, gw *gateway.Client, limit int, source string) (*fleetBoard, error) {
+	var list []gateway.SessionSummary
+	var err error
+	if source == "" {
+		list, err = gw.ListSessions(ctx, limit)
+	} else {
+		// Project scope: sessions are tagged with their project slug in
+		// metadata.source; the list endpoint filters on it.
+		var resp struct {
+			Sessions []gateway.SessionSummary `json:"sessions"`
+		}
+		err = gw.Do(ctx, "GET", fmt.Sprintf("/v2/sessions?limit=%d&source=%s", limit, url.QueryEscape(source)), nil, &resp)
+		list = resp.Sessions
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -265,6 +290,7 @@ const (
 	keyQuit      // Ctrl-C (and q inside the session view)
 	keyRune      // printable character → the launch bar
 	keyBackspace // delete in the launch bar
+	keyTab       // project switcher
 )
 
 // keyEvent carries the parsed key plus the rune for keyRune events.
@@ -273,13 +299,13 @@ type keyEvent struct {
 	r rune
 }
 
-func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int) error {
+func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, project string) error {
 	saved, err := sttyGet()
 	if err != nil {
 		// No controlling terminal after all — fall back to plain.
 		reqCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 		defer cancel()
-		b, err := fleetSnapshot(reqCtx, gw, limit)
+		b, err := fleetSnapshot(reqCtx, gw, limit, project)
 		if err != nil {
 			return err
 		}
@@ -335,6 +361,10 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int) error 
 	sessCancelled := false // Esc dismissed the wait on the pending turn
 	boardLoading := true
 	sessLoading := false
+	collapsed := map[string]bool{} // folded board groups
+	curProject := project          // "" = all projects
+	var projects []gateway.Project // for the Tab switcher
+	projSel := 0
 	boardBusy := false
 	sessBusy := false
 	var board *fleetBoard
@@ -359,16 +389,26 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int) error 
 			return
 		}
 		boardBusy = true
+		scope := curProject
 		go func() {
 			reqCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 			defer cancel()
-			b, err := fleetSnapshot(reqCtx, gw, limit)
+			b, err := fleetSnapshot(reqCtx, gw, limit, scope)
 			if err != nil {
 				b = nil // receiver keeps the previous board
 			}
 			boardCh <- b
 		}()
 	}
+
+	// Projects for the Tab switcher — loaded once in the background.
+	go func() {
+		reqCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		if ps, err := gw.ListProjects(reqCtx); err == nil {
+			projects = ps
+		}
+	}()
 
 	loadSession := func(id, name string) {
 		if sessBusy {
@@ -389,25 +429,26 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int) error 
 				snap.lastRole = s.Transcript[len(s.Transcript)-1].Role
 				snap.lastAt = s.Transcript[len(s.Transcript)-1].At
 			}
-			parts := []string{name}
-			if v, ok := s.Metadata["cli_tool"].(string); ok && v != "" {
-				parts = append(parts, v)
-			}
-			if v, ok := s.Metadata["cli_model"].(string); ok && v != "" {
-				parts = append(parts, v)
-			}
-			if s.ComputeID != "" {
-				label := computeNames[s.ComputeID]
-				if label == "" {
-					label = shortID(s.ComputeID)
+			// Fixed slots — harness · model · compute always present (with
+			// — when unknown) so each position reads unambiguously.
+			pick := func(v string) string {
+				if v == "" {
+					return "—"
 				}
-				parts = append(parts, label)
+				return v
 			}
-			if s.Status != "" {
-				parts = append(parts, s.Status)
+			harness, _ := s.Metadata["cli_tool"].(string)
+			model, _ := s.Metadata["cli_model"].(string)
+			compute := ""
+			if s.ComputeID != "" {
+				compute = computeNames[s.ComputeID]
+				if compute == "" {
+					compute = shortID(s.ComputeID)
+				}
 			}
-			parts = append(parts, shortID(id))
-			snap.title = strings.Join(parts, " · ")
+			snap.title = strings.Join([]string{
+				name, pick(harness), pick(model), pick(compute), pick(s.Status), shortID(id),
+			}, " · ")
 			sessCh <- snap
 		}()
 	}
@@ -485,17 +526,24 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int) error 
 	for {
 		switch view {
 		case "board":
-			rows := flattenBoard(board)
-			if selected >= len(rows) {
-				selected = len(rows) - 1
+			items := boardItems(board, collapsed)
+			if selected >= len(items) {
+				selected = len(items) - 1
 			}
 			if selected < 0 {
 				selected = 0
 			}
-			if len(rows) > 0 {
-				selectedID = rows[selected].SessionID
+			selectedID = ""
+			if len(items) > 0 && !items[selected].header {
+				selectedID = items[selected].row.SessionID
 			}
-			drawBoard(board, rows, selected, &boardTop, input, launchMsg, frame, boardLoading)
+			projLabel := curProject
+			if projLabel == "" {
+				projLabel = "all projects"
+			}
+			drawBoard(board, items, selected, &boardTop, input, launchMsg, frame, boardLoading, projLabel)
+		case "projects":
+			drawProjects(projects, projSel, curProject)
 		case "session":
 			drawSession(sessTitle, sessLines, &scroll, sessInput, launchMsg, frame, sessActive() && !sessCancelled, sessLoading)
 		}
@@ -504,14 +552,14 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int) error 
 		case ev := <-keys:
 			switch view {
 			case "board":
-				rows := flattenBoard(board)
+				items := boardItems(board, collapsed)
 				switch ev.k {
 				case keyUp:
 					if selected > 0 {
 						selected--
 					}
 				case keyDown:
-					if selected < len(rows)-1 {
+					if selected < len(items)-1 {
 						selected++
 					}
 				case keyRune:
@@ -522,13 +570,15 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int) error 
 					}
 				case keyEnter:
 					// Text in the launch bar → start a new agent; empty bar
-					// → dive into the selected session.
+					// → toggle the fold on a header, or dive into a row.
 					if task := strings.TrimSpace(input); task != "" {
 						input = ""
 						launchMsg = "launching…"
 						launchTask(task)
-					} else if len(rows) > 0 {
-						r := rows[selected]
+					} else if len(items) > 0 && items[selected].header {
+						collapsed[items[selected].group] = !collapsed[items[selected].group]
+					} else if len(items) > 0 {
+						r := items[selected].row
 						sessName = r.Name
 						sessTitle = fmt.Sprintf("%s · %s · %s · %s", r.Name, r.Harness, r.Status, shortID(r.SessionID))
 						sessLines = nil
@@ -541,8 +591,43 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int) error 
 						sessLoading = true
 						loadSession(r.SessionID, r.Name)
 					}
+				case keyTab:
+					view = "projects"
+					projSel = 0
+					for i, p := range projects {
+						if p.Slug == curProject {
+							projSel = i + 1 // slot 0 is "all projects"
+						}
+					}
 				case keyBack: // Esc clears the launch bar
 					input = ""
+				case keyQuit:
+					return nil
+				}
+			case "projects":
+				switch ev.k {
+				case keyUp:
+					if projSel > 0 {
+						projSel--
+					}
+				case keyDown:
+					if projSel < len(projects) {
+						projSel++
+					}
+				case keyEnter:
+					next := ""
+					if projSel > 0 && projSel <= len(projects) {
+						next = projects[projSel-1].Slug
+					}
+					curProject = next
+					saveFleetProject(next)
+					view = "board"
+					selected, boardTop = 0, 0
+					board = nil
+					boardLoading = true
+					loadBoard()
+				case keyBack, keyTab:
+					view = "board"
 				case keyQuit:
 					return nil
 				}
@@ -592,10 +677,12 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int) error 
 			if b != nil {
 				prev := selectedID
 				board = b
-				for i, r := range flattenBoard(board) {
-					if r.SessionID == prev {
-						selected = i
-						break
+				if prev != "" {
+					for i, it := range boardItems(board, collapsed) {
+						if !it.header && it.row.SessionID == prev {
+							selected = i
+							break
+						}
 					}
 				}
 			}
@@ -639,16 +726,37 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int) error 
 	}
 }
 
-// flattenBoard lists selectable rows in display order.
-func flattenBoard(b *fleetBoard) []fleetRow {
+// boardItem is one selectable line on the board: a group header (Enter
+// folds/unfolds the group) or a session row (Enter opens it).
+type boardItem struct {
+	header bool
+	folded bool
+	group  string
+	count  int
+	row    fleetRow
+}
+
+// boardItems lists selectable items in display order, honoring folds.
+func boardItems(b *fleetBoard, collapsed map[string]bool) []boardItem {
 	if b == nil {
 		return nil
 	}
-	out := make([]fleetRow, 0, len(b.Awaiting)+len(b.Working)+len(b.Failed)+len(b.Completed))
-	out = append(out, b.Awaiting...)
-	out = append(out, b.Working...)
-	out = append(out, b.Failed...)
-	out = append(out, b.Completed...)
+	var out []boardItem
+	add := func(group string, rows []fleetRow) {
+		if len(rows) == 0 {
+			return
+		}
+		out = append(out, boardItem{header: true, folded: collapsed[group], group: group, count: len(rows)})
+		if !collapsed[group] {
+			for _, r := range rows {
+				out = append(out, boardItem{group: group, row: r})
+			}
+		}
+	}
+	add("awaiting", b.Awaiting)
+	add("working", b.Working)
+	add("failed", b.Failed)
+	add("completed", b.Completed)
 	return out
 }
 
@@ -662,11 +770,11 @@ func fleetMascot(frame int) []string {
 		eyes = "─   ─"
 	}
 	return []string{
-		" ╭───────╮",
-		" │ " + eyes + " │",
-		" │   ◡   │",
-		" ╰───────╯",
-		"    ╹ ╹",
+		"   ▄▀▀▀▀▀▄",
+		"  ▐ " + eyes + " ▌",
+		"  ▐   ◡   ▌",
+		"   ▀▄▄▄▄▄▀",
+		"   ▔▔▔▔▔▔▔",
 	}
 }
 
@@ -708,7 +816,7 @@ func recentWithin(iso string, d time.Duration) bool {
 	return err == nil && time.Since(t) < d
 }
 
-func drawBoard(b *fleetBoard, rows []fleetRow, selected int, top *int, input, launchMsg string, frame int, loading bool) {
+func drawBoard(b *fleetBoard, items []boardItem, selected int, top *int, input, launchMsg string, frame int, loading bool, projLabel string) {
 	lines, cols := termSize()
 	var sb strings.Builder
 	// Home + per-line erase (\x1b[K) + erase-below (\x1b[J) instead of a
@@ -725,7 +833,7 @@ func drawBoard(b *fleetBoard, rows []fleetRow, selected int, top *int, input, la
 	if loading {
 		loadTag = "  " + dim + spinnerFor(frame) + reset
 	}
-	counts := fmt.Sprintf("%d awaiting input · %d working · %d completed%s", nA, nW, nDone, loadTag)
+	counts := fmt.Sprintf("%d awaiting input · %d working · %d completed · %s%s", nA, nW, nDone, projLabel, loadTag)
 
 	logoRows := 0
 	if cols >= 56 && lines >= 20 {
@@ -751,24 +859,35 @@ func drawBoard(b *fleetBoard, rows []fleetRow, selected int, top *int, input, la
 		headW = 20
 	}
 
-	// Pass 1: build every display line (group headers + rows), noting
-	// which line carries the selected row, so pass 2 can window the list
-	// around the selection — the board auto-scrolls with ↑/↓.
+	// Pass 1: build every display line, noting which carries the
+	// selection, so pass 2 can window the list around it — the board
+	// auto-scrolls with ↑/↓. Headers are selectable (Enter folds).
 	groupTitle := map[string]string{"awaiting": "Awaiting input", "working": "Working", "failed": "Failed", "completed": "Completed"}
 	groupDot := map[string]string{"awaiting": yellow + "✳", "working": green + spinnerFor(frame), "failed": red + "○", "completed": dim + "·"}
 	var display []string
 	selLine := 0
-	prevGroup := ""
-	for i, r := range rows {
-		if r.group != prevGroup {
-			display = append(display, "", dim+groupTitle[r.group]+reset)
-			prevGroup = r.group
+	for i, it := range items {
+		if it.header {
+			marker := "▾"
+			label := groupTitle[it.group]
+			if it.folded {
+				marker = "▸"
+				label = fmt.Sprintf("%s · %d", label, it.count)
+			}
+			line := dim + marker + " " + label + reset
+			if i == selected {
+				line = inv + marker + " " + label + reset
+				selLine = len(display) + 1
+			}
+			display = append(display, "", line)
+			continue
 		}
+		r := it.row
 		head := r.Headline
 		if head == "" {
 			head = "—"
 		}
-		line := fmt.Sprintf(" %s%s %s%-*s%s %-*s %s%-7s %-7s%s",
+		line := fmt.Sprintf("  %s%s %s%-*s%s %-*s %s%-7s %-7s%s",
 			groupDot[r.group], reset,
 			bold, nameW, truncate(r.Name, nameW), reset,
 			headW, truncate(head, headW),
@@ -777,14 +896,14 @@ func drawBoard(b *fleetBoard, rows []fleetRow, selected int, top *int, input, la
 			// Inverse video for the highlight; a plain dot so the whole
 			// row inverts uniformly.
 			dot := map[string]string{"awaiting": "✳", "working": spinnerFor(frame), "failed": "○", "completed": "·"}[r.group]
-			plainLine := fmt.Sprintf(" %s %-*s %-*s %-7s %-7s",
+			plainLine := fmt.Sprintf("  %s %-*s %-*s %-7s %-7s",
 				dot, nameW, truncate(r.Name, nameW), headW, truncate(head, headW), r.Harness, r.Age)
 			line = inv + plainLine + reset
 			selLine = len(display)
 		}
 		display = append(display, line)
 	}
-	if len(rows) == 0 {
+	if len(items) == 0 {
 		empty := " no sessions — describe a task below to start one"
 		if loading {
 			empty = " " + spinnerFor(frame) + " loading fleet…"
@@ -793,14 +912,13 @@ func drawBoard(b *fleetBoard, rows []fleetRow, selected int, top *int, input, la
 	}
 
 	// Pass 2: window `budget` lines, nudging the stored offset only as far
-	// as needed to keep the selection visible (with one line of margin so
-	// the next row is always peeking).
+	// as needed to keep the selection visible.
 	budget := lines - 7 - logoRows // header block + indicators + status + launch bar + footer + slack
 	if budget < 3 {
 		budget = 3
 	}
 	if *top > selLine-2 {
-		*top = selLine - 2 // keep the group header above the selection visible
+		*top = selLine - 2 // keep the line above the selection visible
 	}
 	if *top < selLine-budget+2 {
 		*top = selLine - budget + 2
@@ -835,7 +953,50 @@ func drawBoard(b *fleetBoard, rows []fleetRow, selected int, top *int, input, la
 		sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s%s%s\x1b[K", lines-2, dim, truncate(msg, cols-1), reset))
 	}
 	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s\x1b[K", lines-1, inputBar(input, "describe a task for a new agent…", cols)))
-	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s↑↓ select · enter open · type + enter launch · esc clear · ctrl-c quit%s\x1b[K", lines, dim, reset))
+	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s↑↓ select · enter open/fold · type + enter launch · tab project · ctrl-c quit%s\x1b[K", lines, dim, reset))
+	os.Stdout.WriteString(sb.String())
+}
+
+// drawProjects: the Tab switcher — pick which project scopes the board.
+func drawProjects(projects []gateway.Project, sel int, cur string) {
+	lines, cols := termSize()
+	dim, green, bold, inv, reset := "\x1b[2m", "\x1b[32m", "\x1b[1m", "\x1b[7m", "\x1b[0m"
+	eol := "\x1b[K\r\n"
+	var sb strings.Builder
+	sb.WriteString("\x1b[H")
+	sb.WriteString(fmt.Sprintf("%sswitch project%s%s%s", bold, reset, eol, eol))
+
+	mark := func(slug string) string {
+		if slug == cur {
+			return green + " ●" + reset
+		}
+		return "  "
+	}
+	line := func(i int, label, slug, meta string) {
+		txt := fmt.Sprintf("%s %-32s %s%s%s", mark(slug), truncate(label, 32), dim, meta, reset)
+		if i == sel {
+			txt = inv + fmt.Sprintf("%s %-32s %s", map[bool]string{true: " ●", false: "  "}[slug == cur], truncate(label, 32), meta) + reset
+		}
+		sb.WriteString(txt + eol)
+	}
+	line(0, "all projects", "", "every session on the account")
+	for i, p := range projects {
+		meta := p.Slug
+		if p.SessionCountMTD > 0 {
+			meta = fmt.Sprintf("%s · %d sessions this month", p.Slug, p.SessionCountMTD)
+		}
+		label := p.Name
+		if label == "" {
+			label = p.Slug
+		}
+		line(i+1, label, p.Slug, meta)
+	}
+	if len(projects) == 0 {
+		sb.WriteString(dim + "  loading projects…" + reset + eol)
+	}
+	sb.WriteString("\x1b[J")
+	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s↑↓ select · enter switch · esc cancel · ctrl-c quit%s\x1b[K", lines, dim, reset))
+	_ = cols
 	os.Stdout.WriteString(sb.String())
 }
 
@@ -993,6 +1154,34 @@ func drawSession(title string, content []string, scroll *int, input, msg string,
 
 // ── raw-mode plumbing (stdlib-only, via stty) ────────────────────────
 
+// loadFleetProject / saveFleetProject: the picker's last choice lives in
+// ~/.cerver/fleet_project so the board opens scoped the same way next time.
+func fleetProjectPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".cerver", "fleet_project")
+}
+
+func loadFleetProject() string {
+	p := fleetProjectPath()
+	if p == "" {
+		return ""
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(string(b))
+}
+
+func saveFleetProject(slug string) {
+	if p := fleetProjectPath(); p != "" {
+		_ = os.WriteFile(p, []byte(slug+"\n"), 0o600)
+	}
+}
+
 // mouseSeq: SGR mouse report — \x1b[<code;x;yM (press/wheel) or m (release).
 var mouseSeq = regexp.MustCompile(`\x1b\[<(\d+);\d+;\d+[Mm]`)
 
@@ -1007,6 +1196,8 @@ func fleetReadKeys(out chan<- keyEvent) {
 		switch {
 		case b[0] == 3: // Ctrl-C
 			out <- keyEvent{k: keyQuit}
+		case b[0] == '\t':
+			out <- keyEvent{k: keyTab}
 		case b[0] == '\r' || b[0] == '\n':
 			out <- keyEvent{k: keyEnter}
 		case b[0] == 127 || b[0] == 8: // Backspace / Ctrl-H
