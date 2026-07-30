@@ -592,6 +592,11 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int) error 
 				sessStatus = s.status
 				sessLastRole = s.lastRole
 				sessLastAt = s.lastAt
+				// The agent has answered — a lingering "✳ sent" note is
+				// stale the moment the reply is on screen.
+				if s.lastRole == "assistant" && !inProgress(launchMsg) {
+					launchMsg = ""
+				}
 				if s.title != "" {
 					sessTitle = s.title
 				}
@@ -876,19 +881,20 @@ func drawSession(title string, content []string, scroll int, input, msg string, 
 	}
 	sb.WriteString("\x1b[J")
 
-	// Status line priority: explicit operation message → agent activity
-	// spinner → transcript loading spinner.
+	// Status line priority: in-flight operation → transcript loading →
+	// waiting on the agent (the thinking spinner outranks static
+	// confirmations like "✳ sent", which only show when nothing is
+	// actually happening).
 	status := ""
 	switch {
-	case msg != "":
-		status = msg
-		if inProgress(status) {
-			status = spinnerFor(frame) + " " + status
-		}
+	case inProgress(msg):
+		status = spinnerFor(frame) + " " + msg
 	case loading:
 		status = spinnerFor(frame) + " loading transcript…"
 	case active:
 		status = spinnerFor(frame) + " agent is thinking…"
+	case msg != "":
+		status = msg
 	}
 	// Session identity lives at the bottom, right above the reply bar.
 	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s%s%s\x1b[K", lines-3, bold, truncate(title, cols-1), reset))
