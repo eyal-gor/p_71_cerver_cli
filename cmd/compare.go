@@ -200,10 +200,17 @@ func Compare(args []string) error {
 			r := runOneCLI(legCtx, gw, e.cli, computeID, prompt, mode, model, *timeoutSec)
 			legWall := int(time.Since(legStart).Round(time.Second).Seconds())
 			cancelLeg()
+			// Prefer what the CLI actually loaded over what we asked for:
+			// a bare `grok` entry has no requested model, and even a pinned
+			// one resolves to a fuller id (e.g. "opus" -> "claude-opus-5").
+			effModel := model
+			if r.model != "" {
+				effModel = r.model
+			}
 			results <- result{
 				idx:     i,
 				cli:     e.cli,
-				model:   model,
+				model:   effModel,
 				compute: e.computeQuery,
 				reply:   r.reply,
 				usage:   r.usage,
@@ -315,10 +322,14 @@ func Compare(args []string) error {
 func runOneCLI(ctx context.Context, gw *gateway.Client,
 	cli, computeID, prompt, mode, model string, timeoutSec int) (out struct {
 	cli, reply string
-	usage      *gateway.Usage
-	elapsed    int
-	mode       string
-	err        error
+	// model observed from the run — the relay PATCHes metadata.cli_model
+	// with what the CLI actually loaded, which is the only way to learn
+	// the model when the caller didn't pin one.
+	model   string
+	usage   *gateway.Usage
+	elapsed int
+	mode    string
+	err     error
 }) {
 	out.cli = cli
 	out.mode = mode
@@ -358,6 +369,9 @@ func runOneCLI(ctx context.Context, gw *gateway.Client,
 	}
 	out.reply = s.LastAssistantText()
 	out.usage = s.Usage()
+	if v, ok := s.Metadata["cli_model"].(string); ok {
+		out.model = v
+	}
 	out.elapsed = int(time.Since(start).Seconds())
 	return
 }
