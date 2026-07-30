@@ -50,6 +50,7 @@ func Compare(args []string) error {
 	billFlag := fs.String("bill", "", "Billing override. Global: `api` or `sub`. Per-CLI: `claude=sub,codex=api`")
 	modelsFlag := fs.String("models", "", "Model override. Global: `sonnet`. Per-CLI: `claude=opus,codex=gpt-5-codex`. Empty = each CLI's local default.")
 	timeoutSec := fs.Int("timeout", 180, "Max seconds to wait for replies")
+	shareFlag := fs.Bool("share", false, "Publish the comparison as a public page (cerver.ai/c/…) and print the URL")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -260,6 +261,50 @@ func Compare(args []string) error {
 			len(entries), wallSec, sumLegWall)
 	} else {
 		fmt.Printf("— %d agent · %ds wall\n", len(entries), wallSec)
+	}
+
+	// Sharing is explicit opt-in: the prompt and replies become public.
+	if *shareFlag {
+		type shareResult struct {
+			CLI       string  `json:"cli"`
+			Model     string  `json:"model"`
+			Content   string  `json:"content"`
+			CostUSD   float64 `json:"cost_usd,omitempty"`
+			LatencyMS int     `json:"latency_ms,omitempty"`
+		}
+		payload := struct {
+			Prompt  string        `json:"prompt"`
+			Results []shareResult `json:"results"`
+		}{Prompt: prompt}
+		for _, r := range ordered {
+			if r.err != nil {
+				continue
+			}
+			latency := r.elapsed
+			if latency == 0 {
+				latency = r.legWall
+			}
+			payload.Results = append(payload.Results, shareResult{
+				CLI:       r.cli,
+				Model:     r.model,
+				Content:   r.reply,
+				CostUSD:   output.Cost(r.cli, r.usage),
+				LatencyMS: latency * 1000,
+			})
+		}
+		var created struct {
+			ID  string `json:"id"`
+			URL string `json:"url"`
+		}
+		if len(payload.Results) == 0 {
+			fmt.Println("✗ nothing to share — every leg failed")
+		} else if err := gw.Do(ctx, "POST", "/v2/compares", payload, &created); err != nil {
+			fmt.Printf("✗ share failed: %v\n", err)
+		} else {
+			fmt.Printf("↗ shared: %s\n", created.URL)
+		}
+	} else {
+		fmt.Println("  (add --share to publish this side-by-side as a link)")
 	}
 	return nil
 }
