@@ -129,6 +129,11 @@ type TranscriptEntry struct {
 	At      string `json:"at"`
 }
 
+// DeleteSession removes a session record (gateway DELETE /v2/sessions/:id).
+func (c *Client) DeleteSession(ctx context.Context, sessionID string) error {
+	return c.Do(ctx, "DELETE", fmt.Sprintf("/v2/sessions/%s", sessionID), nil, nil)
+}
+
 func (c *Client) GetSession(ctx context.Context, sessionID string) (*Session, error) {
 	var s Session
 	if err := c.Do(ctx, "GET", "/v2/sessions/"+sessionID, nil, &s); err != nil {

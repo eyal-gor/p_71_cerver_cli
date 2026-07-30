@@ -312,6 +312,7 @@ const (
 	keyToggleTools // Ctrl-T: expand/collapse tool payloads in the session view
 	keyPaste       // bracketed paste — s carries the whole pasted text
 	keyHover       // mouse moved — x, y carry the pointer cell
+	keyDelete      // Ctrl-X: two-press delete of a finished session
 )
 
 // keyEvent carries the parsed key plus the rune for keyRune events and
@@ -575,6 +576,21 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 		}()
 	}
 
+	deleteArmed := "" // session id armed by the first Ctrl-X
+
+	// deleteSession removes a finished session and refreshes the board.
+	deleteSession := func(id string) {
+		go func() {
+			reqCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+			defer cancel()
+			if err := gw.DeleteSession(reqCtx, id); err != nil {
+				launched <- "delete failed: " + err.Error()
+				return
+			}
+			launched <- "session deleted"
+		}()
+	}
+
 	// sendReply pushes a follow-up into the open session — the agent
 	// continues in place, same as `cerver chat`.
 	sendReply := func(id, text string, images []string) {
@@ -630,7 +646,7 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 			if projLabel == "" {
 				projLabel = "all projects"
 			}
-			drawBoard(board, items, selected, &boardTop, input, launchMsg, frame, boardLoading, projLabel, relayStatusLine(relayComputes))
+			drawBoard(board, items, selected, &boardTop, input, launchMsg, frame, boardLoading, projLabel, relayStatusLine(relayComputes), deleteArmed)
 		case "projects":
 			drawProjects(projects, projSel, curProject)
 		case "details":
@@ -654,11 +670,28 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 			case "board":
 				items := boardItems(board, collapsed)
 				switch ev.k {
+				case keyDelete:
+					if len(items) > 0 && !items[selected].header && !items[selected].project {
+						r := items[selected].row
+						if r.group == "completed" || r.group == "failed" {
+							if deleteArmed == r.SessionID {
+								deleteArmed = ""
+								launchMsg = "deleting…"
+								deleteSession(r.SessionID)
+								boardLoading = true
+								loadBoard()
+							} else {
+								deleteArmed = r.SessionID
+							}
+						}
+					}
 				case keyUp:
+					deleteArmed = ""
 					if selected > 0 {
 						selected--
 					}
 				case keyDown:
+					deleteArmed = ""
 					if selected < len(items)-1 {
 						selected++
 					}
@@ -671,6 +704,15 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 						input = string(r[:len(r)-1])
 					}
 				case keyEnter:
+					if deleteArmed != "" && len(items) > 0 && !items[selected].header &&
+						items[selected].row.SessionID == deleteArmed {
+						deleteArmed = ""
+						launchMsg = "deleting…"
+						deleteSession(items[selected].row.SessionID)
+						boardLoading = true
+						loadBoard()
+						break
+					}
 					// Text in the launch bar → start a new agent; empty bar
 					// → toggle the fold on a header, or dive into a row.
 					if task := strings.TrimSpace(input); task != "" {
@@ -752,7 +794,11 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 							selected = idx
 						}
 					}
-				case keyBack: // Esc clears the launch bar
+				case keyBack: // Esc cancels a pending delete, then clears the bar
+					if deleteArmed != "" {
+						deleteArmed = ""
+						break
+					}
 					input = ""
 				case keyQuit:
 					return nil
@@ -1073,7 +1119,7 @@ func recentWithin(iso string, d time.Duration) bool {
 	return err == nil && time.Since(t) < d
 }
 
-func drawBoard(b *fleetBoard, items []boardItem, selected int, top *int, input, launchMsg string, frame int, loading bool, projLabel, relayLine string) {
+func drawBoard(b *fleetBoard, items []boardItem, selected int, top *int, input, launchMsg string, frame int, loading bool, projLabel, relayLine string, deleteArmed string) {
 	lines, cols := termSize()
 	var sb strings.Builder
 	// Home + per-line erase (\x1b[K) + erase-below (\x1b[J) instead of a
@@ -1176,6 +1222,13 @@ func drawBoard(b *fleetBoard, items []boardItem, selected int, top *int, input, 
 			bold, nameW, truncate(r.Name, nameW), reset,
 			headW, truncate(head, headW),
 			dim, r.Harness, r.Age, reset)
+		if deleteArmed != "" && r.SessionID == deleteArmed {
+			push(red+"  ✗ delete \""+truncate(r.Name, nameW)+"\"? ctrl-x or enter to confirm · esc to cancel"+reset, i)
+			if i == selected {
+				selLine = len(display) - 1
+			}
+			continue
+		}
 		if i == selected {
 			// Inverse video for the highlight; a plain dot so the whole
 			// row inverts uniformly.
@@ -1779,6 +1832,8 @@ func fleetReadKeys(out chan<- keyEvent) {
 			out <- keyEvent{k: keyResend}
 		case b[0] == 0x14: // Ctrl-T
 			out <- keyEvent{k: keyToggleTools}
+		case b[0] == 0x18: // Ctrl-X
+			out <- keyEvent{k: keyDelete}
 		case b[0] == '\t':
 			out <- keyEvent{k: keyTab}
 		case b[0] == '\r' || b[0] == '\n':
