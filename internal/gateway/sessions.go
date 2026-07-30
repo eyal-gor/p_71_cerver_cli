@@ -129,9 +129,10 @@ type TranscriptEntry struct {
 	At      string `json:"at"`
 }
 
-// DeleteSession removes a session record (gateway DELETE /v2/sessions/:id).
+// DeleteSession purges a session record entirely (owner-gated;
+// gateway DELETE /v2/sessions/:id?purge=1).
 func (c *Client) DeleteSession(ctx context.Context, sessionID string) error {
-	return c.Do(ctx, "DELETE", fmt.Sprintf("/v2/sessions/%s", sessionID), nil, nil)
+	return c.Do(ctx, "DELETE", fmt.Sprintf("/v2/sessions/%s?purge=1", sessionID), nil, nil)
 }
 
 func (c *Client) GetSession(ctx context.Context, sessionID string) (*Session, error) {
