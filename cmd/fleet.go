@@ -111,6 +111,7 @@ func fleetSnapshot(ctx context.Context, gw *gateway.Client, limit int) (*fleetBo
 	const tailRows = 15
 	tails := make([]string, len(list))
 	roles := make([]string, len(list))
+	lastAts := make([]string, len(list))
 	var wg sync.WaitGroup
 	sem := make(chan struct{}, 6)
 	for i := range list {
@@ -128,12 +129,13 @@ func fleetSnapshot(ctx context.Context, gw *gateway.Client, limit int) (*fleetBo
 			}
 			// Prefer what the agent said over trailing system events
 			// (session_completed JSON etc.).
-			if txt := s.LastAssistantText(); txt != "" {
+			last := s.Transcript[len(s.Transcript)-1]
+			lastAts[i] = last.At
+			if txt := s.LastAssistantText(); txt != "" && last.Role != "user" {
 				tails[i] = lastLine(txt)
 				roles[i] = "assistant"
 				return
 			}
-			last := s.Transcript[len(s.Transcript)-1]
 			tails[i] = lastLine(last.Content)
 			roles[i] = last.Role
 		}(i)
@@ -166,6 +168,13 @@ func fleetSnapshot(ctx context.Context, gw *gateway.Client, limit int) (*fleetBo
 		case s.Status == "failed" || s.Status == "terminated":
 			row.group = "failed"
 			board.Failed = append(board.Failed, row)
+		case roles[i] == "user" && recentWithin(lastAts[i], 10*time.Minute):
+			// The human spoke last, minutes ago — the agent owes a reply,
+			// which is what "working" means here. Status alone can't tell:
+			// these relays report "ready"/"resting" even mid-run. The
+			// recency window keeps long-dead unanswered sessions out.
+			row.group = "working"
+			board.Working = append(board.Working, row)
 		case roles[i] == "assistant" && questionTail.MatchString(strings.TrimSpace(tails[i])):
 			row.group = "awaiting"
 			board.Awaiting = append(board.Awaiting, row)
@@ -288,10 +297,22 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int) error 
 
 	keys := make(chan keyEvent, 8)
 	go fleetReadKeys(keys)
-	launched := make(chan string, 4) // launch outcome messages
+	launched := make(chan string, 4) // launch/reply outcome messages
+
+	// Fetches run in goroutines and deliver here, so the spinner keeps
+	// animating while we wait for the gateway.
+	boardCh := make(chan *fleetBoard, 1)
+	type sessSnap struct {
+		id, title, status, lastRole, lastAt string
+		lines                               []string
+	}
+	sessCh := make(chan sessSnap, 1)
 
 	boardTick := time.NewTicker(5 * time.Second)
 	defer boardTick.Stop()
+	spin := time.NewTicker(120 * time.Millisecond)
+	defer spin.Stop()
+	frame := 0
 
 	// UI state. view: "board" | "session".
 	view := "board"
@@ -303,13 +324,20 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int) error 
 	launchMsg := ""
 	sessInput := "" // session view reply bar
 	sessName := ""
+	sessTitle := ""
+	sessStatus := ""
+	sessLastRole := ""
+	sessLastAt := ""
+	boardLoading := true
+	sessLoading := false
+	boardBusy := false
+	sessBusy := false
 	var board *fleetBoard
 	var sessLines []string
-	var sessTitle string
 
 	// Compute labels for the session header (id → human name). Loaded
 	// once, synchronously, before the loop starts — the map is then
-	// read-only, so the UI goroutine can use it without locking.
+	// read-only, so goroutines can use it without locking.
 	computeNames := map[string]string{}
 	{
 		reqCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
@@ -319,6 +347,64 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int) error 
 			}
 		}
 		cancel()
+	}
+
+	loadBoard := func() {
+		if boardBusy {
+			return
+		}
+		boardBusy = true
+		go func() {
+			reqCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+			defer cancel()
+			b, err := fleetSnapshot(reqCtx, gw, limit)
+			if err != nil {
+				b = nil // receiver keeps the previous board
+			}
+			boardCh <- b
+		}()
+	}
+
+	loadSession := func(id, name string) {
+		if sessBusy {
+			return
+		}
+		sessBusy = true
+		go func() {
+			reqCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+			defer cancel()
+			s, err := gw.GetSessionTail(reqCtx, id, 200)
+			if err != nil {
+				sessCh <- sessSnap{id: id, lines: []string{"failed to load session: " + err.Error()}}
+				return
+			}
+			_, cols := termSize()
+			snap := sessSnap{id: id, lines: renderTranscript(s, cols), status: s.Status}
+			if len(s.Transcript) > 0 {
+				snap.lastRole = s.Transcript[len(s.Transcript)-1].Role
+				snap.lastAt = s.Transcript[len(s.Transcript)-1].At
+			}
+			parts := []string{name}
+			if v, ok := s.Metadata["cli_tool"].(string); ok && v != "" {
+				parts = append(parts, v)
+			}
+			if v, ok := s.Metadata["cli_model"].(string); ok && v != "" {
+				parts = append(parts, v)
+			}
+			if s.ComputeID != "" {
+				label := computeNames[s.ComputeID]
+				if label == "" {
+					label = shortID(s.ComputeID)
+				}
+				parts = append(parts, label)
+			}
+			if s.Status != "" {
+				parts = append(parts, s.Status)
+			}
+			parts = append(parts, shortID(id))
+			snap.title = strings.Join(parts, " · ")
+			sessCh <- snap
+		}()
 	}
 
 	// launchTask starts a new agent in the background — same defaults as
@@ -359,44 +445,6 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int) error 
 		}()
 	}
 
-	fetchBoard := func() {
-		reqCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-		defer cancel()
-		if b, err := fleetSnapshot(reqCtx, gw, limit); err == nil {
-			board = b
-		}
-	}
-	fetchSession := func(id string) {
-		reqCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-		defer cancel()
-		s, err := gw.GetSessionTail(reqCtx, id, 200)
-		if err != nil {
-			sessLines = []string{"failed to load session: " + err.Error()}
-			return
-		}
-		_, cols := termSize()
-		sessLines = renderTranscript(s, cols)
-		parts := []string{sessName}
-		if v, ok := s.Metadata["cli_tool"].(string); ok && v != "" {
-			parts = append(parts, v)
-		}
-		if v, ok := s.Metadata["cli_model"].(string); ok && v != "" {
-			parts = append(parts, v)
-		}
-		if s.ComputeID != "" {
-			label := computeNames[s.ComputeID]
-			if label == "" {
-				label = shortID(s.ComputeID)
-			}
-			parts = append(parts, label)
-		}
-		if s.Status != "" {
-			parts = append(parts, s.Status)
-		}
-		parts = append(parts, shortID(id))
-		sessTitle = strings.Join(parts, " · ")
-	}
-
 	// sendReply pushes a follow-up into the open session — the agent
 	// continues in place, same as `cerver chat`.
 	sendReply := func(id, text string) {
@@ -416,7 +464,19 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int) error 
 		}()
 	}
 
-	fetchBoard()
+	// sessActive: the agent on the open session is (probably) producing
+	// output right now — running, or we spoke last and it hasn't replied.
+	sessActive := func() bool {
+		switch sessStatus {
+		case "running", "provisioning", "starting":
+			return true
+		case "failed", "terminated":
+			return false
+		}
+		return sessLastRole == "user" && recentWithin(sessLastAt, 10*time.Minute)
+	}
+
+	loadBoard()
 	for {
 		switch view {
 		case "board":
@@ -430,9 +490,9 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int) error 
 			if len(rows) > 0 {
 				selectedID = rows[selected].SessionID
 			}
-			drawBoard(board, rows, selected, &boardTop, input, launchMsg)
+			drawBoard(board, rows, selected, &boardTop, input, launchMsg, frame, boardLoading)
 		case "session":
-			drawSession(sessTitle, sessLines, scroll, sessInput, launchMsg)
+			drawSession(sessTitle, sessLines, scroll, sessInput, launchMsg, frame, sessActive(), sessLoading)
 		}
 
 		select {
@@ -466,11 +526,14 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int) error 
 						r := rows[selected]
 						sessName = r.Name
 						sessTitle = fmt.Sprintf("%s · %s · %s · %s", r.Name, r.Harness, r.Status, shortID(r.SessionID))
-						sessLines = []string{"loading…"}
+						sessLines = nil
+						sessStatus, sessLastRole = "", ""
 						view = "session"
 						scroll = 0
 						sessInput = ""
-						fetchSession(r.SessionID)
+						launchMsg = ""
+						sessLoading = true
+						loadSession(r.SessionID, r.Name)
 					}
 				case keyBack: // Esc clears the launch bar
 					input = ""
@@ -508,36 +571,46 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int) error 
 					return nil
 				}
 			}
+		case b := <-boardCh:
+			boardBusy = false
+			boardLoading = false
+			if b != nil {
+				prev := selectedID
+				board = b
+				for i, r := range flattenBoard(board) {
+					if r.SessionID == prev {
+						selected = i
+						break
+					}
+				}
+			}
+		case s := <-sessCh:
+			sessBusy = false
+			sessLoading = false
+			if view == "session" && s.id == selectedID {
+				sessLines = s.lines
+				sessStatus = s.status
+				sessLastRole = s.lastRole
+				sessLastAt = s.lastAt
+				if s.title != "" {
+					sessTitle = s.title
+				}
+			}
 		case msg := <-launched:
 			launchMsg = msg
 			if view == "session" && selectedID != "" {
-				fetchSession(selectedID)
+				loadSession(selectedID, sessName)
 			} else {
-				prev := selectedID
-				fetchBoard()
-				for i, r := range flattenBoard(board) {
-					if r.SessionID == prev {
-						selected = i
-						break
-					}
-				}
+				loadBoard()
 			}
 		case <-boardTick.C:
 			if view == "board" {
-				prev := selectedID
-				fetchBoard()
-				// Keep the highlight on the same session across refreshes.
-				for i, r := range flattenBoard(board) {
-					if r.SessionID == prev {
-						selected = i
-						break
-					}
-				}
+				loadBoard()
 			} else if selectedID != "" {
-				// Live session: keep the transcript fresh; if the user is
-				// at the bottom they stay pinned to the newest output.
-				fetchSession(selectedID)
+				loadSession(selectedID, sessName)
 			}
+		case <-spin.C:
+			frame++
 		}
 	}
 }
@@ -555,17 +628,42 @@ func flattenBoard(b *fleetBoard) []fleetRow {
 	return out
 }
 
-func drawBoard(b *fleetBoard, rows []fleetRow, selected int, top *int, input, launchMsg string) {
+var spinFrames = []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+
+func spinnerFor(frame int) string { return spinFrames[frame%len(spinFrames)] }
+
+// inProgress: only the known in-flight status messages animate — a
+// suffix check would false-positive on truncated text ("long task na…").
+func inProgress(msg string) bool { return msg == "launching…" || msg == "sending…" }
+
+// recentWithin: was this RFC3339 timestamp within d of now? Used to
+// decide "the agent still owes a reply" vs "that session is dead" —
+// harness runs report an idle status (even "resting") while the CLI is
+// actually mid-turn, so recency of the last transcript entry is the
+// only trustworthy activity signal.
+func recentWithin(iso string, d time.Duration) bool {
+	t, err := time.Parse(time.RFC3339, iso)
+	return err == nil && time.Since(t) < d
+}
+
+func drawBoard(b *fleetBoard, rows []fleetRow, selected int, top *int, input, launchMsg string, frame int, loading bool) {
 	lines, cols := termSize()
 	var sb strings.Builder
-	sb.WriteString("\x1b[H\x1b[2J")
+	// Home + per-line erase (\x1b[K) + erase-below (\x1b[J) instead of a
+	// full clear: no blank flash between the 8fps spinner frames.
+	sb.WriteString("\x1b[H")
 	dim, yellow, green, red, bold, inv, reset := "\x1b[2m", "\x1b[33m", "\x1b[32m", "\x1b[31m", "\x1b[1m", "\x1b[7m", "\x1b[0m"
+	eol := "\x1b[K\r\n"
 
 	nA, nW, nDone := 0, 0, 0
 	if b != nil {
 		nA, nW, nDone = len(b.Awaiting), len(b.Working), len(b.Completed)+len(b.Failed)
 	}
-	sb.WriteString(fmt.Sprintf("%scerver fleet%s · %d awaiting input · %d working · %d completed\r\n", bold, reset, nA, nW, nDone))
+	loadTag := ""
+	if loading {
+		loadTag = "  " + dim + spinnerFor(frame) + reset
+	}
+	sb.WriteString(fmt.Sprintf("%scerver fleet%s · %d awaiting input · %d working · %d completed%s%s", bold, reset, nA, nW, nDone, loadTag, eol))
 
 	// Column widths from the live terminal.
 	nameW := 24
@@ -579,7 +677,7 @@ func drawBoard(b *fleetBoard, rows []fleetRow, selected int, top *int, input, la
 	// which line carries the selected row, so pass 2 can window the list
 	// around the selection — the board auto-scrolls with ↑/↓.
 	groupTitle := map[string]string{"awaiting": "Awaiting input", "working": "Working", "failed": "Failed", "completed": "Completed"}
-	groupDot := map[string]string{"awaiting": yellow + "✳", "working": green + "●", "failed": red + "○", "completed": dim + "·"}
+	groupDot := map[string]string{"awaiting": yellow + "✳", "working": green + spinnerFor(frame), "failed": red + "○", "completed": dim + "·"}
 	var display []string
 	selLine := 0
 	prevGroup := ""
@@ -598,18 +696,22 @@ func drawBoard(b *fleetBoard, rows []fleetRow, selected int, top *int, input, la
 			headW, truncate(head, headW),
 			dim, r.Harness, r.Age, reset)
 		if i == selected {
-			// Inverse video for the highlight; strip inner color codes so
-			// the whole row inverts uniformly.
+			// Inverse video for the highlight; a plain dot so the whole
+			// row inverts uniformly.
+			dot := map[string]string{"awaiting": "✳", "working": spinnerFor(frame), "failed": "○", "completed": "·"}[r.group]
 			plainLine := fmt.Sprintf(" %s %-*s %-*s %-7s %-7s",
-				strings.TrimLeft(groupDot[r.group], "\x1b[0123456789;m"),
-				nameW, truncate(r.Name, nameW), headW, truncate(head, headW), r.Harness, r.Age)
+				dot, nameW, truncate(r.Name, nameW), headW, truncate(head, headW), r.Harness, r.Age)
 			line = inv + plainLine + reset
 			selLine = len(display)
 		}
 		display = append(display, line)
 	}
 	if len(rows) == 0 {
-		display = append(display, "", dim+" no sessions — cerver run \"task\" starts one"+reset)
+		empty := " no sessions — describe a task below to start one"
+		if loading {
+			empty = " " + spinnerFor(frame) + " loading fleet…"
+		}
+		display = append(display, "", dim+empty+reset)
 	}
 
 	// Pass 2: window `budget` lines, nudging the stored offset only as far
@@ -636,25 +738,30 @@ func drawBoard(b *fleetBoard, rows []fleetRow, selected int, top *int, input, la
 		end = len(display)
 	}
 	if *top > 0 {
-		sb.WriteString(fmt.Sprintf("%s ↑ %d above%s\r\n", dim, *top, reset))
+		sb.WriteString(fmt.Sprintf("%s ↑ %d above%s%s", dim, *top, reset, eol))
 	}
 	for _, ln := range display[*top:end] {
-		sb.WriteString(ln + "\r\n")
+		sb.WriteString(ln + eol)
 	}
 	if end < len(display) {
-		sb.WriteString(fmt.Sprintf("%s ↓ %d below%s\r\n", dim, len(display)-end, reset))
+		sb.WriteString(fmt.Sprintf("%s ↓ %d below%s%s", dim, len(display)-end, reset, eol))
 	}
+	sb.WriteString("\x1b[J") // clear everything below before the bottom chrome
 
 	// Bottom chrome: launch status, the launch bar, key hints.
 	if launchMsg != "" {
-		sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s%s%s", lines-2, dim, truncate(launchMsg, cols-1), reset))
+		msg := launchMsg
+		if inProgress(msg) {
+			msg = spinnerFor(frame) + " " + msg
+		}
+		sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s%s%s\x1b[K", lines-2, dim, truncate(msg, cols-1), reset))
 	}
 	if input == "" {
-		sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s❯ %sdescribe a task for a new agent…%s", lines-1, green, dim, reset))
+		sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s❯ %sdescribe a task for a new agent…%s\x1b[K", lines-1, green, dim, reset))
 	} else {
-		sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s❯%s %s%s█%s", lines-1, green, reset, truncate(input, cols-4), dim, reset))
+		sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s❯%s %s%s█%s\x1b[K", lines-1, green, reset, truncate(input, cols-4), dim, reset))
 	}
-	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s↑↓ select · enter open · type + enter launch · esc clear · ctrl-c quit%s", lines, dim, reset))
+	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s↑↓ select · enter open · type + enter launch · esc clear · ctrl-c quit%s\x1b[K", lines, dim, reset))
 	os.Stdout.WriteString(sb.String())
 }
 
@@ -733,12 +840,13 @@ func wrapLine(s string, width int) []string {
 	return out
 }
 
-func drawSession(title string, content []string, scroll int, input, msg string) {
+func drawSession(title string, content []string, scroll int, input, msg string, frame int, active, loading bool) {
 	lines, cols := termSize()
 	dim, green, bold, reset := "\x1b[2m", "\x1b[32m", "\x1b[1m", "\x1b[0m"
+	eol := "\x1b[K\r\n"
 	var sb strings.Builder
-	sb.WriteString("\x1b[H\x1b[2J")
-	sb.WriteString(fmt.Sprintf("%s%s%s\r\n\r\n", bold, title, reset))
+	sb.WriteString("\x1b[H")
+	sb.WriteString(fmt.Sprintf("%s%s%s%s%s", bold, title, reset, eol, eol))
 
 	viewport := lines - 7 // header + status + reply bar + footer + slack
 	if viewport < 3 {
@@ -757,22 +865,37 @@ func drawSession(title string, content []string, scroll int, input, msg string) 
 		start = 0
 	}
 	for _, ln := range content[start:end] {
-		sb.WriteString(ln + "\r\n")
+		sb.WriteString(ln + eol)
 	}
+	sb.WriteString("\x1b[J")
 
-	if msg != "" {
-		sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s%s%s", lines-2, dim, truncate(msg, cols-1), reset))
+	// Status line priority: explicit operation message → agent activity
+	// spinner → transcript loading spinner.
+	status := ""
+	switch {
+	case msg != "":
+		status = msg
+		if inProgress(status) {
+			status = spinnerFor(frame) + " " + status
+		}
+	case loading:
+		status = spinnerFor(frame) + " loading transcript…"
+	case active:
+		status = spinnerFor(frame) + " agent is thinking…"
+	}
+	if status != "" {
+		sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s%s%s\x1b[K", lines-2, dim, truncate(status, cols-1), reset))
 	}
 	if input == "" {
-		sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s❯ %sreply to this agent…%s", lines-1, green, dim, reset))
+		sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s❯ %sreply to this agent…%s\x1b[K", lines-1, green, dim, reset))
 	} else {
-		sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s❯%s %s%s█%s", lines-1, green, reset, truncate(input, cols-4), dim, reset))
+		sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s❯%s %s%s█%s\x1b[K", lines-1, green, reset, truncate(input, cols-4), dim, reset))
 	}
 	pos := ""
 	if scroll > 0 {
 		pos = fmt.Sprintf(" · %d lines below", scroll)
 	}
-	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s↑↓ scroll · type + enter reply · ←/esc back · ctrl-c quit%s%s", lines, dim, pos, reset))
+	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s↑↓ scroll · type + enter reply · ←/esc back · ctrl-c quit%s%s\x1b[K", lines, dim, reset, pos))
 	os.Stdout.WriteString(sb.String())
 }
 
