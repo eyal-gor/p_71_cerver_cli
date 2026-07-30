@@ -17,7 +17,7 @@ func TestExtractDroppedImages(t *testing.T) {
 	}
 
 	text, images, note := extractDroppedImages("look at " + img + " please")
-	if text != "look at please" {
+	if text != "look at [image 1] please" {
 		t.Errorf("text = %q", text)
 	}
 	if len(images) != 1 || !strings.HasPrefix(images[0], "data:image/png;base64,") {
@@ -40,8 +40,14 @@ func TestExtractDroppedImages(t *testing.T) {
 	}
 	dropped := strings.ReplaceAll(spaced, " ", "\\ ")
 	text, images, _ = extractDroppedImages(dropped)
-	if text != "" || len(images) != 1 || !strings.HasPrefix(images[0], "data:image/jpeg;base64,") {
+	if text != "[image 1]" || len(images) != 1 || !strings.HasPrefix(images[0], "data:image/jpeg;base64,") {
 		t.Errorf("escaped: text=%q images=%d", text, len(images))
+	}
+
+	// iTerm single-quotes paths containing spaces.
+	text, images, _ = extractDroppedImages("see '" + spaced + "' ok")
+	if text != "see [image 1] ok" || len(images) != 1 {
+		t.Errorf("quoted: text=%q images=%d", text, len(images))
 	}
 }
 

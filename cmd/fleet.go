@@ -1378,17 +1378,16 @@ func renderTranscript(s *gateway.Session, cols int, showTools bool) []string {
 }
 
 // extractDroppedImages pulls image-file paths out of a reply typed (or
-// drag-dropped — the terminal pastes the path) into the session input,
-// returning the text without them, the images base64-encoded for the
-// input API, and a short note for the status line. Paths must exist on
-// disk and carry an image extension; anything else stays in the text.
+// drag-dropped — the terminal pastes the path) into the session input.
+// Each detected image becomes a "[image N]" placeholder in the text —
+// nobody wants to read /var/folders/…/Screenshot 2026….png in their own
+// message — plus a data-URL for the input API. Paths must exist on disk
+// and carry an image extension; anything else stays in the text.
 func extractDroppedImages(text string) (string, []string, string) {
-	// iTerm/Terminal escape spaces in dropped paths as "\ ".
-	marked := strings.ReplaceAll(text, "\\ ", "\x00")
 	var keep []string
 	var images []string
-	for _, tok := range strings.Fields(marked) {
-		path := strings.Trim(strings.ReplaceAll(tok, "\x00", " "), `"'`)
+	for _, tok := range splitDroppedTokens(text) {
+		path := tok
 		ext := strings.ToLower(filepath.Ext(path))
 		isImg := ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".gif" || ext == ".webp"
 		if isImg && len(images) < 4 {
@@ -1399,11 +1398,12 @@ func extractDroppedImages(text string) (string, []string, string) {
 						".gif": "image/gif", ".webp": "image/webp",
 					}[ext]
 					images = append(images, "data:"+mime+";base64,"+base64.StdEncoding.EncodeToString(data))
+					keep = append(keep, fmt.Sprintf("[image %d]", len(images)))
 					continue
 				}
 			}
 		}
-		keep = append(keep, strings.ReplaceAll(tok, "\x00", "\\ "))
+		keep = append(keep, tok)
 	}
 	note := ""
 	if len(images) == 1 {
@@ -1412,6 +1412,47 @@ func extractDroppedImages(text string) (string, []string, string) {
 		note = fmt.Sprintf("📎 %d images", len(images))
 	}
 	return strings.TrimSpace(strings.Join(keep, " ")), images, note
+}
+
+// splitDroppedTokens tokenizes input the way terminals paste dropped
+// files: '…'-quoted (iTerm when the path has spaces), "…"-quoted, or
+// backslash-escaped spaces. Quotes and escapes are resolved so each
+// token is a candidate literal path.
+func splitDroppedTokens(text string) []string {
+	var tokens []string
+	var cur strings.Builder
+	flush := func() {
+		if cur.Len() > 0 {
+			tokens = append(tokens, cur.String())
+			cur.Reset()
+		}
+	}
+	r := []rune(text)
+	for i := 0; i < len(r); i++ {
+		switch {
+		case r[i] == '\\' && i+1 < len(r) && r[i+1] == ' ':
+			cur.WriteRune(' ')
+			i++
+		case r[i] == '\'' || r[i] == '"':
+			q := r[i]
+			j := i + 1
+			for j < len(r) && r[j] != q {
+				j++
+			}
+			if j < len(r) { // matched quote — take the span verbatim
+				cur.WriteString(string(r[i+1 : j]))
+				i = j
+			} else {
+				cur.WriteRune(r[i])
+			}
+		case r[i] == ' ' || r[i] == '\t':
+			flush()
+		default:
+			cur.WriteRune(r[i])
+		}
+	}
+	flush()
+	return tokens
 }
 
 func wrapLine(s string, width int) []string {
