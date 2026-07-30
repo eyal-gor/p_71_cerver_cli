@@ -252,9 +252,17 @@ const (
 	keyUp
 	keyDown
 	keyEnter
-	keyBack // ← or shift+← or Esc
-	keyQuit // q or Ctrl-C
+	keyBack      // ← or shift+← or Esc
+	keyQuit      // Ctrl-C (and q inside the session view)
+	keyRune      // printable character → the launch bar
+	keyBackspace // delete in the launch bar
 )
+
+// keyEvent carries the parsed key plus the rune for keyRune events.
+type keyEvent struct {
+	k fleetKey
+	r rune
+}
 
 func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int) error {
 	saved, err := sttyGet()
@@ -278,8 +286,9 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int) error 
 		sttyRestore(saved)
 	}()
 
-	keys := make(chan fleetKey, 8)
+	keys := make(chan keyEvent, 8)
 	go fleetReadKeys(keys)
+	launched := make(chan string, 4) // launch outcome messages
 
 	boardTick := time.NewTicker(5 * time.Second)
 	defer boardTick.Stop()
@@ -290,9 +299,49 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int) error 
 	boardTop := 0
 	selectedID := ""
 	scroll := 0 // session view: lines scrolled UP from the bottom
+	input := "" // launch bar contents
+	launchMsg := ""
 	var board *fleetBoard
 	var sessLines []string
 	var sessTitle string
+
+	// launchTask starts a new agent in the background — same defaults as
+	// `cerver run`: claude, first ready local relay, project-scoped key.
+	launchTask := func(task string) {
+		go func() {
+			tok, err := infisical.LoadRunToken(ctx)
+			if err != nil || tok == "" {
+				launched <- "launch failed: no credentials"
+				return
+			}
+			runGw := gateway.New(tok)
+			reqCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
+			defer cancel()
+			computeID, err := pickCompute(reqCtx, runGw, "")
+			if err != nil {
+				launched <- "launch failed: " + err.Error()
+				return
+			}
+			sid, err := runGw.CreateSession(reqCtx, gateway.SessionCreate{
+				SessionType: "coding",
+				Compute:     map[string]any{"compute_id": computeID},
+				Task:        task,
+				Workload:    "coding",
+				SessionName: shortPromptLabel(task, 48),
+				Metadata:    map[string]any{"cli_tool": "claude", "surface": "fleet"},
+			})
+			if err != nil {
+				launched <- "launch failed: " + err.Error()
+				return
+			}
+			// The create only registers the session — /input starts the agent.
+			if err := runGw.SendInput(reqCtx, sid, task); err != nil {
+				launched <- "launch failed: " + err.Error()
+				return
+			}
+			launched <- "✳ launched " + shortID(sid) + " — " + shortPromptLabel(task, 40)
+		}()
+	}
 
 	fetchBoard := func() {
 		reqCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
@@ -327,17 +376,17 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int) error 
 			if len(rows) > 0 {
 				selectedID = rows[selected].SessionID
 			}
-			drawBoard(board, rows, selected, &boardTop)
+			drawBoard(board, rows, selected, &boardTop, input, launchMsg)
 		case "session":
 			drawSession(sessTitle, sessLines, scroll)
 		}
 
 		select {
-		case k := <-keys:
+		case ev := <-keys:
 			switch view {
 			case "board":
 				rows := flattenBoard(board)
-				switch k {
+				switch ev.k {
 				case keyUp:
 					if selected > 0 {
 						selected--
@@ -346,8 +395,20 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int) error 
 					if selected < len(rows)-1 {
 						selected++
 					}
+				case keyRune:
+					input += string(ev.r)
+				case keyBackspace:
+					if r := []rune(input); len(r) > 0 {
+						input = string(r[:len(r)-1])
+					}
 				case keyEnter:
-					if len(rows) > 0 {
+					// Text in the launch bar → start a new agent; empty bar
+					// → dive into the selected session.
+					if task := strings.TrimSpace(input); task != "" {
+						input = ""
+						launchMsg = "launching…"
+						launchTask(task)
+					} else if len(rows) > 0 {
 						r := rows[selected]
 						sessTitle = fmt.Sprintf("%s · %s · %s · %s", r.Name, r.Harness, r.Status, shortID(r.SessionID))
 						sessLines = []string{"loading…"}
@@ -355,23 +416,46 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int) error 
 						scroll = 0
 						fetchSession(r.SessionID)
 					}
-				case keyQuit, keyBack:
-					if k == keyQuit {
-						return nil
-					}
+				case keyBack: // Esc clears the launch bar
+					input = ""
+				case keyQuit:
+					return nil
 				}
 			case "session":
-				switch k {
+				switch ev.k {
 				case keyUp:
 					scroll++
 				case keyDown:
 					if scroll > 0 {
 						scroll--
 					}
+				case keyRune:
+					switch ev.r {
+					case 'q':
+						return nil
+					case 'k':
+						scroll++
+					case 'j':
+						if scroll > 0 {
+							scroll--
+						}
+					}
 				case keyBack:
 					view = "board"
 				case keyQuit:
 					return nil
+				}
+			}
+		case msg := <-launched:
+			launchMsg = msg
+			if view == "board" {
+				prev := selectedID
+				fetchBoard()
+				for i, r := range flattenBoard(board) {
+					if r.SessionID == prev {
+						selected = i
+						break
+					}
 				}
 			}
 		case <-boardTick.C:
@@ -407,7 +491,7 @@ func flattenBoard(b *fleetBoard) []fleetRow {
 	return out
 }
 
-func drawBoard(b *fleetBoard, rows []fleetRow, selected int, top *int) {
+func drawBoard(b *fleetBoard, rows []fleetRow, selected int, top *int, input, launchMsg string) {
 	lines, cols := termSize()
 	var sb strings.Builder
 	sb.WriteString("\x1b[H\x1b[2J")
@@ -467,7 +551,7 @@ func drawBoard(b *fleetBoard, rows []fleetRow, selected int, top *int) {
 	// Pass 2: window `budget` lines, nudging the stored offset only as far
 	// as needed to keep the selection visible (with one line of margin so
 	// the next row is always peeking).
-	budget := lines - 5 // header + footer + overflow indicators + slack
+	budget := lines - 8 // header + indicators + status + launch bar + footer + slack
 	if budget < 3 {
 		budget = 3
 	}
@@ -497,7 +581,16 @@ func drawBoard(b *fleetBoard, rows []fleetRow, selected int, top *int) {
 		sb.WriteString(fmt.Sprintf("%s ↓ %d below%s\r\n", dim, len(display)-end, reset))
 	}
 
-	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s↑↓ select · enter open · q quit%s", lines, dim, reset))
+	// Bottom chrome: launch status, the launch bar, key hints.
+	if launchMsg != "" {
+		sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s%s%s", lines-2, dim, truncate(launchMsg, cols-1), reset))
+	}
+	if input == "" {
+		sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s❯ %sdescribe a task for a new agent…%s", lines-1, green, dim, reset))
+	} else {
+		sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s❯%s %s%s█%s", lines-1, green, reset, truncate(input, cols-4), dim, reset))
+	}
+	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s↑↓ select · enter open · type + enter launch · esc clear · ctrl-c quit%s", lines, dim, reset))
 	os.Stdout.WriteString(sb.String())
 }
 
@@ -613,8 +706,8 @@ func drawSession(title string, content []string, scroll int) {
 
 // ── raw-mode plumbing (stdlib-only, via stty) ────────────────────────
 
-func fleetReadKeys(out chan<- fleetKey) {
-	buf := make([]byte, 16)
+func fleetReadKeys(out chan<- keyEvent) {
+	buf := make([]byte, 64)
 	for {
 		n, err := os.Stdin.Read(buf)
 		if err != nil || n == 0 {
@@ -622,26 +715,32 @@ func fleetReadKeys(out chan<- fleetKey) {
 		}
 		b := buf[:n]
 		switch {
-		case b[0] == 3 || b[0] == 'q': // Ctrl-C / q
-			out <- keyQuit
+		case b[0] == 3: // Ctrl-C
+			out <- keyEvent{k: keyQuit}
 		case b[0] == '\r' || b[0] == '\n':
-			out <- keyEnter
+			out <- keyEvent{k: keyEnter}
+		case b[0] == 127 || b[0] == 8: // Backspace / Ctrl-H
+			out <- keyEvent{k: keyBackspace}
 		case b[0] == 27: // ESC sequences
 			s := string(b)
 			switch {
 			case strings.HasSuffix(s, "A"):
-				out <- keyUp
+				out <- keyEvent{k: keyUp}
 			case strings.HasSuffix(s, "B"):
-				out <- keyDown
+				out <- keyEvent{k: keyDown}
 			case strings.HasSuffix(s, "D"): // ← and shift+← ("[1;2D") both go back
-				out <- keyBack
+				out <- keyEvent{k: keyBack}
 			case n == 1: // bare Esc
-				out <- keyBack
+				out <- keyEvent{k: keyBack}
 			}
-		case b[0] == 'k':
-			out <- keyUp
-		case b[0] == 'j':
-			out <- keyDown
+		default:
+			// Printable text feeds the launch bar (board) or acts as a
+			// shortcut (session view decides per rune).
+			for _, r := range string(b) {
+				if r >= 32 && r != 127 {
+					out <- keyEvent{k: keyRune, r: r}
+				}
+			}
 		}
 	}
 }
