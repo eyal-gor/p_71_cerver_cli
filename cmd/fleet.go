@@ -846,9 +846,8 @@ func drawSession(title string, content []string, scroll int, input, msg string, 
 	eol := "\x1b[K\r\n"
 	var sb strings.Builder
 	sb.WriteString("\x1b[H")
-	sb.WriteString(fmt.Sprintf("%s%s%s%s%s", bold, title, reset, eol, eol))
 
-	viewport := lines - 7 // header + status + reply bar + footer + slack
+	viewport := lines - 6 // bottom chrome: info line + status + reply bar + footer + slack
 	if viewport < 3 {
 		viewport = 3
 	}
@@ -883,6 +882,8 @@ func drawSession(title string, content []string, scroll int, input, msg string, 
 	case active:
 		status = spinnerFor(frame) + " agent is thinking…"
 	}
+	// Session identity lives at the bottom, right above the reply bar.
+	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s%s%s\x1b[K", lines-3, bold, truncate(title, cols-1), reset))
 	if status != "" {
 		sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s%s%s\x1b[K", lines-2, dim, truncate(status, cols-1), reset))
 	}
