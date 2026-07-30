@@ -596,7 +596,7 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 				selected = 0
 			}
 			selectedID = ""
-			if len(items) > 0 && !items[selected].header {
+			if len(items) > 0 && !items[selected].header && !items[selected].project {
 				selectedID = items[selected].row.SessionID
 			}
 			projLabel := curProject
@@ -644,6 +644,14 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 						input = ""
 						launchMsg = "launching…"
 						launchTask(task)
+					} else if len(items) > 0 && items[selected].project {
+						view = "projects"
+						projSel = 0
+						for i, p := range projects {
+							if p.Slug == curProject {
+								projSel = i + 1
+							}
+						}
 					} else if len(items) > 0 && items[selected].header {
 						collapsed[items[selected].group] = !collapsed[items[selected].group]
 					} else if len(items) > 0 {
@@ -669,7 +677,15 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 						}
 					}
 				case keyRight:
-					if curProject != "" {
+					if len(items) > 0 && items[selected].project {
+						view = "projects"
+						projSel = 0
+						for i, p := range projects {
+							if p.Slug == curProject {
+								projSel = i + 1
+							}
+						}
+					} else if curProject != "" {
 						view = "details"
 						loadDetails(curProject)
 					}
@@ -879,11 +895,12 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 // boardItem is one selectable line on the board: a group header (Enter
 // folds/unfolds the group) or a session row (Enter opens it).
 type boardItem struct {
-	header bool
-	folded bool
-	group  string
-	count  int
-	row    fleetRow
+	project bool // the header's project line — Enter opens the switcher
+	header  bool
+	folded  bool
+	group   string
+	count   int
+	row     fleetRow
 }
 
 // boardItems lists selectable items in display order, honoring folds.
@@ -891,7 +908,9 @@ func boardItems(b *fleetBoard, collapsed map[string]bool) []boardItem {
 	if b == nil {
 		return nil
 	}
-	var out []boardItem
+	// The project line is selectable too, so the keyboard can reach the
+	// switcher without knowing about Tab.
+	out := []boardItem{{project: true}}
 	add := func(group string, rows []fleetRow) {
 		if len(rows) == 0 {
 			return
@@ -988,6 +1007,7 @@ func drawBoard(b *fleetBoard, items []boardItem, selected int, top *int, input, 
 	fleetHit.projectRow = 0
 	fleetHit.itemRows = map[int]int{}
 	fleetHit.pickerTop = 0
+	projSelected := len(items) > 0 && items[0].project && selected == 0
 	contentRow := 0
 	logoRows := 0
 	if cols >= 56 && lines >= 20 {
@@ -997,14 +1017,22 @@ func drawBoard(b *fleetBoard, items []boardItem, selected int, top *int, input, 
 		sb.WriteString(green + m[0] + reset + eol)
 		sb.WriteString(fmt.Sprintf("%s%s%s   %scerver fleet%s%s", green, m[1], reset, bold, reset, eol))
 		sb.WriteString(fmt.Sprintf("%s%s%s   %s%s%s%s", green, m[2], reset, dim, counts, reset, eol))
-		sb.WriteString(fmt.Sprintf("%s%s%s   %sproject:%s %s%s ▾%s %s(tab or click to switch)%s%s", green, m[3], reset, dim, reset, bold, projLabel, reset, dim, reset, eol))
+		projLine := fmt.Sprintf("%sproject:%s %s%s ▾%s %s(tab or click to switch)%s", dim, reset, bold, projLabel, reset, dim, reset)
+		if projSelected {
+			projLine = inv + "project: " + projLabel + " ▾" + reset
+		}
+		sb.WriteString(fmt.Sprintf("%s%s%s   %s%s", green, m[3], reset, projLine, eol))
 		sb.WriteString(green + m[4] + reset + eol)
 		sb.WriteString(eol)
 		logoRows = len(m) + 1
 		fleetHit.projectRow = 4
 		contentRow = 7
 	} else {
-		sb.WriteString(fmt.Sprintf("%scerver fleet%s · %s · %sproject:%s %s ▾%s", bold, reset, counts, dim, reset, projLabel, eol))
+		small := fmt.Sprintf("%sproject:%s %s ▾", dim, reset, projLabel)
+		if projSelected {
+			small = inv + "project: " + projLabel + " ▾" + reset
+		}
+		sb.WriteString(fmt.Sprintf("%scerver fleet%s · %s · %s%s", bold, reset, counts, small, eol))
 		fleetHit.projectRow = 1
 		contentRow = 2
 	}
@@ -1030,6 +1058,9 @@ func drawBoard(b *fleetBoard, items []boardItem, selected int, top *int, input, 
 	}
 	selLine := 0
 	for i, it := range items {
+		if it.project {
+			continue // rendered in the header block, not the list
+		}
 		if it.header {
 			marker := "▾"
 			label := groupTitle[it.group]
@@ -1078,6 +1109,9 @@ func drawBoard(b *fleetBoard, items []boardItem, selected int, top *int, input, 
 
 	// Pass 2: window `budget` lines, nudging the stored offset only as far
 	// as needed to keep the selection visible.
+	if projSelected {
+		selLine = 0
+	}
 	budget := lines - 7 - logoRows // header block + indicators + status + launch bar + footer + slack
 	if budget < 3 {
 		budget = 3
