@@ -306,12 +306,15 @@ const (
 	keyBackspace // delete in the launch bar
 	keyTab       // project switcher
 	keyRight     // project details
+	keyClick     // left mouse click (x, y set)
 )
 
-// keyEvent carries the parsed key plus the rune for keyRune events.
+// keyEvent carries the parsed key plus the rune for keyRune events and
+// coordinates for clicks.
 type keyEvent struct {
-	k fleetKey
-	r rune
+	k    fleetKey
+	r    rune
+	x, y int
 }
 
 func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, project string) error {
@@ -597,6 +600,11 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 				selectedID = items[selected].row.SessionID
 			}
 			projLabel := curProject
+			for _, p := range projects {
+				if p.Slug == curProject && p.Name != "" {
+					projLabel = p.Name
+				}
+			}
 			if projLabel == "" {
 				projLabel = "all projects"
 			}
@@ -665,6 +673,36 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 						view = "details"
 						loadDetails(curProject)
 					}
+				case keyClick:
+					if ev.y == fleetHit.projectRow {
+						view = "projects"
+						projSel = 0
+						for i, p := range projects {
+							if p.Slug == curProject {
+								projSel = i + 1
+							}
+						}
+					} else if idx, ok := fleetHit.itemRows[ev.y]; ok && idx < len(items) {
+						if items[idx].header {
+							collapsed[items[idx].group] = !collapsed[items[idx].group]
+						} else if idx == selected {
+							// second click on the selected row dives in
+							r := items[idx].row
+							sessName = r.Name
+							sessTitle = fmt.Sprintf("%s · %s · %s · %s", r.Name, r.Harness, r.Status, shortID(r.SessionID))
+							sessLines = nil
+							sessStatus, sessLastRole = "", ""
+							view = "session"
+							scroll = 0
+							sessInput = ""
+							launchMsg = ""
+							sessCancelled = false
+							sessLoading = true
+							loadSession(r.SessionID, r.Name)
+						} else {
+							selected = idx
+						}
+					}
 				case keyBack: // Esc clears the launch bar
 					input = ""
 				case keyQuit:
@@ -696,6 +734,23 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 					if projSel > 0 && projSel <= len(projects) {
 						view = "details"
 						loadDetails(projects[projSel-1].Slug)
+					}
+				case keyClick:
+					if fleetHit.pickerTop > 0 {
+						idx := ev.y - fleetHit.pickerTop
+						if idx >= 0 && idx <= len(projects) {
+							next := ""
+							if idx > 0 {
+								next = projects[idx-1].Slug
+							}
+							curProject = next
+							saveFleetProject(next)
+							view = "board"
+							selected, boardTop = 0, 0
+							board = nil
+							boardLoading = true
+							loadBoard()
+						}
 					}
 				case keyBack, keyTab:
 					view = "board"
@@ -928,22 +983,30 @@ func drawBoard(b *fleetBoard, items []boardItem, selected int, top *int, input, 
 	if loading {
 		loadTag = "  " + dim + spinnerFor(frame) + reset
 	}
-	counts := fmt.Sprintf("%d awaiting input · %d working · %d completed · %s%s", nA, nW, nDone, projLabel, loadTag)
+	counts := fmt.Sprintf("%d awaiting input · %d working · %d completed%s", nA, nW, nDone, loadTag)
 
+	fleetHit.projectRow = 0
+	fleetHit.itemRows = map[int]int{}
+	fleetHit.pickerTop = 0
+	contentRow := 0
 	logoRows := 0
 	if cols >= 56 && lines >= 20 {
 		// Mascot left, title + counts to its right — like the Claude
-		// Code welcome block.
+		// Code welcome block. The project line is a click target.
 		m := fleetMascot(frame)
 		sb.WriteString(green + m[0] + reset + eol)
 		sb.WriteString(fmt.Sprintf("%s%s%s   %scerver fleet%s%s", green, m[1], reset, bold, reset, eol))
 		sb.WriteString(fmt.Sprintf("%s%s%s   %s%s%s%s", green, m[2], reset, dim, counts, reset, eol))
-		sb.WriteString(green + m[3] + reset + eol)
+		sb.WriteString(fmt.Sprintf("%s%s%s   %sproject:%s %s%s ▾%s %s(tab or click to switch)%s%s", green, m[3], reset, dim, reset, bold, projLabel, reset, dim, reset, eol))
 		sb.WriteString(green + m[4] + reset + eol)
 		sb.WriteString(eol)
 		logoRows = len(m) + 1
+		fleetHit.projectRow = 4
+		contentRow = 7
 	} else {
-		sb.WriteString(fmt.Sprintf("%scerver fleet%s · %s%s", bold, reset, counts, eol))
+		sb.WriteString(fmt.Sprintf("%scerver fleet%s · %s · %sproject:%s %s ▾%s", bold, reset, counts, dim, reset, projLabel, eol))
+		fleetHit.projectRow = 1
+		contentRow = 2
 	}
 
 	// Column widths from the live terminal.
@@ -960,6 +1023,11 @@ func drawBoard(b *fleetBoard, items []boardItem, selected int, top *int, input, 
 	groupTitle := map[string]string{"awaiting": "Awaiting input", "working": "Working", "failed": "Failed", "completed": "Completed"}
 	groupDot := map[string]string{"awaiting": yellow + "✳", "working": green + spinnerFor(frame), "failed": red + "○", "completed": dim + "·"}
 	var display []string
+	var lineItem []int // display line → item index (-1 = not clickable)
+	push := func(ln string, item int) {
+		display = append(display, ln)
+		lineItem = append(lineItem, item)
+	}
 	selLine := 0
 	for i, it := range items {
 		if it.header {
@@ -974,7 +1042,8 @@ func drawBoard(b *fleetBoard, items []boardItem, selected int, top *int, input, 
 				line = inv + marker + " " + label + reset
 				selLine = len(display) + 1
 			}
-			display = append(display, "", line)
+			push("", -1)
+			push(line, i)
 			continue
 		}
 		r := it.row
@@ -996,14 +1065,15 @@ func drawBoard(b *fleetBoard, items []boardItem, selected int, top *int, input, 
 			line = inv + plainLine + reset
 			selLine = len(display)
 		}
-		display = append(display, line)
+		push(line, i)
 	}
 	if len(items) == 0 {
 		empty := " no sessions — describe a task below to start one"
 		if loading {
 			empty = " " + spinnerFor(frame) + " loading fleet…"
 		}
-		display = append(display, "", dim+empty+reset)
+		push("", -1)
+		push(dim+empty+reset, -1)
 	}
 
 	// Pass 2: window `budget` lines, nudging the stored offset only as far
@@ -1030,9 +1100,14 @@ func drawBoard(b *fleetBoard, items []boardItem, selected int, top *int, input, 
 	}
 	if *top > 0 {
 		sb.WriteString(fmt.Sprintf("%s ↑ %d above%s%s", dim, *top, reset, eol))
+		contentRow++
 	}
-	for _, ln := range display[*top:end] {
+	for i, ln := range display[*top:end] {
 		sb.WriteString(ln + eol)
+		if idx := lineItem[*top+i]; idx >= 0 {
+			fleetHit.itemRows[contentRow] = idx
+		}
+		contentRow++
 	}
 	if end < len(display) {
 		sb.WriteString(fmt.Sprintf("%s ↓ %d below%s%s", dim, len(display)-end, reset, eol))
@@ -1074,6 +1149,8 @@ func drawProjects(projects []gateway.Project, sel int, cur string) {
 		}
 		sb.WriteString(txt + eol)
 	}
+	fleetHit.pickerTop = 3 // title + blank, then the first row
+	fleetHit.projectRow = 0
 	line(0, "all projects", "", "every session on the account")
 	for i, p := range projects {
 		meta := p.Slug
@@ -1294,6 +1371,14 @@ func openURL(u string) {
 
 // ── raw-mode plumbing (stdlib-only, via stty) ────────────────────────
 
+// fleetHit maps screen rows to click targets. Rebuilt by every draw
+// (draw and event handling share the UI goroutine, so no locking).
+var fleetHit struct {
+	projectRow int         // header row that shows the active project
+	itemRows   map[int]int // screen row → board item index
+	pickerTop  int         // first selectable row of the project picker
+}
+
 // loadFleetProject / saveFleetProject: the picker's last choice lives in
 // ~/.cerver/fleet_project so the board opens scoped the same way next time.
 func fleetProjectPath() string {
@@ -1323,7 +1408,7 @@ func saveFleetProject(slug string) {
 }
 
 // mouseSeq: SGR mouse report — \x1b[<code;x;yM (press/wheel) or m (release).
-var mouseSeq = regexp.MustCompile(`\x1b\[<(\d+);\d+;\d+[Mm]`)
+var mouseSeq = regexp.MustCompile(`\x1b\[<(\d+);(\d+);(\d+)([Mm])`)
 
 func fleetReadKeys(out chan<- keyEvent) {
 	buf := make([]byte, 64)
@@ -1349,13 +1434,17 @@ func fleetReadKeys(out chan<- keyEvent) {
 			// notch feels natural); clicks are ignored. Strip them so the
 			// arrow-key counting below never sees their digits.
 			for _, m := range mouseSeq.FindAllStringSubmatch(s, -1) {
-				switch m[1] {
-				case "64":
+				switch {
+				case m[1] == "64":
 					out <- keyEvent{k: keyUp}
 					out <- keyEvent{k: keyUp}
-				case "65":
+				case m[1] == "65":
 					out <- keyEvent{k: keyDown}
 					out <- keyEvent{k: keyDown}
+				case m[1] == "0" && m[4] == "M": // left press
+					x, _ := strconv.Atoi(m[2])
+					y, _ := strconv.Atoi(m[3])
+					out <- keyEvent{k: keyClick, x: x, y: y}
 				}
 			}
 			s = mouseSeq.ReplaceAllString(s, "")
