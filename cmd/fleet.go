@@ -641,6 +641,28 @@ func spinnerFor(frame int) string { return spinFrames[frame%len(spinFrames)] }
 // suffix check would false-positive on truncated text ("long task na…").
 func inProgress(msg string) bool { return msg == "launching…" || msg == "sending…" }
 
+// inputBar renders the one-line text entry as a highlighted strip: a
+// dark background across the full width so the eye lands on it, green
+// prompt glyph, block cursor while typing, dim placeholder otherwise.
+func inputBar(input, placeholder string, cols int) string {
+	bg, green, dim, bold, reset := "\x1b[48;5;236m", "\x1b[32m", "\x1b[2m", "\x1b[1m", "\x1b[0m"
+	var body string
+	var visible int
+	if input == "" {
+		body = green + "❯ " + reset + bg + dim + placeholder
+		visible = 2 + len([]rune(placeholder))
+	} else {
+		shown := truncate(input, cols-5)
+		body = green + "❯ " + reset + bg + bold + shown + reset + bg + dim + "█"
+		visible = 2 + len([]rune(shown)) + 1
+	}
+	pad := cols - 1 - visible
+	if pad < 0 {
+		pad = 0
+	}
+	return bg + body + strings.Repeat(" ", pad) + reset
+}
+
 // recentWithin: was this RFC3339 timestamp within d of now? Used to
 // decide "the agent still owes a reply" vs "that session is dead" —
 // harness runs report an idle status (even "resting") while the CLI is
@@ -761,11 +783,7 @@ func drawBoard(b *fleetBoard, rows []fleetRow, selected int, top *int, input, la
 		}
 		sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s%s%s\x1b[K", lines-2, dim, truncate(msg, cols-1), reset))
 	}
-	if input == "" {
-		sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s❯ %sdescribe a task for a new agent…%s\x1b[K", lines-1, green, dim, reset))
-	} else {
-		sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s❯%s %s%s█%s\x1b[K", lines-1, green, reset, truncate(input, cols-4), dim, reset))
-	}
+	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s\x1b[K", lines-1, inputBar(input, "describe a task for a new agent…", cols)))
 	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s↑↓ select · enter open · type + enter launch · esc clear · ctrl-c quit%s\x1b[K", lines, dim, reset))
 	os.Stdout.WriteString(sb.String())
 }
@@ -855,7 +873,7 @@ func wrapLine(s string, width int) []string {
 
 func drawSession(title string, content []string, scroll int, input, msg string, frame int, active, loading bool) {
 	lines, cols := termSize()
-	dim, green, bold, reset := "\x1b[2m", "\x1b[32m", "\x1b[1m", "\x1b[0m"
+	dim, bold, reset := "\x1b[2m", "\x1b[1m", "\x1b[0m"
 	eol := "\x1b[K\r\n"
 	var sb strings.Builder
 	sb.WriteString("\x1b[H")
@@ -896,16 +914,13 @@ func drawSession(title string, content []string, scroll int, input, msg string, 
 	case msg != "":
 		status = msg
 	}
-	// Session identity lives at the bottom, right above the reply bar.
-	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s%s%s\x1b[K", lines-3, bold, truncate(title, cols-1), reset))
+	// Bottom stack: status → highlighted reply bar → session identity →
+	// key hints.
 	if status != "" {
-		sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s%s%s\x1b[K", lines-2, dim, truncate(status, cols-1), reset))
+		sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s%s%s\x1b[K", lines-3, dim, truncate(status, cols-1), reset))
 	}
-	if input == "" {
-		sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s❯ %sreply to this agent…%s\x1b[K", lines-1, green, dim, reset))
-	} else {
-		sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s❯%s %s%s█%s\x1b[K", lines-1, green, reset, truncate(input, cols-4), dim, reset))
-	}
+	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s\x1b[K", lines-2, inputBar(input, "reply to this agent…", cols)))
+	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s%s%s\x1b[K", lines-1, bold, truncate(title, cols-1), reset))
 	pos := ""
 	if scroll > 0 {
 		pos = fmt.Sprintf(" · %d lines below", scroll)
