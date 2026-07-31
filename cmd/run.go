@@ -75,6 +75,28 @@ func Run(args []string) error {
 		return err
 	}
 
+	// `--cli auto` hands the run to the base router: quality-ordered
+	// harnesses, cooldown memory, same-session failover on busy.
+	if *cli == "auto" {
+		if *resume != "" {
+			return errors.New("--cli auto can't be combined with --resume")
+		}
+		if *timeoutSec == 0 {
+			*timeoutSec = 600
+		}
+		autoCtx, cancelAuto := context.WithTimeout(context.Background(),
+			time.Duration(*timeoutSec)*time.Second+10*time.Second)
+		defer cancelAuto()
+		tok, err := infisical.LoadRunToken(autoCtx)
+		if err != nil {
+			return err
+		}
+		if tok == "" {
+			return errors.New("no cerver credentials found — run `curl https://cerver.ai/install.sh | bash` first")
+		}
+		return RunAuto(autoCtx, gateway.New(tok), *on, prompt, *timeoutSec)
+	}
+
 	mode, err := resolveBillingMode(*cli, *bill)
 	if err != nil {
 		return err

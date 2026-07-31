@@ -75,8 +75,17 @@ func (c *Client) CreateSession(ctx context.Context, req SessionCreate) (string, 
 // SendInput pushes a user message to a session. Without this the agent
 // stays in `prepared` and never spawns the CLI.
 func (c *Client) SendInput(ctx context.Context, sessionID, content string) error {
-	return c.Do(ctx, "POST", fmt.Sprintf("/v2/sessions/%s/input", sessionID),
-		map[string]string{"content": content, "role": "user"}, nil)
+	return c.SendInputImages(ctx, sessionID, content, nil)
+}
+
+// SendInputImages is SendInput with base64-encoded image attachments.
+// The relay writes them to temp files and hands the paths to the CLI.
+func (c *Client) SendInputImages(ctx context.Context, sessionID, content string, images []string) error {
+	body := map[string]any{"content": content, "role": "user"}
+	if len(images) > 0 {
+		body["images"] = images
+	}
+	return c.Do(ctx, "POST", fmt.Sprintf("/v2/sessions/%s/input", sessionID), body, nil)
 }
 
 // SwitchTool continues the same session with a different CLI. The
@@ -118,6 +127,12 @@ type TranscriptEntry struct {
 	Kind    string `json:"kind"`
 	Content string `json:"content"`
 	At      string `json:"at"`
+}
+
+// DeleteSession purges a session record entirely (owner-gated;
+// gateway DELETE /v2/sessions/:id?purge=1).
+func (c *Client) DeleteSession(ctx context.Context, sessionID string) error {
+	return c.Do(ctx, "DELETE", fmt.Sprintf("/v2/sessions/%s?purge=1", sessionID), nil, nil)
 }
 
 func (c *Client) GetSession(ctx context.Context, sessionID string) (*Session, error) {
@@ -267,6 +282,25 @@ func (c *Client) Login(ctx context.Context, email string) (*LoginResp, error) {
 		return nil, fmt.Errorf("login returned no api_key")
 	}
 	return &out, nil
+}
+
+// CompletedExitCode parses the most recent session_completed event's
+// exit_code. found=false when no such event is on the transcript (older
+// relays, or the CLI is still running).
+func (s *Session) CompletedExitCode() (code int, found bool) {
+	for i := len(s.Transcript) - 1; i >= 0; i-- {
+		if s.Transcript[i].Kind != "session_completed" {
+			continue
+		}
+		var payload struct {
+			ExitCode *int `json:"exit_code"`
+		}
+		if json.Unmarshal([]byte(s.Transcript[i].Content), &payload) == nil && payload.ExitCode != nil {
+			return *payload.ExitCode, true
+		}
+		return 0, false
+	}
+	return 0, false
 }
 
 // LastAssistantText pulls the most recent assistant text entry (skips

@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"net/url"
@@ -256,7 +257,7 @@ func fleetRenderPlain(b *fleetBoard) {
 		dim, yellow, green, red, bold, reset = "\x1b[2m", "\x1b[33m", "\x1b[32m", "\x1b[31m", "\x1b[1m", "\x1b[0m"
 	}
 
-	fmt.Printf("%scerver fleet%s · %d awaiting input · %d working · %d completed\n",
+	fmt.Printf("%scerver agents%s · %d awaiting input · %d working · %d completed\n",
 		bold, reset, len(b.Awaiting), len(b.Working), len(b.Completed)+len(b.Failed))
 
 	group := func(title, dot, dotColor string, rows []fleetRow, max int) {
@@ -308,6 +309,10 @@ const (
 	keyRight     // project details
 	keyClick     // left mouse click (x, y set)
 	keyResend    // Ctrl-R: nudge — resend the last user message
+	keyToggleTools // Ctrl-T: expand/collapse tool payloads in the session view
+	keyPaste       // bracketed paste — s carries the whole pasted text
+	keyHover       // mouse moved — x, y carry the pointer cell
+	keyDelete      // Ctrl-X: two-press delete of a finished session
 )
 
 // keyEvent carries the parsed key plus the rune for keyRune events and
@@ -315,6 +320,7 @@ const (
 type keyEvent struct {
 	k    fleetKey
 	r    rune
+	s    string // keyPaste payload
 	x, y int
 }
 
@@ -338,9 +344,9 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 	// reach the app as escape sequences (and scroll the view) instead of
 	// iTerm scrolling its window over the alternate screen, which shows
 	// ghost frames.
-	fmt.Print("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h")
+	fmt.Print("\x1b[?1049h\x1b[?25l\x1b[?1003h\x1b[?1006h\x1b[?2004h")
 	defer func() {
-		fmt.Print("\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l")
+		fmt.Print("\x1b[?2004l\x1b[?1003l\x1b[?1006l\x1b[?25h\x1b[?1049l")
 		sttyRestore(saved)
 	}()
 
@@ -354,6 +360,7 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 	type sessSnap struct {
 		id, title, status, lastRole, lastAt, lastUser string
 		lines                                         []string
+		sess                                          *gateway.Session
 	}
 	sessCh := make(chan sessSnap, 1)
 
@@ -401,6 +408,9 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 	sessBusy := false
 	var board *fleetBoard
 	var sessLines []string
+	var sessData *gateway.Session // last-loaded session, for re-render on ctrl-t
+	hoverY := -1                  // pointer row (1-based) from mouse motion
+	showTools := false            // tool payloads collapsed by default
 
 	// Compute labels for the session header (id → human name). Loaded
 	// once, synchronously, before the loop starts — the map is then
@@ -491,8 +501,7 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 				sessCh <- sessSnap{id: id, lines: []string{"failed to load session: " + err.Error()}}
 				return
 			}
-			_, cols := termSize()
-			snap := sessSnap{id: id, lines: renderTranscript(s, cols), status: s.Status}
+			snap := sessSnap{id: id, sess: s, status: s.Status}
 			if len(s.Transcript) > 0 {
 				snap.lastRole = s.Transcript[len(s.Transcript)-1].Role
 				snap.lastAt = s.Transcript[len(s.Transcript)-1].At
@@ -511,6 +520,7 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 				}
 				return v
 			}
+			project, _ := s.Metadata["project_slug"].(string)
 			harness, _ := s.Metadata["cli_tool"].(string)
 			harness = harnessLabel(harness)
 			model, _ := s.Metadata["cli_model"].(string)
@@ -522,7 +532,7 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 				}
 			}
 			snap.title = strings.Join([]string{
-				name, pick(harness), pick(model), pick(compute), pick(s.Status), shortID(id),
+				name, pick(project), pick(harness), pick(model), pick(compute), pick(s.Status), shortID(id),
 			}, " · ")
 			sessCh <- snap
 		}()
@@ -566,18 +576,33 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 		}()
 	}
 
+	deleteArmed := "" // session id armed by the first Ctrl-X
+
+	// deleteSession removes a finished session and refreshes the board.
+	deleteSession := func(id string) {
+		go func() {
+			reqCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+			defer cancel()
+			if err := gw.DeleteSession(reqCtx, id); err != nil {
+				launched <- "delete failed: " + err.Error()
+				return
+			}
+			launched <- "session deleted"
+		}()
+	}
+
 	// sendReply pushes a follow-up into the open session — the agent
 	// continues in place, same as `cerver chat`.
-	sendReply := func(id, text string) {
+	sendReply := func(id, text string, images []string) {
 		go func() {
 			tok, err := infisical.LoadRunToken(ctx)
 			if err != nil || tok == "" {
 				launched <- "reply failed: no credentials"
 				return
 			}
-			reqCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			reqCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 			defer cancel()
-			if err := gateway.New(tok).SendInput(reqCtx, id, text); err != nil {
+			if err := gateway.New(tok).SendInputImages(reqCtx, id, text, images); err != nil {
 				launched <- "reply failed: " + err.Error()
 				return
 			}
@@ -621,7 +646,7 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 			if projLabel == "" {
 				projLabel = "all projects"
 			}
-			drawBoard(board, items, selected, &boardTop, input, launchMsg, frame, boardLoading, projLabel, relayStatusLine(relayComputes))
+			drawBoard(board, items, selected, &boardTop, input, launchMsg, frame, boardLoading, projLabel, relayStatusLine(relayComputes), deleteArmed)
 		case "projects":
 			drawProjects(projects, projSel, curProject)
 		case "details":
@@ -632,30 +657,62 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 			if t, err := time.Parse(time.RFC3339, sessLastAt); err == nil {
 				quiet = time.Since(t)
 			}
-			drawSession(sessTitle, sessLines, &scroll, sessInput, launchMsg, frame, sessActive() && !sessCancelled, sessLoading, owed, quiet)
+			drawSession(sessTitle, sessLines, &scroll, sessInput, launchMsg, frame, sessActive() && !sessCancelled, sessLoading, owed, quiet, hoverY)
 		}
 
 		select {
 		case ev := <-keys:
+			if ev.k == keyHover {
+				hoverY = ev.y
+				continue
+			}
 			switch view {
 			case "board":
 				items := boardItems(board, collapsed)
 				switch ev.k {
+				case keyDelete:
+					if len(items) > 0 && !items[selected].header && !items[selected].project {
+						r := items[selected].row
+						if r.group == "completed" || r.group == "failed" {
+							if deleteArmed == r.SessionID {
+								deleteArmed = ""
+								launchMsg = "deleting…"
+								deleteSession(r.SessionID)
+								boardLoading = true
+								loadBoard()
+							} else {
+								deleteArmed = r.SessionID
+							}
+						}
+					}
 				case keyUp:
+					deleteArmed = ""
 					if selected > 0 {
 						selected--
 					}
 				case keyDown:
+					deleteArmed = ""
 					if selected < len(items)-1 {
 						selected++
 					}
 				case keyRune:
 					input += string(ev.r)
+				case keyPaste:
+					input += strings.ReplaceAll(strings.ReplaceAll(strings.TrimRight(ev.s, "\r\n"), "\r\n", "\n"), "\r", "\n")
 				case keyBackspace:
 					if r := []rune(input); len(r) > 0 {
 						input = string(r[:len(r)-1])
 					}
 				case keyEnter:
+					if deleteArmed != "" && len(items) > 0 && !items[selected].header &&
+						items[selected].row.SessionID == deleteArmed {
+						deleteArmed = ""
+						launchMsg = "deleting…"
+						deleteSession(items[selected].row.SessionID)
+						boardLoading = true
+						loadBoard()
+						break
+					}
 					// Text in the launch bar → start a new agent; empty bar
 					// → toggle the fold on a header, or dive into a row.
 					if task := strings.TrimSpace(input); task != "" {
@@ -737,7 +794,11 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 							selected = idx
 						}
 					}
-				case keyBack: // Esc clears the launch bar
+				case keyBack: // Esc cancels a pending delete, then clears the bar
+					if deleteArmed != "" {
+						deleteArmed = ""
+						break
+					}
 					input = ""
 				case keyQuit:
 					return nil
@@ -819,6 +880,8 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 					}
 				case keyRune:
 					sessInput += string(ev.r)
+				case keyPaste:
+					sessInput += strings.ReplaceAll(strings.ReplaceAll(strings.TrimRight(ev.s, "\r\n"), "\r\n", "\n"), "\r", "\n")
 				case keyBackspace:
 					if r := []rune(sessInput); len(r) > 0 {
 						sessInput = string(r[:len(r)-1])
@@ -827,15 +890,28 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 					if text := strings.TrimSpace(sessInput); text != "" && selectedID != "" {
 						sessInput = ""
 						sessCancelled = false
+						text, images, imgNote := extractDroppedImages(text)
+						if text == "" && len(images) > 0 {
+							text = "Look at the attached image."
+						}
 						sessLastUser = text
 						launchMsg = "sending…"
-						sendReply(selectedID, text)
+						if imgNote != "" {
+							launchMsg = "sending… " + imgNote
+						}
+						sendReply(selectedID, text, images)
 					}
 				case keyResend:
 					if sessLastUser != "" && selectedID != "" {
 						sessCancelled = false
 						launchMsg = "sending…"
-						sendReply(selectedID, sessLastUser)
+						sendReply(selectedID, sessLastUser, nil)
+					}
+				case keyToggleTools:
+					showTools = !showTools
+					if sessData != nil {
+						_, cols := termSize()
+						sessLines = renderTranscript(sessData, cols, showTools)
 					}
 				case keyBack:
 					switch {
@@ -881,7 +957,13 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 			sessBusy = false
 			sessLoading = false
 			if view == "session" && s.id == selectedID {
-				sessLines = s.lines
+				sessData = s.sess
+				if s.sess != nil {
+					_, cols := termSize()
+					sessLines = renderTranscript(s.sess, cols, showTools)
+				} else {
+					sessLines = s.lines
+				}
 				sessStatus = s.status
 				sessLastRole = s.lastRole
 				sessLastAt = s.lastAt
@@ -1012,7 +1094,11 @@ func inputBar(input, placeholder string, cols int) string {
 		body = green + "❯ " + reset + bg + dim + placeholder
 		visible = 2 + len([]rune(placeholder))
 	} else {
-		shown := truncate(input, cols-5)
+		flat := strings.ReplaceAll(input, "\n", " ⏎ ")
+		if nl := strings.Count(input, "\n"); nl > 0 {
+			flat = fmt.Sprintf("(%d lines) ", nl+1) + flat
+		}
+		shown := truncate(flat, cols-5)
 		body = green + "❯ " + reset + bg + bold + shown + reset + bg + dim + "█"
 		visible = 2 + len([]rune(shown)) + 1
 	}
@@ -1033,7 +1119,7 @@ func recentWithin(iso string, d time.Duration) bool {
 	return err == nil && time.Since(t) < d
 }
 
-func drawBoard(b *fleetBoard, items []boardItem, selected int, top *int, input, launchMsg string, frame int, loading bool, projLabel, relayLine string) {
+func drawBoard(b *fleetBoard, items []boardItem, selected int, top *int, input, launchMsg string, frame int, loading bool, projLabel, relayLine string, deleteArmed string) {
 	lines, cols := termSize()
 	var sb strings.Builder
 	// Home + per-line erase (\x1b[K) + erase-below (\x1b[J) instead of a
@@ -1063,7 +1149,7 @@ func drawBoard(b *fleetBoard, items []boardItem, selected int, top *int, input, 
 		// Code welcome block. The project line is a click target.
 		m := fleetMascot(frame)
 		sb.WriteString(m[0] + eol)
-		sb.WriteString(fmt.Sprintf("%s   %scerver fleet%s%s", m[1], bold, reset, eol))
+		sb.WriteString(fmt.Sprintf("%s   %scerver agents%s%s", m[1], bold, reset, eol))
 		sb.WriteString(fmt.Sprintf("%s   %s%s%s%s", m[2], dim, counts, reset, eol))
 		projLine := fmt.Sprintf("%sproject:%s %s%s ▾%s %s(tab or click to switch)%s", dim, reset, bold, projLabel, reset, dim, reset)
 		if projSelected {
@@ -1080,7 +1166,7 @@ func drawBoard(b *fleetBoard, items []boardItem, selected int, top *int, input, 
 		if projSelected {
 			small = inv + "project: " + projLabel + " ▾" + reset
 		}
-		sb.WriteString(fmt.Sprintf("%scerver fleet%s · %s · %s%s", bold, reset, counts, small, eol))
+		sb.WriteString(fmt.Sprintf("%scerver agents%s · %s · %s%s", bold, reset, counts, small, eol))
 		sb.WriteString(relayLine + eol)
 		fleetHit.projectRow = 1
 		contentRow = 3
@@ -1136,6 +1222,13 @@ func drawBoard(b *fleetBoard, items []boardItem, selected int, top *int, input, 
 			bold, nameW, truncate(r.Name, nameW), reset,
 			headW, truncate(head, headW),
 			dim, r.Harness, r.Age, reset)
+		if deleteArmed != "" && r.SessionID == deleteArmed {
+			push(red+"  ✗ delete \""+truncate(r.Name, nameW)+"\"? ctrl-x or enter to confirm · esc to cancel"+reset, i)
+			if i == selected {
+				selLine = len(display) - 1
+			}
+			continue
+		}
 		if i == selected {
 			// Inverse video for the highlight; a plain dot so the whole
 			// row inverts uniformly.
@@ -1207,6 +1300,10 @@ func drawBoard(b *fleetBoard, items []boardItem, selected int, top *int, input, 
 	}
 	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s\x1b[K", lines-1, inputBar(input, "describe a task for a new agent…", cols)))
 	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s↑↓ select · enter open/fold · type + enter launch · tab project · ctrl-c quit%s\x1b[K", lines, dim, reset))
+	vs := VersionString()
+	if col := cols - len(vs); col > 1 {
+		sb.WriteString(fmt.Sprintf("\x1b[1;%dH%s%s%s", col+1, dim, vs, reset))
+	}
 	os.Stdout.WriteString(sb.String())
 }
 
@@ -1257,8 +1354,11 @@ func drawProjects(projects []gateway.Project, sel int, cur string) {
 
 // renderTranscript flattens a session's transcript into display lines:
 // role-labelled, word-wrapped, tool/thinking entries dimmed — the
-// "see how it thinks" view.
-func renderTranscript(s *gateway.Session, cols int) []string {
+// "see how it thinks" view. Tool payloads (tool_use/tool_result) are
+// noise at full size — a single grep result can fill the screen — so
+// unless showTools is set they collapse to a one-line preview and
+// ctrl-t expands them.
+func renderTranscript(s *gateway.Session, cols int, showTools bool) []string {
 	dim, cyan, bold, reset := "\x1b[2m", "\x1b[36m", "\x1b[1m", "\x1b[0m"
 	width := cols - 4
 	if width < 40 {
@@ -1301,6 +1401,33 @@ func renderTranscript(s *gateway.Session, cols int) []string {
 			}
 			style = dim
 		}
+		if !showTools && (e.Kind == "tool_use" || e.Kind == "tool_result") {
+			preview := ""
+			lineCount := 0
+			for _, ln := range strings.Split(strings.TrimSpace(e.Content), "\n") {
+				ln = strings.TrimSpace(ln)
+				if ln == "" {
+					continue
+				}
+				lineCount++
+				if preview == "" {
+					preview = ln
+				}
+			}
+			maxPrev := width - len(label) - 16
+			if maxPrev < 12 {
+				maxPrev = 12
+			}
+			if r := []rune(preview); len(r) > maxPrev {
+				preview = string(r[:maxPrev]) + "…"
+			}
+			line := fmt.Sprintf("%s▸ %s · %s", dim, label, preview)
+			if lineCount > 1 {
+				line += fmt.Sprintf(" (+%d lines)", lineCount-1)
+			}
+			out = append(out, line+reset, "")
+			continue
+		}
 		out = append(out, fmt.Sprintf("%s── %s ──%s", style, label, reset))
 		body := strings.TrimSpace(e.Content)
 		if body == "" {
@@ -1321,6 +1448,84 @@ func renderTranscript(s *gateway.Session, cols int) []string {
 		out = []string{dim + "empty transcript" + reset}
 	}
 	return out
+}
+
+// extractDroppedImages pulls image-file paths out of a reply typed (or
+// drag-dropped — the terminal pastes the path) into the session input.
+// Each detected image becomes a "[image N]" placeholder in the text —
+// nobody wants to read /var/folders/…/Screenshot 2026….png in their own
+// message — plus a data-URL for the input API. Paths must exist on disk
+// and carry an image extension; anything else stays in the text.
+func extractDroppedImages(text string) (string, []string, string) {
+	var keep []string
+	var images []string
+	for _, tok := range splitDroppedTokens(text) {
+		path := tok
+		ext := strings.ToLower(filepath.Ext(path))
+		isImg := ext == ".png" || ext == ".jpg" || ext == ".jpeg" || ext == ".gif" || ext == ".webp"
+		if isImg && len(images) < 4 {
+			if st, err := os.Stat(path); err == nil && !st.IsDir() && st.Size() <= 8<<20 {
+				if data, err := os.ReadFile(path); err == nil {
+					mime := map[string]string{
+						".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+						".gif": "image/gif", ".webp": "image/webp",
+					}[ext]
+					images = append(images, "data:"+mime+";base64,"+base64.StdEncoding.EncodeToString(data))
+					keep = append(keep, fmt.Sprintf("[image %d]", len(images)))
+					continue
+				}
+			}
+		}
+		keep = append(keep, tok)
+	}
+	note := ""
+	if len(images) == 1 {
+		note = "📎 1 image"
+	} else if len(images) > 1 {
+		note = fmt.Sprintf("📎 %d images", len(images))
+	}
+	return strings.TrimSpace(strings.Join(keep, " ")), images, note
+}
+
+// splitDroppedTokens tokenizes input the way terminals paste dropped
+// files: '…'-quoted (iTerm when the path has spaces), "…"-quoted, or
+// backslash-escaped spaces. Quotes and escapes are resolved so each
+// token is a candidate literal path.
+func splitDroppedTokens(text string) []string {
+	var tokens []string
+	var cur strings.Builder
+	flush := func() {
+		if cur.Len() > 0 {
+			tokens = append(tokens, cur.String())
+			cur.Reset()
+		}
+	}
+	r := []rune(text)
+	for i := 0; i < len(r); i++ {
+		switch {
+		case r[i] == '\\' && i+1 < len(r) && r[i+1] == ' ':
+			cur.WriteRune(' ')
+			i++
+		case r[i] == '\'' || r[i] == '"':
+			q := r[i]
+			j := i + 1
+			for j < len(r) && r[j] != q {
+				j++
+			}
+			if j < len(r) { // matched quote — take the span verbatim
+				cur.WriteString(string(r[i+1 : j]))
+				i = j
+			} else {
+				cur.WriteRune(r[i])
+			}
+		case r[i] == ' ' || r[i] == '\t':
+			flush()
+		default:
+			cur.WriteRune(r[i])
+		}
+	}
+	flush()
+	return tokens
 }
 
 func wrapLine(s string, width int) []string {
@@ -1350,14 +1555,20 @@ func wrapLine(s string, width int) []string {
 	return out
 }
 
-func drawSession(title string, content []string, scroll *int, input, msg string, frame int, active, loading, owed bool, quiet time.Duration) {
+func drawSession(title string, content []string, scroll *int, input, msg string, frame int, active, loading, owed bool, quiet time.Duration, hoverY int) {
 	lines, cols := termSize()
 	dim, bold, reset := "\x1b[2m", "\x1b[1m", "\x1b[0m"
 	eol := "\x1b[K\r\n"
 	var sb strings.Builder
 	sb.WriteString("\x1b[H")
+	// Row 1: version badge, right-aligned — same corner as the board.
+	vs := VersionString()
+	if pad := cols - len(vs); pad > 1 {
+		sb.WriteString(strings.Repeat(" ", pad) + dim + vs + reset)
+	}
+	sb.WriteString(eol)
 
-	viewport := lines - 6 // bottom chrome: info line + status + reply bar + footer + slack
+	viewport := lines - 7 // top badge row + bottom chrome: info line + status + reply bar + footer + slack
 	if viewport < 3 {
 		viewport = 3
 	}
@@ -1421,12 +1632,16 @@ func drawSession(title string, content []string, scroll *int, input, msg string,
 		sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s%s%s\x1b[K", lines-3, dim, truncate(status, cols-1), reset))
 	}
 	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s\x1b[K", lines-2, inputBar(input, "reply to this agent…", cols)))
-	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s%s%s\x1b[K", lines-1, bold, truncate(title, cols-1), reset))
+	idStyle, hintStyle := dim, dim
+	if hoverY >= lines-3 {
+		idStyle, hintStyle = bold, ""
+	}
+	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s%s%s\x1b[K", lines-1, idStyle, truncate(title, cols-1), reset))
 	pos := ""
 	if *scroll > 0 {
 		pos = fmt.Sprintf(" · %d lines below", *scroll)
 	}
-	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s↑↓ scroll · type + enter reply · ←/esc back · ctrl-c quit%s%s\x1b[K", lines, dim, reset, pos))
+	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s↑↓ scroll · type + enter reply · drop an image to attach · ctrl-t tool detail · ←/esc back · ctrl-c quit%s%s\x1b[K", lines, hintStyle, reset, pos))
 	os.Stdout.WriteString(sb.String())
 }
 
@@ -1573,18 +1788,52 @@ func saveFleetProject(slug string) {
 var mouseSeq = regexp.MustCompile(`\x1b\[<(\d+);(\d+);(\d+)([Mm])`)
 
 func fleetReadKeys(out chan<- keyEvent) {
-	buf := make([]byte, 64)
+	buf := make([]byte, 8192)
+	lastHoverY := -1
+	var paste []byte  // non-nil while inside a bracketed paste
+	const pasteStart, pasteEnd = "\x1b[200~", "\x1b[201~"
 	for {
 		n, err := os.Stdin.Read(buf)
 		if err != nil || n == 0 {
 			return
 		}
 		b := buf[:n]
+		// Bracketed paste: everything between ESC[200~ and ESC[201~ is
+		// one literal blob — newlines inside must NOT act as Enter.
+		if paste != nil {
+			paste = append(paste, b...)
+			if i := strings.Index(string(paste), pasteEnd); i >= 0 {
+				out <- keyEvent{k: keyPaste, s: string(paste[:i])}
+				rest := append([]byte(nil), paste[i+len(pasteEnd):]...)
+				paste = nil
+				if len(rest) > 0 {
+					b = rest
+				} else {
+					continue
+				}
+			} else {
+				continue
+			}
+		}
+		if i := strings.Index(string(b), pasteStart); i >= 0 {
+			// Feed anything before the marker through the normal path on
+			// the next loop; in practice pastes arrive marker-first.
+			paste = append([]byte(nil), b[i+len(pasteStart):]...)
+			if j := strings.Index(string(paste), pasteEnd); j >= 0 {
+				out <- keyEvent{k: keyPaste, s: string(paste[:j])}
+				paste = nil
+			}
+			continue
+		}
 		switch {
 		case b[0] == 3: // Ctrl-C
 			out <- keyEvent{k: keyQuit}
 		case b[0] == 0x12: // Ctrl-R
 			out <- keyEvent{k: keyResend}
+		case b[0] == 0x14: // Ctrl-T
+			out <- keyEvent{k: keyToggleTools}
+		case b[0] == 0x18: // Ctrl-X
+			out <- keyEvent{k: keyDelete}
 		case b[0] == '\t':
 			out <- keyEvent{k: keyTab}
 		case b[0] == '\r' || b[0] == '\n':
@@ -1605,6 +1854,13 @@ func fleetReadKeys(out chan<- keyEvent) {
 				case m[1] == "65":
 					out <- keyEvent{k: keyDown}
 					out <- keyEvent{k: keyDown}
+				case m[1] == "35" && m[4] == "M": // motion, no button
+					x, _ := strconv.Atoi(m[2])
+					y, _ := strconv.Atoi(m[3])
+					if y != lastHoverY {
+						lastHoverY = y
+						out <- keyEvent{k: keyHover, x: x, y: y}
+					}
 				case m[1] == "0" && m[4] == "M": // left press
 					x, _ := strconv.Atoi(m[2])
 					y, _ := strconv.Atoi(m[3])
