@@ -14,14 +14,20 @@ import (
 	"github.com/eyal-gor/p_71_cerver_cli/internal/gateway"
 )
 
-// Agents is the entry point for `cerver agents ...`. A saved agent is a
-// reusable definition — an AGENTS.md (instructions dropped into the session
-// workspace) plus a config map (preferred harness/model, workload). Apply one
-// to a run with `cerver run --agent <id> "..."`; the gateway injects the
-// AGENTS.md and applies the config defaults (explicit --cli/--model still win).
+// Agents is the entry point for `cerver agents ...`.
 //
-//	cerver agents                                   list
-//	cerver agents [--json]
+// Bare `cerver agents` opens the agent board — every recent session bucketed
+// into awaiting-input / working / completed, with a launch bar. That is what
+// you want ninety-nine times out of a hundred, so it gets the bare command.
+//
+// With a subcommand it manages saved agent *definitions*: an AGENTS.md
+// (instructions dropped into the session workspace) plus a config map
+// (preferred harness/model, workload). Apply one to a run with
+// `cerver run --agent <id> "..."`; the gateway injects the AGENTS.md and
+// applies the config defaults (explicit --cli/--model still win).
+//
+//	cerver agents                                   the board (same as `cerver fleet`)
+//	cerver agents list [--json]
 //	cerver agents show <id>
 //	cerver agents new --name "Reviewer" [--md-file AGENTS.md] [--harness claude] [--model opus] [--workload coding] [--slug reviewer] [--project SLUG] [--config-file cfg.json]
 //	cerver agents edit <id> [--name ...] [--md-file ...] [--harness ...] [--model ...] [--workload ...] [--config-file ...]
@@ -29,13 +35,21 @@ import (
 //	cerver agents pull <id> [--dir .]          write AGENTS.md + agent.json locally
 //	cerver agents push [<id>] [--dir .]        create/update from local AGENTS.md (+ agent.json)
 func Agents(args []string) error {
+	// No arguments at all → the board. Anything else (a subcommand, a flag,
+	// a search query) keeps the definitions behaviour, so `cerver agents
+	// --json` and `cerver agents reviewer` still mean what they always did.
+	if len(args) == 0 {
+		return Fleet(nil)
+	}
 	sub := "list"
 	rest := args
-	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+	if !strings.HasPrefix(args[0], "-") {
 		sub = args[0]
 		rest = args[1:]
 	}
 	switch sub {
+	case "board", "fleet":
+		return Fleet(rest)
 	case "list", "ls":
 		return agentsList(rest)
 	case "show", "get", "cat":
@@ -62,17 +76,21 @@ func Agents(args []string) error {
 	}
 }
 
-const agentsHelpText = `cerver agents — save reusable agent definitions (AGENTS.md + config)
+const agentsHelpText = `cerver agents — the agent board, and the saved agent definitions behind it
 
-An agent bundles an AGENTS.md (instructions dropped into the session workspace)
-with config defaults (harness/model/workload). Apply one to a run:
+Bare 'cerver agents' opens the board: every recent session as awaiting-input /
+working / completed, with a launch bar. ctrl+p lists what you can do there.
+
+The subcommands manage saved definitions — an AGENTS.md (instructions dropped
+into the session workspace) plus config defaults (harness/model/workload).
+Apply one to a run:
 
   cerver run --agent <id> "do the thing"
 
 usage:
-  cerver agents                                   list your agents
+  cerver agents                                   the board (same as 'cerver fleet')
+  cerver agents list [--json]                     list your saved agents
   cerver agents <query>                           search by name/id (find the id)
-  cerver agents [--json]
   cerver agents show <id>                    print config + AGENTS.md
   cerver agents new --name "Reviewer" [flags]     create
   cerver agents edit <id> [flags]            update (only passed fields)

@@ -36,9 +36,12 @@ commands:
                  cerver gateway help    # what this means
   run        Send a single prompt to one CLI on one compute.
                cerver run --agent reviewer "review my last commit"
-  agents     Save reusable agent definitions (AGENTS.md + config). Apply
-               one to a run with: cerver run --agent <id>
-                 cerver agents                       # list
+  agents     The agent board: awaiting input / working / completed, with a
+               launch bar. ctrl+p lists everything you can do there.
+                 cerver agents                       # the board
+               Subcommands manage saved agent definitions (AGENTS.md +
+               config); apply one to a run with: cerver run --agent <id>
+                 cerver agents list                  # your saved definitions
                  cerver agents new --name "Reviewer" --md-file AGENTS.md --harness claude
                  cerver agents show <id>
                  cerver agents pull <id>        # write AGENTS.md + agent.json
@@ -83,8 +86,8 @@ commands:
                  cerver insights --project SLUG
                  cerver insights --limit 50 --json
   sessions   List recent sessions.
-  fleet      Agent-manager board: awaiting input / working / completed,
-               one headline per session (--watch to live-refresh).
+  fleet      The agent board, spelled the old way — same as: cerver agents
+               This is where the flags live (--plain, --watch, --json, --limit).
   show       Print a session's full transcript (--follow to stream).
   peek       One-screen snapshot of a session (status + last reply).
   move       Move a live session to a different compute.
