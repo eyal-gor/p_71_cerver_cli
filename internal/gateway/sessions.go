@@ -466,6 +466,66 @@ func looksLikeProgressReply(reply string) bool {
 	return strings.Contains(text, "i have enough to answer, but")
 }
 
+// ContextUsed reports how full the model's context window is right now, from
+// the LAST turn's input side — not the cumulative total.
+//
+// Two things make this easy to get wrong:
+//
+//   - usage_total sums input across turns, and every turn resends the whole
+//     conversation, so it overcounts context wildly. The per-turn figure is in
+//     usage_last, which the relay stores raw.
+//   - input_tokens alone is only the UNCACHED remainder. With prompt caching
+//     on — which the harnesses use aggressively — most of the prompt shows up
+//     under cache_read/cache_creation instead. A session with 400k of context
+//     can report input_tokens in the low thousands.
+//
+// Context size is therefore the sum of all three. Returns 0 when the relay
+// hasn't reported a turn yet.
+func (s *Session) ContextUsed() int {
+	if s.Metadata == nil {
+		return 0
+	}
+	raw, ok := s.Metadata["usage_last"].(map[string]any)
+	if !ok {
+		return 0
+	}
+	n := func(k string) int {
+		switch x := raw[k].(type) {
+		case float64:
+			return int(x)
+		case int:
+			return x
+		}
+		return 0
+	}
+	// Vendor field names differ (claude: cache_creation/cache_read; codex:
+	// cached_input), so read every spelling we know and let the misses be 0.
+	return n("input_tokens") +
+		n("cache_read_input_tokens") + n("cache_creation_input_tokens") +
+		n("cached_input_tokens") + n("cached_input")
+}
+
+// ContextWindow returns the model's context window in tokens, and whether we
+// actually know it. Guessing a window would put a confident percentage on the
+// screen that happens to be wrong, so unknown models report their raw token
+// count instead of a fraction.
+func ContextWindow(model string) (int, bool) {
+	m := strings.ToLower(strings.TrimSpace(model))
+	// Strip a variant suffix like "[1m]" that names the window explicitly.
+	if strings.Contains(m, "[1m]") {
+		return 1_000_000, true
+	}
+	switch {
+	case strings.Contains(m, "haiku"):
+		return 200_000, true
+	case strings.Contains(m, "opus"), strings.Contains(m, "sonnet"),
+		strings.Contains(m, "fable"), strings.Contains(m, "mythos"):
+		// Every current Claude model above Haiku is 1M.
+		return 1_000_000, true
+	}
+	return 0, false
+}
+
 func (s *Session) Usage() *Usage {
 	if s.Metadata == nil {
 		return nil
