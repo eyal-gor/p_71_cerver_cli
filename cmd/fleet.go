@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -27,7 +28,12 @@ import (
 // the session transcript (thinking, tool calls, replies), ←/shift+←
 // goes back, q quits. Piped (or with --plain) it prints once and exits.
 //
-//	cerver fleet                 interactive board (plain when piped)
+// Bare `cerver agents` is the front door; `cerver fleet` is the same command
+// and is where the flags live, because `cerver agents --json` already means
+// "list my saved agent definitions as JSON".
+//
+//	cerver agents                interactive board (plain when piped)
+//	cerver fleet                 the same thing, spelled the old way
 //	cerver fleet --plain         one-shot static board
 //	cerver fleet --watch         plain board, redrawn every 5s
 //	cerver fleet --limit 50
@@ -256,7 +262,7 @@ func fleetRenderPlain(b *fleetBoard) {
 		dim, yellow, green, red, bold, reset = "\x1b[2m", "\x1b[33m", "\x1b[32m", "\x1b[31m", "\x1b[1m", "\x1b[0m"
 	}
 
-	fmt.Printf("%scerver fleet%s · %d awaiting input · %d working · %d completed\n",
+	fmt.Printf("%scerver agents%s · %d awaiting input · %d working · %d completed\n",
 		bold, reset, len(b.Awaiting), len(b.Working), len(b.Completed)+len(b.Failed))
 
 	group := func(title, dot, dotColor string, rows []fleetRow, max int) {
@@ -308,7 +314,279 @@ const (
 	keyRight     // project details
 	keyClick     // left mouse click (x, y set)
 	keyResend    // Ctrl-R: nudge — resend the last user message
+	keyPalette   // Ctrl-P: the command palette
+	keyHover     // pointer moved (x, y set) — no button held
 )
+
+// paletteCmd is one row in the Ctrl-P command palette: what it does, and
+// the key that does it directly for anyone who already knows.
+type paletteCmd struct {
+	id    string
+	label string
+	key   string
+}
+
+// fleetPalette: the commands reachable from a view. This is the only place
+// key bindings are spelled out now — the footer just points at ctrl+p
+// instead of listing five bindings on every screen.
+func fleetPalette(view string) []paletteCmd {
+	switch view {
+	case "session":
+		return []paletteCmd{
+			{"reply", "Reply to this agent", "type + enter"},
+			{"model", "Change model / harness", ""},
+			{"resend", "Resend the last message", "ctrl+r"},
+			{"back", "Back to the board", "esc"},
+			{"dashboard", "Open the dashboard", ""},
+			{"quit", "Quit", "ctrl+c"},
+		}
+	case "projects":
+		return []paletteCmd{
+			{"switch", "Switch to the selected project", "enter"},
+			{"details", "Project details", "→"},
+			{"back", "Back to the board", "esc"},
+			{"quit", "Quit", "ctrl+c"},
+		}
+	case "details":
+		return []paletteCmd{
+			{"envs", "Open environments", "e"},
+			{"wfs", "Open workflows", "w"},
+			{"projects", "Switch project", "tab"},
+			{"back", "Back to the board", "esc"},
+			{"quit", "Quit", "ctrl+c"},
+		}
+	}
+	return []paletteCmd{
+		{"open", "Open the selected session", "enter"},
+		{"launch", "New agent — type a task below", "type + enter"},
+		{"project", "Switch project", "tab"},
+		{"details", "Project details", "→"},
+		{"refresh", "Refresh the board", "ctrl+r"},
+		{"dashboard", "Open the dashboard", ""},
+		{"quit", "Quit", "ctrl+c"},
+	}
+}
+
+// launchOpt is one row in the launch picker: a harness, and the model to
+// pin on it. An empty model means "whatever that harness defaults to".
+type launchOpt struct {
+	label string
+	cli   string
+	model string
+}
+
+// harnessModels: the models worth putting in front of you per harness. The
+// string lands in metadata.cli_model, which the relay hands straight to that
+// harness's --model flag — so these are the harness's own aliases, not pinned
+// version ids, which would go stale on every model release.
+//
+// A harness with no entry here still gets its "default" row, so a provider
+// added to the relay shows up without waiting for a CLI release.
+func harnessModels(cli string) []string {
+	switch cli {
+	case "claude":
+		return []string{"opus", "sonnet", "haiku"}
+	case "codex":
+		return []string{"gpt-5", "gpt-5-codex", "gpt-5-mini"}
+	case "grok":
+		return []string{"grok-4", "grok-4-fast"}
+	case "gemma":
+		// Google's open-weights family, served free (rate-limited) through
+		// the Gemini API — no local weights, no key beyond GEMINI_API_KEY.
+		return []string{"gemma-4-31b-it", "gemma-4-12b-it"}
+	}
+	// ollama deliberately has no entry: its models are files on a specific
+	// machine, so the only honest source is that compute's own report.
+	return nil
+}
+
+// harnessOrder is the order harnesses appear in the picker. Anything the
+// relay reports that isn't listed lands after these, alphabetically.
+var harnessOrder = []string{"claude", "codex", "grok", "gemma", "ollama"}
+
+// fleetLaunchOptions builds the picker from what the relay actually reports
+// it can run, rather than a constant in this file. That constant was already
+// wrong: relays ship gemma, and a hardcoded claude/codex/grok list silently
+// hid it.
+func fleetLaunchOptions(ready []string, local map[string][]string) []launchOpt {
+	seen := map[string]bool{}
+	ordered := []string{}
+	for _, h := range harnessOrder {
+		for _, r := range ready {
+			if r == h && !seen[h] {
+				seen[h] = true
+				ordered = append(ordered, h)
+			}
+		}
+	}
+	extra := []string{}
+	for _, r := range ready {
+		if !seen[r] && r != "" {
+			seen[r] = true
+			extra = append(extra, r)
+		}
+	}
+	sort.Strings(extra)
+	ordered = append(ordered, extra...)
+
+	// Nothing reported (relay offline, or an older relay that doesn't send
+	// capabilities) — fall back to the harnesses that have always existed
+	// so the picker is never empty.
+	if len(ordered) == 0 {
+		ordered = harnessOrder
+	}
+
+	opts := make([]launchOpt, 0, len(ordered)*3)
+	for _, h := range ordered {
+		// A machine's own models win over the static table — for ollama
+		// that's the only truth there is, and offering a model this
+		// compute hasn't pulled would just fail at spawn.
+		models := local[h]
+		if len(models) == 0 {
+			models = harnessModels(h)
+		}
+		opts = append(opts, launchOpt{h + " · default", h, ""})
+		for _, m := range models {
+			opts = append(opts, launchOpt{h + " · " + m, h, m})
+		}
+	}
+	return opts
+}
+
+// localModels merges every compute's per-machine model inventory. Models
+// are deduped across computes but not attributed to one: the launcher picks
+// the compute, so an ollama model pulled on only one machine can still be
+// chosen — the relay resolves the tag, and reports honestly if it's missing.
+func localModels(computes []gateway.Compute) map[string][]string {
+	out := map[string][]string{}
+	seen := map[string]bool{}
+	for i := range computes {
+		for harness, models := range computes[i].Capabilities.LocalModels {
+			for _, m := range models {
+				key := harness + "|" + m
+				if m == "" || seen[key] {
+					continue
+				}
+				seen[key] = true
+				out[harness] = append(out[harness], m)
+			}
+		}
+	}
+	for h := range out {
+		sort.Strings(out[h])
+	}
+	return out
+}
+
+// fleetModelPath / loadLaunchIndex / saveLaunchChoice: the picker opens on
+// whatever you launched last, so the common case is Enter-Enter.
+func fleetModelPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".cerver", "fleet_model")
+}
+
+func saveLaunchChoice(cli, model string) {
+	if p := fleetModelPath(); p != "" {
+		_ = os.WriteFile(p, []byte(cli+"|"+model+"\n"), 0o600)
+	}
+}
+
+func loadLaunchIndex(opts []launchOpt) int {
+	p := fleetModelPath()
+	if p == "" {
+		return 0
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		return 0
+	}
+	saved := strings.TrimSpace(string(b))
+	for i, o := range opts {
+		if o.cli+"|"+o.model == saved {
+			return i
+		}
+	}
+	return 0
+}
+
+// harnessReady: which harnesses the live relay actually reports. Picking
+// one it can't run fails at spawn time with a worse error than a ✗ here.
+func harnessReady(computes []gateway.Compute) map[string]bool {
+	ready := map[string]bool{}
+	for i := range computes {
+		c := &computes[i]
+		for _, t := range c.Capabilities.CliTools {
+			ready[t] = true
+		}
+	}
+	return ready
+}
+
+// harnessNames is harnessReady as an ordered slice — what the picker is
+// built from.
+func harnessNames(computes []gateway.Compute) []string {
+	ready := harnessReady(computes)
+	out := make([]string, 0, len(ready))
+	for k := range ready {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// drawLaunchSheet shows the harness/model picker as a centered modal.
+func drawLaunchSheet(opts []launchOpt, sel int, task string, ready map[string]bool, switching bool) {
+	green, red, reset := "\x1b[32m", "\x1b[31m", "\x1b[0m"
+	rows := make([]modalRow, 0, len(opts))
+	for _, o := range opts {
+		mark := ""
+		if len(ready) > 0 {
+			mark = green + "✓" + reset
+			if !ready[o.cli] {
+				mark = red + "✗" + reset
+			}
+		}
+		rows = append(rows, modalRow{label: o.label, key: defaultLabel(o.model), mark: mark})
+	}
+	title, sub := "launch on", task
+	if switching {
+		// Be explicit about the cost before they press Enter: a model change
+		// is free, a harness change restarts the agent.
+		title = "switch this session to"
+		sub = "model change keeps the agent · harness change restarts it"
+	}
+	fleetHit.itemRows = map[int]int{}
+	fleetHit.projectRow = 0
+	fleetHit.pickerTop = drawModal(title, sub, rows, sel)
+}
+
+// defaultLabel spells out what an empty model means, rather than leaving
+// the column blank and looking like a rendering bug.
+func defaultLabel(model string) string {
+	if model == "" {
+		return "its default model"
+	}
+	return model
+}
+
+// palMatches filters the palette by the typed query — plain
+// case-insensitive substring, which is all a seven-item list needs.
+func palMatches(cmds []paletteCmd, q string) []paletteCmd {
+	q = strings.ToLower(strings.TrimSpace(q))
+	if q == "" {
+		return cmds
+	}
+	out := make([]paletteCmd, 0, len(cmds))
+	for _, c := range cmds {
+		if strings.Contains(strings.ToLower(c.label), q) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
 
 // keyEvent carries the parsed key plus the rune for keyRune events and
 // coordinates for clicks.
@@ -338,9 +616,12 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 	// reach the app as escape sequences (and scroll the view) instead of
 	// iTerm scrolling its window over the alternate screen, which shows
 	// ghost frames.
-	fmt.Print("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1006h")
+	// 1003 (any-motion) is what makes hover possible at all — 1000 only
+	// reports presses. It is chatty: every pointer move sends a report, so
+	// the loop redraws only when the hovered row actually changes.
+	fmt.Print("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1003h\x1b[?1006h")
 	defer func() {
-		fmt.Print("\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l")
+		fmt.Print("\x1b[?1003l\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l")
 		sttyRestore(saved)
 	}()
 
@@ -528,9 +809,12 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 		}()
 	}
 
-	// launchTask starts a new agent in the background — same defaults as
-	// `cerver run`: claude, first ready local relay, project-scoped key.
-	launchTask := func(task string) {
+	// launchTask starts a new agent in the background. cli/model come from
+	// the launch picker; compute is the first ready local relay and auth
+	// the project-scoped key — same defaults as `cerver run`. An empty
+	// model means "the harness's own default", which is what the relay
+	// does with a missing metadata.cli_model.
+	launchTask := func(task, cli, model string) {
 		go func() {
 			tok, err := infisical.LoadRunToken(ctx)
 			if err != nil || tok == "" {
@@ -545,13 +829,17 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 				launched <- "launch failed: " + err.Error()
 				return
 			}
+			md := map[string]any{"cli_tool": cli, "surface": "fleet"}
+			if model != "" {
+				md["cli_model"] = model
+			}
 			sid, err := runGw.CreateSession(reqCtx, gateway.SessionCreate{
 				SessionType: "coding",
 				Compute:     map[string]any{"compute_id": computeID},
 				Task:        task,
 				Workload:    "coding",
 				SessionName: shortPromptLabel(task, 48),
-				Metadata:    map[string]any{"cli_tool": "claude", "surface": "fleet"},
+				Metadata:    md,
 			})
 			if err != nil {
 				launched <- "launch failed: " + err.Error()
@@ -585,6 +873,25 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 		}()
 	}
 
+	// switchModel repoints a live session at a different model (and
+	// optionally harness) from its next turn onward.
+	switchModel := func(id, cli, model string) {
+		go func() {
+			tok, err := infisical.LoadRunToken(ctx)
+			if err != nil || tok == "" {
+				launched <- "switch failed: no credentials"
+				return
+			}
+			reqCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
+			defer cancel()
+			if err := gateway.New(tok).SwitchModel(reqCtx, id, cli, model); err != nil {
+				launched <- "switch failed: " + err.Error()
+				return
+			}
+			launched <- "✳ switched to " + cli + "/" + defaultLabel(model) + " — takes effect on your next message"
+		}()
+	}
+
 	// sessActive: the agent on the open session is (probably) producing
 	// output right now — running, or we spoke last and it hasn't replied.
 	sessActive := func() bool {
@@ -597,8 +904,33 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 		return sessLastRole == "user" && recentWithin(sessLastAt, 10*time.Minute)
 	}
 
+	// Command palette (ctrl+p): an overlay on top of the current view. It
+	// owns the keyboard while open; picking a row synthesises the key that
+	// command is bound to, so there is exactly one code path per action.
+	palOpen, palSel, palQuery := false, 0, ""
+
+	// Launch picker: Enter with text in the bar opens it, so choosing the
+	// harness/model is on the path to starting an agent rather than a
+	// setting hidden somewhere else. Opens on your last choice.
+	// launchSwitch flips the same sheet from "start a new agent on X" to
+	// "move this session to X".
+	launchOpen, launchSel, launchText := false, 0, ""
+	var launchList []launchOpt
+
+	// hoverY is the screen row the pointer is on, 0 when it's elsewhere.
+	// Motion reports arrive continuously, so this only ever triggers a
+	// repaint when the row changes — otherwise moving the mouse across the
+	// window would repaint on every pixel.
+	hoverY := 0
+	launchSwitch := false
+
 	loadBoard()
-	for {
+	// needDraw gates the repaint. The spinner ticks 8×/sec, and repainting
+	// a whole view that nothing on screen animates is what made the
+	// overlays flicker.
+	// drawView paints whatever view is current. Pulled out of the loop so
+	// the modal path can repaint the background exactly once, dimmed.
+	drawView := func() {
 		switch view {
 		case "board":
 			items := boardItems(board, collapsed)
@@ -632,11 +964,192 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 			if t, err := time.Parse(time.RFC3339, sessLastAt); err == nil {
 				quiet = time.Since(t)
 			}
-			drawSession(sessTitle, sessLines, &scroll, sessInput, launchMsg, frame, sessActive() && !sessCancelled, sessLoading, owed, quiet)
+			drawSession(sessTitle, sessLines, &scroll, sessInput, launchMsg, frame, sessActive() && !sessCancelled, sessLoading, owed, quiet, hoverY)
 		}
+	}
+
+	needDraw := true
+	prevOverlay := false
+	for {
+		// While a sheet is open it owns the screen, and the view underneath
+		// is frozen anyway — repainting it only to immediately cover it up
+		// is exactly the flicker. Paint the sheet alone; the view is still
+		// on screen from the frame before it opened.
+		overlay := palOpen || launchOpen
+		// Opening or closing a modal always redraws, whatever the tick said:
+		// the background has to change intensity on exactly that frame.
+		if overlay != prevOverlay {
+			needDraw = true
+		}
+		// Synchronized output (DEC 2026): the terminal holds the frame back
+		// until the closing marker, so a repaint lands in one piece instead
+		// of being shown mid-write. Terminals that don't know the sequence
+		// ignore it.
+		if needDraw {
+			os.Stdout.WriteString("\x1b[?2026h")
+		}
+		// The view behind a modal is repainted exactly once — dimmed — on the
+		// frame the modal opens, and once more at full strength when it
+		// closes. In between it's frozen: repainting it every spinner tick
+		// only to cover it again is what made the modal flicker. Both the dim
+		// background and the modal land inside one synchronized frame, so the
+		// two never appear separately.
+		if needDraw && overlay != prevOverlay {
+			dimScreen = overlay
+			drawView()
+			dimScreen = false
+			prevOverlay = overlay
+		} else if needDraw && !overlay {
+			drawView()
+		}
+		if needDraw && launchOpen {
+			drawLaunchSheet(launchList, launchSel, launchText, harnessReady(relayComputes), launchSwitch)
+		}
+		if needDraw && palOpen {
+			drawPalette(palMatches(fleetPalette(view), palQuery), palSel, palQuery)
+		}
+		if needDraw {
+			os.Stdout.WriteString("\x1b[?2026l")
+		}
+		needDraw = true
 
 		select {
 		case ev := <-keys:
+			if ev.k == keyHover {
+				if ev.y == hoverY {
+					needDraw = false // same row — nothing on screen changed
+				} else {
+					hoverY = ev.y
+				}
+				break
+			}
+			if ev.k == keyPalette && !palOpen && !launchOpen {
+				palOpen, palSel, palQuery = true, 0, ""
+				break
+			}
+			if palOpen {
+				cmds := palMatches(fleetPalette(view), palQuery)
+				chosen := -1
+				switch ev.k {
+				case keyUp:
+					if palSel > 0 {
+						palSel--
+					}
+				case keyDown:
+					if palSel < len(cmds)-1 {
+						palSel++
+					}
+				case keyRune:
+					palQuery += string(ev.r)
+					palSel = 0
+				case keyBackspace:
+					if r := []rune(palQuery); len(r) > 0 {
+						palQuery = string(r[:len(r)-1])
+					}
+					palSel = 0
+				case keyEnter:
+					chosen = palSel
+				case keyClick:
+					chosen = ev.y - fleetHit.pickerTop
+				case keyBack, keyPalette, keyTab:
+					palOpen, palQuery = false, ""
+				case keyQuit:
+					return nil
+				}
+				if chosen < 0 || chosen >= len(cmds) {
+					break
+				}
+				palOpen, palQuery = false, ""
+				// Translate the pick into the key it is bound to, then fall
+				// through to the view's normal handler. Two commands have no
+				// binding to borrow, so they act here.
+				switch cmds[chosen].id {
+				case "open", "switch":
+					ev = keyEvent{k: keyEnter}
+				case "project", "projects":
+					ev = keyEvent{k: keyTab}
+				case "details":
+					ev = keyEvent{k: keyRight}
+				case "refresh", "resend":
+					ev = keyEvent{k: keyResend}
+				case "envs":
+					ev = keyEvent{k: keyRune, r: 'e'}
+				case "wfs":
+					ev = keyEvent{k: keyRune, r: 'w'}
+				case "quit":
+					return nil
+				case "back":
+					// Straight back — not keyBack, which in the session view
+					// first clears the reply bar or cancels a pending wait.
+					view = "board"
+					launchMsg = ""
+					ev = keyEvent{k: keyNone}
+				case "dashboard":
+					openURL("https://cerver.ai/dashboard")
+					launchMsg = "opened the dashboard in the browser"
+					ev = keyEvent{k: keyNone}
+				case "launch":
+					// Only meaningful with a task already typed; otherwise
+					// the bar is focused and waiting anyway.
+					if t := strings.TrimSpace(input); t != "" {
+						launchList = fleetLaunchOptions(harnessNames(relayComputes), localModels(relayComputes))
+						launchText, launchSel, launchOpen, launchSwitch = t, loadLaunchIndex(launchList), true, false
+					}
+					ev = keyEvent{k: keyNone}
+				case "model":
+					if selectedID != "" {
+						launchList = fleetLaunchOptions(harnessNames(relayComputes), localModels(relayComputes))
+						launchText, launchSel, launchOpen, launchSwitch = "", loadLaunchIndex(launchList), true, true
+					}
+					ev = keyEvent{k: keyNone}
+				default: // "reply" — the input bar is already focused
+					ev = keyEvent{k: keyNone}
+				}
+				if ev.k == keyNone {
+					break
+				}
+			}
+			if launchOpen {
+				switch ev.k {
+				case keyUp:
+					if launchSel > 0 {
+						launchSel--
+					}
+				case keyDown:
+					if launchSel < len(launchList)-1 {
+						launchSel++
+					}
+				case keyEnter, keyClick:
+					idx := launchSel
+					if ev.k == keyClick {
+						idx = ev.y - fleetHit.pickerTop
+					}
+					if idx < 0 || idx >= len(launchList) {
+						break
+					}
+					o := launchList[idx]
+					saveLaunchChoice(o.cli, o.model)
+					if launchSwitch {
+						launchMsg = "switching…"
+						switchModel(selectedID, o.cli, o.model)
+					} else {
+						launchMsg = "launching…"
+						launchTask(launchText, o.cli, o.model)
+					}
+					launchOpen, input, launchText = false, "", ""
+				case keyBack:
+					launchOpen = false
+					if !launchSwitch {
+						// Cancel back to the task still sitting in the bar, so
+						// a mis-hit Enter doesn't cost you what you typed.
+						input = launchText
+					}
+					launchText = ""
+				case keyQuit:
+					return nil
+				}
+				break
+			}
 			switch view {
 			case "board":
 				items := boardItems(board, collapsed)
@@ -656,12 +1169,12 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 						input = string(r[:len(r)-1])
 					}
 				case keyEnter:
-					// Text in the launch bar → start a new agent; empty bar
-					// → toggle the fold on a header, or dive into a row.
+					// Text in the launch bar → pick the harness/model, which
+					// launches; empty bar → toggle the fold on a header, or
+					// dive into a row.
 					if task := strings.TrimSpace(input); task != "" {
-						input = ""
-						launchMsg = "launching…"
-						launchTask(task)
+						launchList = fleetLaunchOptions(harnessNames(relayComputes), localModels(relayComputes))
+						launchText, launchSel, launchOpen = task, loadLaunchIndex(launchList), true
 					} else if len(items) > 0 && items[selected].project {
 						view = "projects"
 						projSel = 0
@@ -737,6 +1250,9 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 							selected = idx
 						}
 					}
+				case keyResend: // refresh the board
+					boardLoading = true
+					loadBoard()
 				case keyBack: // Esc clears the launch bar
 					input = ""
 				case keyQuit:
@@ -926,7 +1442,13 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 				}
 			}()
 		case <-spin.C:
+			// Keep the frame counter moving so spinners are in the right
+			// phase when a sheet closes — but nothing inside a sheet
+			// animates, so don't repaint on its account.
 			frame++
+			if palOpen || launchOpen {
+				needDraw = false
+			}
 		}
 	}
 }
@@ -1063,7 +1585,7 @@ func drawBoard(b *fleetBoard, items []boardItem, selected int, top *int, input, 
 		// Code welcome block. The project line is a click target.
 		m := fleetMascot(frame)
 		sb.WriteString(m[0] + eol)
-		sb.WriteString(fmt.Sprintf("%s   %scerver fleet%s%s", m[1], bold, reset, eol))
+		sb.WriteString(fmt.Sprintf("%s   %scerver agents%s%s", m[1], bold, reset, eol))
 		sb.WriteString(fmt.Sprintf("%s   %s%s%s%s", m[2], dim, counts, reset, eol))
 		projLine := fmt.Sprintf("%sproject:%s %s%s ▾%s %s(tab or click to switch)%s", dim, reset, bold, projLabel, reset, dim, reset)
 		if projSelected {
@@ -1080,7 +1602,7 @@ func drawBoard(b *fleetBoard, items []boardItem, selected int, top *int, input, 
 		if projSelected {
 			small = inv + "project: " + projLabel + " ▾" + reset
 		}
-		sb.WriteString(fmt.Sprintf("%scerver fleet%s · %s · %s%s", bold, reset, counts, small, eol))
+		sb.WriteString(fmt.Sprintf("%scerver agents%s · %s · %s%s", bold, reset, counts, small, eol))
 		sb.WriteString(relayLine + eol)
 		fleetHit.projectRow = 1
 		contentRow = 3
@@ -1206,8 +1728,155 @@ func drawBoard(b *fleetBoard, items []boardItem, selected int, top *int, input, 
 		sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s%s%s\x1b[K", lines-2, dim, truncate(msg, cols-1), reset))
 	}
 	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s\x1b[K", lines-1, inputBar(input, "describe a task for a new agent…", cols)))
-	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s↑↓ select · enter open/fold · type + enter launch · tab project · ctrl-c quit%s\x1b[K", lines, dim, reset))
-	os.Stdout.WriteString(sb.String())
+	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s\x1b[K", lines, fleetFooter(projLabel, cols)))
+	paint(sb.String())
+}
+
+// dimScreen makes the next paint recede: everything is forced to low
+// intensity, and bold/inverse are flattened. Set while a modal is open so
+// the view behind it reads as background rather than competing with it —
+// the terminal equivalent of dropping the opacity.
+var dimScreen bool
+
+// paint writes a rendered frame, applying the dim treatment when armed.
+// Every draw function goes through here so there is one place that decides
+// how a frame reaches the screen.
+func paint(s string) {
+	if dimScreen {
+		// Re-enter dim after every reset, and flatten the two attributes
+		// that would otherwise punch through it.
+		r := strings.NewReplacer(
+			"\x1b[0m", "\x1b[0m\x1b[2m",
+			"\x1b[1m", "\x1b[2m",
+			"\x1b[7m", "\x1b[2m",
+		)
+		s = "\x1b[2m" + r.Replace(s)
+	}
+	os.Stdout.WriteString(s)
+}
+
+// modalRow is one line in a centered modal: a label, and the key that does
+// the same thing directly.
+type modalRow struct {
+	label string
+	key   string
+	// mark is an optional leading glyph (already coloured) — used by the
+	// launch picker for harness availability.
+	mark string
+}
+
+// drawModal renders a centered, bordered box over the current view. Shared
+// by the command palette and the launch picker so both read as the same
+// object rather than two different bottom-anchored strips.
+//
+// Returns the screen row of the first selectable line, for click mapping.
+func drawModal(title, subtitle string, rows []modalRow, sel int) int {
+	lines, cols := termSize()
+	dim, bold, inv, reset := "\x1b[2m", "\x1b[1m", "\x1b[7m", "\x1b[0m"
+
+	// Width fits the widest row, within sane bounds.
+	inner := len([]rune(title)) + 4
+	for _, r := range rows {
+		if w := len([]rune(r.label)) + len([]rune(r.key)) + 8; w > inner {
+			inner = w
+		}
+	}
+	if w := len([]rune(subtitle)) + 4; w > inner {
+		inner = w
+	}
+	if max := cols - 6; inner > max {
+		inner = max
+	}
+	if inner < 24 {
+		inner = 24
+	}
+
+	body := len(rows)
+	if body == 0 {
+		body = 1
+	}
+	height := body + 4 // top border, title, subtitle, bottom border
+	top := (lines - height) / 2
+	if top < 1 {
+		top = 1
+	}
+	left := (cols-inner)/2 + 1
+	if left < 1 {
+		left = 1
+	}
+
+	var sb strings.Builder
+	at := func(row int, s string) {
+		sb.WriteString(fmt.Sprintf("\x1b[%d;%dH%s", row, left, s))
+	}
+	bar := strings.Repeat("─", inner-2)
+	at(top, dim+"╭"+bar+"╮"+reset)
+	at(top+1, dim+"│ "+reset+bold+truncate(title, inner-4)+reset+
+		strings.Repeat(" ", maxInt(0, inner-4-len([]rune(truncate(title, inner-4)))))+dim+" │"+reset)
+	sub := truncate(subtitle, inner-4)
+	at(top+2, dim+"│ "+reset+dim+sub+strings.Repeat(" ", maxInt(0, inner-4-len([]rune(sub))))+" │"+reset)
+
+	rowTop := top + 3
+	if len(rows) == 0 {
+		at(rowTop, dim+"│ "+reset+dim+fmt.Sprintf("%-*s", inner-4, "no match")+dim+" │"+reset)
+	}
+	for i, r := range rows {
+		labelW := inner - 6 - len([]rune(r.key))
+		if labelW < 4 {
+			labelW = 4
+		}
+		mark := r.mark
+		if mark == "" {
+			mark = " "
+		}
+		line := fmt.Sprintf("%s %-*s %s", mark, labelW, truncate(r.label, labelW), dim+r.key+reset)
+		if i == sel {
+			line = inv + fmt.Sprintf("%s %-*s %s", mark, labelW, truncate(r.label, labelW), r.key) + reset
+		}
+		// Pad to the border regardless of the escape codes inside.
+		visible := 1 + 1 + labelW + 1 + len([]rune(r.key))
+		at(rowTop+i, dim+"│ "+reset+line+strings.Repeat(" ", maxInt(0, inner-4-visible))+dim+" │"+reset)
+	}
+	at(top+3+body, dim+"╰"+bar+"╯"+reset)
+	paint(sb.String())
+	return rowTop
+}
+
+// fleetFooter is the one status line every view ends with: where you are
+// on the left, a single pointer at the command palette on the right. The
+// bindings themselves live in ctrl+p, not on screen.
+func fleetFooter(left string, cols int) string {
+	dim, reset := "\x1b[2m", "\x1b[0m"
+	const right = "ctrl+p commands"
+	// The key stays at full strength while everything around it dims: it is
+	// the one thing on this row you might need to act on, and a footer where
+	// the hint is as faint as the context is a footer nobody reads.
+	bright := reset + "ctrl+p" + dim + " commands"
+	if cols < len(right)+6 {
+		return dim + bright + reset
+	}
+	left = truncate(left, cols-len(right)-4)
+	pad := cols - len([]rune(left)) - len(right) - 2
+	if pad < 1 {
+		pad = 1
+	}
+	return dim + " " + left + strings.Repeat(" ", pad) + bright + reset
+}
+
+// drawPalette shows the command list as a centered modal over the dimmed
+// view behind it.
+func drawPalette(cmds []paletteCmd, sel int, query string) {
+	rows := make([]modalRow, 0, len(cmds))
+	for _, c := range cmds {
+		rows = append(rows, modalRow{label: c.label, key: c.key})
+	}
+	sub := "↑↓ select · enter run · esc close"
+	if query != "" {
+		sub = "› " + query
+	}
+	fleetHit.itemRows = map[int]int{}
+	fleetHit.projectRow = 0
+	fleetHit.pickerTop = drawModal("commands", sub, rows, sel)
 }
 
 // drawProjects: the Tab switcher — pick which project scopes the board.
@@ -1250,9 +1919,8 @@ func drawProjects(projects []gateway.Project, sel int, cur string) {
 		sb.WriteString(dim + "  loading projects…" + reset + eol)
 	}
 	sb.WriteString("\x1b[J")
-	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s↑↓ select · enter switch · → details · esc cancel · ctrl-c quit%s\x1b[K", lines, dim, reset))
-	_ = cols
-	os.Stdout.WriteString(sb.String())
+	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s\x1b[K", lines, fleetFooter("switch project", cols)))
+	paint(sb.String())
 }
 
 // renderTranscript flattens a session's transcript into display lines:
@@ -1350,7 +2018,7 @@ func wrapLine(s string, width int) []string {
 	return out
 }
 
-func drawSession(title string, content []string, scroll *int, input, msg string, frame int, active, loading, owed bool, quiet time.Duration) {
+func drawSession(title string, content []string, scroll *int, input, msg string, frame int, active, loading, owed bool, quiet time.Duration, hoverY int) {
 	lines, cols := termSize()
 	dim, bold, reset := "\x1b[2m", "\x1b[1m", "\x1b[0m"
 	eol := "\x1b[K\r\n"
@@ -1421,19 +2089,26 @@ func drawSession(title string, content []string, scroll *int, input, msg string,
 		sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s%s%s\x1b[K", lines-3, dim, truncate(status, cols-1), reset))
 	}
 	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s\x1b[K", lines-2, inputBar(input, "reply to this agent…", cols)))
-	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s%s%s\x1b[K", lines-1, bold, truncate(title, cols-1), reset))
-	pos := ""
-	if *scroll > 0 {
-		pos = fmt.Sprintf(" · %d lines below", *scroll)
+	// The identity line is reference material, not something you read every
+	// turn — dim so it stops competing with the transcript, and bring it
+	// back to full strength when the pointer is on it.
+	idStyle := dim
+	if hoverY == lines-1 {
+		idStyle = bold
 	}
-	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s↑↓ scroll · type + enter reply · ←/esc back · ctrl-c quit%s%s\x1b[K", lines, dim, reset, pos))
-	os.Stdout.WriteString(sb.String())
+	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s%s%s\x1b[K", lines-1, idStyle, truncate(title, cols-1), reset))
+	pos := "transcript"
+	if *scroll > 0 {
+		pos = fmt.Sprintf("%d lines below", *scroll)
+	}
+	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s\x1b[K", lines, fleetFooter(pos, cols)))
+	paint(sb.String())
 }
 
 // drawDetails: names-only view of a project's environments and
 // workflows; the dashboard has the full story, one keypress away.
 func drawDetails(slug string, envs, wfs []string, loading bool, frame int) {
-	lines, _ := termSize()
+	lines, cols := termSize()
 	dim, green, bold, reset := "\x1b[2m", "\x1b[32m", "\x1b[1m", "\x1b[0m"
 	eol := "\x1b[K\r\n"
 	var sb strings.Builder
@@ -1462,8 +2137,8 @@ func drawDetails(slug string, envs, wfs []string, loading bool, frame int) {
 	section("workflows", wfs)
 	sb.WriteString(dim + "more details live in the dashboard — one keypress takes you there" + reset + eol)
 	sb.WriteString("\x1b[J")
-	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%se open environments · w open workflows · tab projects · esc back · ctrl-c quit%s\x1b[K", lines, dim, reset))
-	os.Stdout.WriteString(sb.String())
+	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s\x1b[K", lines, fleetFooter(slug+" · project details", cols)))
+	paint(sb.String())
 }
 
 // relayStatusLine: liveness of the local relay and which harnesses it
@@ -1585,6 +2260,8 @@ func fleetReadKeys(out chan<- keyEvent) {
 			out <- keyEvent{k: keyQuit}
 		case b[0] == 0x12: // Ctrl-R
 			out <- keyEvent{k: keyResend}
+		case b[0] == 0x10: // Ctrl-P
+			out <- keyEvent{k: keyPalette}
 		case b[0] == '\t':
 			out <- keyEvent{k: keyTab}
 		case b[0] == '\r' || b[0] == '\n':
@@ -1605,6 +2282,10 @@ func fleetReadKeys(out chan<- keyEvent) {
 				case m[1] == "65":
 					out <- keyEvent{k: keyDown}
 					out <- keyEvent{k: keyDown}
+				case m[1] == "35": // motion, no button held → hover
+					x, _ := strconv.Atoi(m[2])
+					y, _ := strconv.Atoi(m[3])
+					out <- keyEvent{k: keyHover, x: x, y: y}
 				case m[1] == "0" && m[4] == "M": // left press
 					x, _ := strconv.Atoi(m[2])
 					y, _ := strconv.Atoi(m[3])
