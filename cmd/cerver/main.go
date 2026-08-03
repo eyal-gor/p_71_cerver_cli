@@ -71,6 +71,8 @@ commands:
   crons      Scheduled agent runs for a project (spend-capped + attributed).
                cerver crons --project SLUG                          # list
                cerver crons create --project SLUG --schedule "0 9 * * *" --prompt "…"
+               cerver crons update <id> --project SLUG --schedule "…" # edit
+               cerver crons disable <id> --project SLUG              # pause
                cerver crons run <id> --project SLUG                 # fire now
                cerver crons rm  <id> --project SLUG
   vaults     Manage your Infisical vaults (per-account secret connections).

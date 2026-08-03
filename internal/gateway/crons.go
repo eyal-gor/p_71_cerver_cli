@@ -23,16 +23,16 @@ type Cron struct {
 
 // CronCreate is the POST body for creating a cron.
 type CronCreate struct {
-	Schedule  string `json:"schedule"`
-	Prompt    string `json:"prompt,omitempty"`
-	AgentID   string `json:"agent_id,omitempty"`
-	Name      string `json:"name,omitempty"`
+	Schedule  string            `json:"schedule"`
+	Prompt    string            `json:"prompt,omitempty"`
+	AgentID   string            `json:"agent_id,omitempty"`
+	Name      string            `json:"name,omitempty"`
 	ComputeID string            `json:"compute_id,omitempty"`
 	URL       string            `json:"url,omitempty"`
 	Method    string            `json:"method,omitempty"`
 	Headers   map[string]string `json:"headers,omitempty"`
-	Harness   string `json:"harness,omitempty"`
-	Model     string `json:"model,omitempty"`
+	Harness   string            `json:"harness,omitempty"`
+	Model     string            `json:"model,omitempty"`
 }
 
 func cronBase(projectSlug string) string {
@@ -54,6 +54,20 @@ func (c *Client) CreateCron(ctx context.Context, projectSlug string, req CronCre
 		Cron Cron `json:"cron"`
 	}
 	if err := c.Do(ctx, "POST", cronBase(projectSlug), req, &resp); err != nil {
+		return nil, err
+	}
+	return &resp.Cron, nil
+}
+
+// UpdateCron patches a cron. The body is flat — the gateway reassembles the
+// config block itself — so the patch is a map rather than a struct: config is
+// replace-not-merge on the server, and a caller changing one config field has
+// to resend the others (see cronConfigCarry).
+func (c *Client) UpdateCron(ctx context.Context, projectSlug, id string, patch map[string]any) (*Cron, error) {
+	var resp struct {
+		Cron Cron `json:"cron"`
+	}
+	if err := c.Do(ctx, "PATCH", cronBase(projectSlug)+"/"+url.PathEscape(id), patch, &resp); err != nil {
 		return nil, err
 	}
 	return &resp.Cron, nil
