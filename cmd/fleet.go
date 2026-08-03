@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/base64"
 	"flag"
 	"fmt"
 	"net/url"
@@ -334,6 +335,9 @@ func fleetPalette(view string) []paletteCmd {
 	case "session":
 		return []paletteCmd{
 			{"reply", "Reply to this agent", "type + enter"},
+			{"copyreply", "Copy the last reply", ""},
+			{"copyall", "Copy the whole transcript", ""},
+			{"mouse", "Pause mouse — drag to select text", ""},
 			{"model", "Change model / harness", ""},
 			{"resend", "Resend the last message", "ctrl+r"},
 			{"back", "Back to the board", "esc"},
@@ -619,9 +623,11 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 	// 1003 (any-motion) is what makes hover possible at all — 1000 only
 	// reports presses. It is chatty: every pointer move sends a report, so
 	// the loop redraws only when the hovered row actually changes.
-	fmt.Print("\x1b[?1049h\x1b[?25l\x1b[?1000h\x1b[?1003h\x1b[?1006h")
+	fmt.Print("\x1b[?1049h\x1b[?25l")
+	setMouseReporting(true)
 	defer func() {
-		fmt.Print("\x1b[?1003l\x1b[?1000l\x1b[?1006l\x1b[?25h\x1b[?1049l")
+		setMouseReporting(false)
+		fmt.Print("\x1b[?25h\x1b[?1049l")
 		sttyRestore(saved)
 	}()
 
@@ -633,8 +639,8 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 	// animating while we wait for the gateway.
 	boardCh := make(chan *fleetBoard, 1)
 	type sessSnap struct {
-		id, title, status, lastRole, lastAt, lastUser string
-		lines                                         []string
+		id, title, status, lastRole, lastAt, lastUser, lastReply string
+		lines                                                    []string
 	}
 	sessCh := make(chan sessSnap, 1)
 
@@ -659,7 +665,8 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 	sessLastRole := ""
 	sessLastAt := ""
 	sessCancelled := false // Esc dismissed the wait on the pending turn
-	sessLastUser := ""     // last user message — Ctrl-R resends it
+	sessLastUser := ""
+	sessLastReply := "" // the agent's latest text, for "copy the last reply"
 	boardLoading := true
 	sessLoading := false
 	collapsed := map[string]bool{} // folded board groups
@@ -773,7 +780,9 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 				return
 			}
 			_, cols := termSize()
-			snap := sessSnap{id: id, lines: renderTranscript(s, cols), status: s.Status}
+			harnessLbl, _ := s.Metadata["cli_tool"].(string)
+			snap := sessSnap{id: id, lines: renderTranscript(s, cols, harnessLabel(harnessLbl)), status: s.Status}
+			snap.lastReply = strings.TrimSpace(s.LastAssistantText())
 			if len(s.Transcript) > 0 {
 				snap.lastRole = s.Transcript[len(s.Transcript)-1].Role
 				snap.lastAt = s.Transcript[len(s.Transcript)-1].At
@@ -922,6 +931,10 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 	// repaint when the row changes — otherwise moving the mouse across the
 	// window would repaint on every pixel.
 	hoverY := 0
+
+	// mouseOn: the app is listening to the mouse. Turned off on request so
+	// the terminal's own drag-to-select works — the two cannot coexist.
+	mouseOn := true
 	launchSwitch := false
 
 	loadBoard()
@@ -1094,6 +1107,37 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 					if t := strings.TrimSpace(input); t != "" {
 						launchList = fleetLaunchOptions(harnessNames(relayComputes), localModels(relayComputes))
 						launchText, launchSel, launchOpen, launchSwitch = t, loadLaunchIndex(launchList), true, false
+					}
+					ev = keyEvent{k: keyNone}
+				case "copyreply":
+					if err := copyToClipboard(sessLastReply); err != nil {
+						launchMsg = "copy failed: " + err.Error()
+					} else {
+						launchMsg = "✳ copied the last reply"
+					}
+					ev = keyEvent{k: keyNone}
+				case "copyall":
+					plain := make([]string, 0, len(sessLines))
+					for _, l := range sessLines {
+						plain = append(plain, strings.TrimRight(stripANSI(l), " "))
+					}
+					if err := copyToClipboard(strings.Join(plain, "\n")); err != nil {
+						launchMsg = "copy failed: " + err.Error()
+					} else {
+						launchMsg = fmt.Sprintf("✳ copied %d lines", len(plain))
+					}
+					ev = keyEvent{k: keyNone}
+				case "mouse":
+					// Mouse reporting eats drag-to-select: while the app is
+					// listening, the terminal hands drags to us instead of
+					// making a selection. Turn it off so the terminal's own
+					// selection works, and say how to get it back.
+					mouseOn = !mouseOn
+					setMouseReporting(mouseOn)
+					if mouseOn {
+						launchMsg = "mouse back on"
+					} else {
+						launchMsg = "mouse off — drag to select, then ctrl+p to turn it back on"
 					}
 					ev = keyEvent{k: keyNone}
 				case "model":
@@ -1402,6 +1446,7 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 				sessLastRole = s.lastRole
 				sessLastAt = s.lastAt
 				sessLastUser = s.lastUser
+				sessLastReply = s.lastReply
 				// The agent has answered — cancelled-wait state and any
 				// lingering "✳ sent" note are stale the moment the reply
 				// is on screen.
@@ -1526,6 +1571,120 @@ func inProgress(msg string) bool { return msg == "launching…" || msg == "sendi
 // inputBar renders the one-line text entry as a highlighted strip: a
 // dark background across the full width so the eye lands on it, green
 // prompt glyph, block cursor while typing, dim placeholder otherwise.
+// inputCard renders the prompt as a two-line card: an accent rail down the
+// left, the prompt itself, then a row of actions with their keys. Borrowed
+// shape from the permission cards in opencode — the point is that the thing
+// you type into and the things you can do with it read as one object,
+// instead of a bare line with the bindings exiled to a footer.
+func inputCard(input, placeholder string, actions [][2]string, cols int, focused bool) []string {
+	bg, green, dim, bold, reset := "\x1b[48;5;235m", "\x1b[32m", "\x1b[2m", "\x1b[1m", "\x1b[0m"
+	rail := green + "▌" + reset
+	if !focused {
+		rail = dim + "▌" + reset
+	}
+	inner := cols - 2
+	if inner < 10 {
+		inner = 10
+	}
+
+	var body string
+	var visible int
+	if input == "" {
+		body = green + "❯ " + reset + bg + dim + truncate(placeholder, inner-3)
+		visible = 2 + len([]rune(truncate(placeholder, inner-3)))
+	} else {
+		shown := truncate(input, inner-4)
+		body = green + "❯ " + reset + bg + bold + shown + reset + bg + dim + "█"
+		visible = 2 + len([]rune(shown)) + 1
+	}
+	prompt := rail + bg + " " + body + strings.Repeat(" ", maxi(0, inner-visible-1)) + reset
+
+	// Action row: key in normal weight, what it does dimmed after it.
+	var parts []string
+	width := 0
+	for _, a := range actions {
+		seg := a[0] + dim + " " + a[1] + reset
+		if width+len([]rune(a[0]))+len([]rune(a[1]))+4 > inner-2 {
+			break
+		}
+		width += len([]rune(a[0])) + len([]rune(a[1])) + 4
+		parts = append(parts, seg)
+	}
+	hints := rail + bg + " " + dim + strings.Join(parts, dim+"   ") + reset + bg +
+		strings.Repeat(" ", maxi(0, inner-width)) + reset
+	return []string{prompt, hints}
+}
+
+func maxi(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+// sideInfo is what the context column shows about the open session.
+type sideInfo struct {
+	id, status, harness, model, compute string
+	inTok, outTok                       int
+}
+
+// sidebarWidth: the context column only earns its space on a wide terminal;
+// below that the transcript needs every column it can get.
+func sidebarWidth(cols int) int {
+	if cols < 104 {
+		return 0
+	}
+	return 26
+}
+
+// sidebarLines builds the right-hand context column — the session's identity
+// and cost in one place, so the transcript doesn't have to carry it.
+func sidebarLines(si sideInfo, rows int) []string {
+	dim, bold, green, reset := "\x1b[2m", "\x1b[1m", "\x1b[32m", "\x1b[0m"
+	var out []string
+	head := func(s string) { out = append(out, dim+strings.ToUpper(s)+reset) }
+	val := func(s string) { out = append(out, truncate(s, 24)) }
+	gap := func() { out = append(out, "") }
+
+	head("session")
+	val(bold + shortID(si.id) + reset)
+	mark := dim + "●" + reset
+	if si.status == "running" {
+		mark = green + "●" + reset
+	}
+	val(mark + " " + si.status)
+	gap()
+
+	head("harness")
+	val(pickOr(si.harness, "—"))
+	if si.model != "" {
+		out = append(out, dim+truncate(si.model, 24)+reset)
+	}
+	gap()
+
+	head("compute")
+	val(pickOr(si.compute, "—"))
+	gap()
+
+	if si.inTok > 0 || si.outTok > 0 {
+		head("tokens")
+		val(fmt.Sprintf("%s in", humanCount(float64(si.inTok))))
+		val(fmt.Sprintf("%s out", humanCount(float64(si.outTok))))
+	}
+
+	for len(out) < rows {
+		out = append(out, "")
+	}
+	return out[:rows]
+}
+
+func pickOr(v, alt string) string {
+	if strings.TrimSpace(v) == "" {
+		return alt
+	}
+	return v
+}
+
 func inputBar(input, placeholder string, cols int) string {
 	bg, green, dim, bold, reset := "\x1b[48;5;236m", "\x1b[32m", "\x1b[2m", "\x1b[1m", "\x1b[0m"
 	var body string
@@ -1847,11 +2006,14 @@ func drawModal(title, subtitle string, rows []modalRow, sel int) int {
 // bindings themselves live in ctrl+p, not on screen.
 func fleetFooter(left string, cols int) string {
 	dim, reset := "\x1b[2m", "\x1b[0m"
-	const right = "ctrl+p commands"
+	right := "ctrl+p commands"
+	if mousePaused {
+		right = "mouse off · ctrl+p commands"
+	}
 	// The key stays at full strength while everything around it dims: it is
 	// the one thing on this row you might need to act on, and a footer where
 	// the hint is as faint as the context is a footer nobody reads.
-	bright := reset + "ctrl+p" + dim + " commands"
+	bright := strings.Replace(right, "ctrl+p", reset+"ctrl+p"+dim, 1)
 	if cols < len(right)+6 {
 		return dim + bright + reset
 	}
@@ -1926,18 +2088,28 @@ func drawProjects(projects []gateway.Project, sel int, cur string) {
 // renderTranscript flattens a session's transcript into display lines:
 // role-labelled, word-wrapped, tool/thinking entries dimmed — the
 // "see how it thinks" view.
-func renderTranscript(s *gateway.Session, cols int) []string {
-	dim, cyan, bold, reset := "\x1b[2m", "\x1b[36m", "\x1b[1m", "\x1b[0m"
+// renderTranscript turns a session into display lines.
+//
+// Layout is a speaker header — icon, name, right-aligned time — followed by
+// the body indented two spaces. Deliberately NOT a gutter rail: a bar down
+// the left edge looks good and ruins copy/paste, because every selected line
+// drags the bar along with it. Indentation reads the same and copies clean.
+func renderTranscript(s *gateway.Session, cols int, harness string) []string {
+	dim, cyan, green, bold, reset := "\x1b[2m", "\x1b[36m", "\x1b[32m", "\x1b[1m", "\x1b[0m"
 	width := cols - 4
 	if width < 40 {
 		width = 40
 	}
+	agentName := harness
+	if agentName == "" {
+		agentName = "agent"
+	}
 	var out []string
 	prevUser := ""
+	lastLabel := ""
 	for _, e := range s.Transcript {
 		// cerver run registers the task at create AND sends it as the
-		// first input — the same text lands twice back-to-back. Show it
-		// once.
+		// first input — the same text lands twice back-to-back. Show it once.
 		if e.Role == "user" {
 			if strings.TrimSpace(e.Content) == prevUser {
 				continue
@@ -1947,39 +2119,44 @@ func renderTranscript(s *gateway.Session, cols int) []string {
 			prevUser = ""
 		}
 		// Relay bookkeeping: after every turn a session_completed system
-		// event lands in the transcript (exit code, duration, usage).
-		// It's plumbing, not conversation — hide it. Other system events
-		// (errors etc.) stay visible.
+		// event lands in the transcript (exit code, duration, usage). It's
+		// plumbing, not conversation — hide it. Other system events stay.
 		if e.Role == "system" && strings.HasPrefix(strings.TrimSpace(e.Content), "{") &&
 			strings.Contains(e.Content, `"session_completed"`) {
 			continue
 		}
-		label := e.Role
-		style := ""
+
+		icon, label, style := "·", e.Role, dim
+		bodyStyle := ""
 		switch {
 		case e.Role == "user":
-			label, style = "you", cyan
+			icon, label, style = "▍", "you", cyan+bold
 		case e.Role == "assistant" && (e.Kind == "" || e.Kind == "text"):
-			label, style = "agent", bold
+			icon, label, style = "◆", agentName, green+bold
 		case e.Role == "assistant":
-			label, style = "agent · "+e.Kind, dim
+			// Thinking and tool calls are the agent working, not talking —
+			// one dim glyph so they read as texture, not as turns.
+			icon, label, bodyStyle = "⋯", e.Kind, dim
 		default:
 			if e.Kind != "" {
 				label = e.Role + " · " + e.Kind
 			}
-			style = dim
+			bodyStyle = dim
 		}
-		out = append(out, fmt.Sprintf("%s── %s ──%s", style, label, reset))
+
+		// Consecutive entries from the same speaker (thinking, then a tool
+		// call, then the answer) don't each need a header.
+		if label != lastLabel {
+			out = append(out, speakerLine(icon, label, shortClock(e.At), style, dim, width))
+			lastLabel = label
+		}
+
 		body := strings.TrimSpace(e.Content)
 		if body == "" {
 			body = "—"
 		}
-		bodyStyle := ""
-		if style == dim {
-			bodyStyle = dim
-		}
 		for _, ln := range strings.Split(body, "\n") {
-			for _, w := range wrapLine(ln, width) {
+			for _, w := range wrapLine(ln, width-2) {
 				out = append(out, bodyStyle+"  "+w+reset)
 			}
 		}
@@ -1989,6 +2166,64 @@ func renderTranscript(s *gateway.Session, cols int) []string {
 		out = []string{dim + "empty transcript" + reset}
 	}
 	return out
+}
+
+// speakerLine renders "◆ agent                         12:04".
+func speakerLine(icon, label, clock, style, dim string, width int) string {
+	reset := "\x1b[0m"
+	left := icon + " " + label
+	pad := width - len([]rune(left)) - len([]rune(clock))
+	if pad < 1 {
+		pad = 1
+	}
+	return style + left + reset + strings.Repeat(" ", pad) + dim + clock + reset
+}
+
+// shortClock renders an ISO timestamp as HH:MM, or "" when unparseable —
+// a wrong time is worse than none.
+func shortClock(at string) string {
+	t, err := time.Parse(time.RFC3339, at)
+	if err != nil {
+		return ""
+	}
+	return t.Local().Format("15:04")
+}
+
+// stripANSI removes styling so copied text is text.
+var ansiSeq = regexp.MustCompile(`\x1b\[[0-9;?]*[a-zA-Z]`)
+
+func stripANSI(s string) string { return ansiSeq.ReplaceAllString(s, "") }
+
+// mousePaused mirrors the state for the footer, so "why isn't clicking
+// working" is answered on screen rather than remembered.
+var mousePaused bool
+
+// setMouseReporting turns the app's mouse listening on or off. Off hands
+// drag-to-select back to the terminal, which is the only way to select text
+// with the mouse while a full-screen app is running.
+func setMouseReporting(on bool) {
+	mousePaused = !on
+	if on {
+		fmt.Print("\x1b[?1000h\x1b[?1003h\x1b[?1006h")
+		return
+	}
+	fmt.Print("\x1b[?1003l\x1b[?1000l\x1b[?1006l")
+}
+
+// copyToClipboard puts text on the system clipboard. Uses the local
+// pasteboard when there is one, else OSC 52, which also works over ssh
+// (if the terminal allows clipboard access).
+func copyToClipboard(text string) error {
+	for _, c := range [][]string{{"pbcopy"}, {"wl-copy"}, {"xclip", "-selection", "clipboard"}} {
+		if _, err := exec.LookPath(c[0]); err != nil {
+			continue
+		}
+		cmd := exec.Command(c[0], c[1:]...)
+		cmd.Stdin = strings.NewReader(text)
+		return cmd.Run()
+	}
+	os.Stdout.WriteString("\x1b]52;c;" + base64.StdEncoding.EncodeToString([]byte(text)) + "\a")
+	return nil
 }
 
 func wrapLine(s string, width int) []string {
