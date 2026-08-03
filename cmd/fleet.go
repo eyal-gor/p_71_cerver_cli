@@ -316,7 +316,7 @@ const (
 	keyClick     // left mouse click (x, y set)
 	keyResend    // Ctrl-R: nudge — resend the last user message
 	keyPalette   // Ctrl-P: the command palette
-	keyHover     // pointer moved (x, y set) — no button held
+	keyMouseTgl  // Ctrl-O: hand the mouse back to the terminal, and take it again
 )
 
 // paletteCmd is one row in the Ctrl-P command palette: what it does, and
@@ -337,7 +337,7 @@ func fleetPalette(view string) []paletteCmd {
 			{"reply", "Reply to this agent", "type + enter"},
 			{"copyreply", "Copy the last reply", ""},
 			{"copyall", "Copy the whole transcript", ""},
-			{"mouse", "Pause mouse — drag to select text", ""},
+			{"mouse", "Pause mouse — drag to select text", "ctrl+o"},
 			{"model", "Change model / harness", ""},
 			{"resend", "Resend the last message", "ctrl+r"},
 			{"back", "Back to the board", "esc"},
@@ -640,6 +640,7 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 	boardCh := make(chan *fleetBoard, 1)
 	type sessSnap struct {
 		id, title, status, lastRole, lastAt, lastUser, lastReply string
+		side                                                     sideInfo
 		lines                                                    []string
 	}
 	sessCh := make(chan sessSnap, 1)
@@ -666,7 +667,8 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 	sessLastAt := ""
 	sessCancelled := false // Esc dismissed the wait on the pending turn
 	sessLastUser := ""
-	sessLastReply := "" // the agent's latest text, for "copy the last reply"
+	sessLastReply := ""
+	sessSide := sideInfo{} // the agent's latest text, for "copy the last reply"
 	boardLoading := true
 	sessLoading := false
 	collapsed := map[string]bool{} // folded board groups
@@ -781,7 +783,8 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 			}
 			_, cols := termSize()
 			harnessLbl, _ := s.Metadata["cli_tool"].(string)
-			snap := sessSnap{id: id, lines: renderTranscript(s, cols, harnessLabel(harnessLbl)), status: s.Status}
+			// Wrap to the space the sidebar leaves, or lines run under it.
+			snap := sessSnap{id: id, lines: renderTranscript(s, cols-sidebarWidth(cols), harnessLabel(harnessLbl)), status: s.Status}
 			snap.lastReply = strings.TrimSpace(s.LastAssistantText())
 			if len(s.Transcript) > 0 {
 				snap.lastRole = s.Transcript[len(s.Transcript)-1].Role
@@ -814,6 +817,12 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 			snap.title = strings.Join([]string{
 				name, pick(harness), pick(model), pick(compute), pick(s.Status), shortID(id),
 			}, " · ")
+			snap.side = sideInfo{
+				id: id, status: s.Status, harness: harness, model: model, compute: compute,
+			}
+			if u := s.Usage(); u != nil {
+				snap.side.inTok, snap.side.outTok = u.InputTokens, u.OutputTokens
+			}
 			sessCh <- snap
 		}()
 	}
@@ -926,12 +935,6 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 	launchOpen, launchSel, launchText := false, 0, ""
 	var launchList []launchOpt
 
-	// hoverY is the screen row the pointer is on, 0 when it's elsewhere.
-	// Motion reports arrive continuously, so this only ever triggers a
-	// repaint when the row changes — otherwise moving the mouse across the
-	// window would repaint on every pixel.
-	hoverY := 0
-
 	// mouseOn: the app is listening to the mouse. Turned off on request so
 	// the terminal's own drag-to-select works — the two cannot coexist.
 	mouseOn := true
@@ -977,17 +980,31 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 			if t, err := time.Parse(time.RFC3339, sessLastAt); err == nil {
 				quiet = time.Since(t)
 			}
-			drawSession(sessTitle, sessLines, &scroll, sessInput, launchMsg, frame, sessActive() && !sessCancelled, sessLoading, owed, quiet, hoverY)
+			drawSession(sessTitle, sessLines, &scroll, sessInput, launchMsg, frame, sessActive() && !sessCancelled, sessLoading, owed, quiet, sessSide)
 		}
 	}
 
 	needDraw := true
 	prevOverlay := false
+	// fromKey distinguishes "you did something" from "a timer fired". Only
+	// the former may repaint while the mouse is handed back to the terminal.
+	fromKey := false
 	for {
 		// While a sheet is open it owns the screen, and the view underneath
 		// is frozen anyway — repainting it only to immediately cover it up
 		// is exactly the flicker. Paint the sheet alone; the view is still
 		// on screen from the frame before it opened.
+		// A selection lives in the terminal's own buffer, and any repaint of
+		// those cells destroys it. The spinner redraws 8x/sec, so dragging to
+		// select and then reaching for cmd+C never worked: the highlight was
+		// gone before your hand got there. While the mouse belongs to the
+		// terminal, freeze — only your keystrokes redraw, and cmd+C isn't one
+		// (the terminal handles it and never tells us).
+		if !mouseOn && !fromKey {
+			needDraw = false
+		}
+		fromKey = false
+
 		overlay := palOpen || launchOpen
 		// Opening or closing a modal always redraws, whatever the tick said:
 		// the background has to change intensity on exactly that frame.
@@ -1028,11 +1045,14 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 
 		select {
 		case ev := <-keys:
-			if ev.k == keyHover {
-				if ev.y == hoverY {
-					needDraw = false // same row — nothing on screen changed
+			fromKey = true
+			if ev.k == keyMouseTgl {
+				mouseOn = !mouseOn
+				setMouseReporting(mouseOn)
+				if mouseOn {
+					launchMsg = "mouse back on"
 				} else {
-					hoverY = ev.y
+					launchMsg = "mouse off — drag to select · ctrl+o to take it back"
 				}
 				break
 			}
@@ -1447,6 +1467,7 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 				sessLastAt = s.lastAt
 				sessLastUser = s.lastUser
 				sessLastReply = s.lastReply
+				sessSide = s.side
 				// The agent has answered — cancelled-wait state and any
 				// lingering "✳ sent" note are stale the moment the reply
 				// is on screen.
@@ -1842,7 +1863,7 @@ func drawBoard(b *fleetBoard, items []boardItem, selected int, top *int, input, 
 	if projSelected {
 		selLine = 0
 	}
-	budget := lines - 7 - logoRows // header block + indicators + status + launch bar + footer + slack
+	budget := lines - 8 - logoRows // header block + indicators + status + 2-line launch card + footer + slack
 	if budget < 3 {
 		budget = 3
 	}
@@ -1884,9 +1905,14 @@ func drawBoard(b *fleetBoard, items []boardItem, selected int, top *int, input, 
 		if inProgress(msg) {
 			msg = spinnerFor(frame) + " " + msg
 		}
-		sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s%s%s\x1b[K", lines-2, dim, truncate(msg, cols-1), reset))
+		sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s%s%s\x1b[K", lines-3, dim, truncate(msg, cols-1), reset))
 	}
-	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s\x1b[K", lines-1, inputBar(input, "describe a task for a new agent…", cols)))
+	card := inputCard(input, "describe a task for a new agent…", [][2]string{
+		{"enter", "launch"}, {"tab", "project"}, {"ctrl+p", "commands"},
+	}, cols, true)
+	for i, ln := range card {
+		sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s\x1b[K", lines-2+i, ln))
+	}
 	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s\x1b[K", lines, fleetFooter(projLabel, cols)))
 	paint(sb.String())
 }
@@ -2204,7 +2230,11 @@ var mousePaused bool
 func setMouseReporting(on bool) {
 	mousePaused = !on
 	if on {
-		fmt.Print("\x1b[?1000h\x1b[?1003h\x1b[?1006h")
+		// 1000 (button events) only — deliberately NOT 1003 (any-motion).
+		// Motion reporting fires on every pointer move; at that rate reports
+		// split across reads, and a half-parsed report becomes garbage text
+		// in the input bar. One hover highlight was not worth that.
+		fmt.Print("\x1b[?1000h\x1b[?1006h")
 		return
 	}
 	fmt.Print("\x1b[?1003l\x1b[?1000l\x1b[?1006l")
@@ -2253,14 +2283,14 @@ func wrapLine(s string, width int) []string {
 	return out
 }
 
-func drawSession(title string, content []string, scroll *int, input, msg string, frame int, active, loading, owed bool, quiet time.Duration, hoverY int) {
+func drawSession(title string, content []string, scroll *int, input, msg string, frame int, active, loading, owed bool, quiet time.Duration, si sideInfo) {
 	lines, cols := termSize()
-	dim, bold, reset := "\x1b[2m", "\x1b[1m", "\x1b[0m"
+	dim, reset := "\x1b[2m", "\x1b[0m"
 	eol := "\x1b[K\r\n"
 	var sb strings.Builder
 	sb.WriteString("\x1b[H")
 
-	viewport := lines - 6 // bottom chrome: info line + status + reply bar + footer + slack
+	viewport := lines - 7 // bottom chrome: status + 2-line reply card + identity + footer + slack
 	if viewport < 3 {
 		viewport = 3
 	}
@@ -2301,8 +2331,21 @@ func drawSession(title string, content []string, scroll *int, input, msg string,
 	if start < 0 {
 		start = 0
 	}
-	for _, ln := range content[start:end] {
-		sb.WriteString(ln + eol)
+	// Context column on the right, when the terminal is wide enough to
+	// spare it. Written per row after the transcript line, so the two never
+	// fight over the same cells.
+	sideW := sidebarWidth(cols)
+	var side []string
+	if sideW > 0 {
+		side = sidebarLines(si, end-start)
+	}
+	for i, ln := range content[start:end] {
+		sb.WriteString(ln)
+		if sideW > 0 && i < len(side) {
+			sb.WriteString(fmt.Sprintf("\x1b[%d;%dH%s%s│%s %s",
+				i+1, cols-sideW, dim, reset, dim+reset, side[i]))
+		}
+		sb.WriteString(eol)
 	}
 	sb.WriteString("\x1b[J")
 
@@ -2321,16 +2364,20 @@ func drawSession(title string, content []string, scroll *int, input, msg string,
 	// Bottom stack: status → highlighted reply bar → session identity →
 	// key hints.
 	if status != "" {
-		sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s%s%s\x1b[K", lines-3, dim, truncate(status, cols-1), reset))
+		sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s%s%s\x1b[K", lines-4, dim, truncate(status, cols-1), reset))
 	}
-	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s\x1b[K", lines-2, inputBar(input, "reply to this agent…", cols)))
-	// The identity line is reference material, not something you read every
-	// turn — dim so it stops competing with the transcript, and bring it
-	// back to full strength when the pointer is on it.
+	card := inputCard(input, "reply to this agent…", [][2]string{
+		{"enter", "send"}, {"ctrl+r", "resend"}, {"esc", "back"},
+		// Selecting text is the one thing a full-screen app takes away, so
+		// how to get it back belongs on screen, not in a menu.
+		{"opt+drag", "select"}, {"ctrl+o", "mouse"},
+	}, cols, true)
+	for i, ln := range card {
+		sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s\x1b[K", lines-3+i, ln))
+	}
+	// Reference material, not something you read every turn: dim, so it
+	// stops competing with the transcript.
 	idStyle := dim
-	if hoverY == lines-1 {
-		idStyle = bold
-	}
 	sb.WriteString(fmt.Sprintf("\x1b[%d;1H%s%s%s\x1b[K", lines-1, idStyle, truncate(title, cols-1), reset))
 	pos := "transcript"
 	if *scroll > 0 {
@@ -2483,13 +2530,25 @@ func saveFleetProject(slug string) {
 var mouseSeq = regexp.MustCompile(`\x1b\[<(\d+);(\d+);(\d+)([Mm])`)
 
 func fleetReadKeys(out chan<- keyEvent) {
-	buf := make([]byte, 64)
+	buf := make([]byte, 1024)
+	var carry []byte
 	for {
 		n, err := os.Stdin.Read(buf)
 		if err != nil || n == 0 {
 			return
 		}
-		b := buf[:n]
+		// An escape sequence can straddle two reads. Without a carry the
+		// tail parses as plain text and lands in the input bar as junk —
+		// which is exactly what a burst of mouse reports produced.
+		b := append(carry, buf[:n]...)
+		carry = nil
+		if tail := incompleteEscape(b); tail > 0 {
+			carry = append([]byte{}, b[len(b)-tail:]...)
+			b = b[:len(b)-tail]
+			if len(b) == 0 {
+				continue
+			}
+		}
 		switch {
 		case b[0] == 3: // Ctrl-C
 			out <- keyEvent{k: keyQuit}
@@ -2497,6 +2556,8 @@ func fleetReadKeys(out chan<- keyEvent) {
 			out <- keyEvent{k: keyResend}
 		case b[0] == 0x10: // Ctrl-P
 			out <- keyEvent{k: keyPalette}
+		case b[0] == 0x0f: // Ctrl-O
+			out <- keyEvent{k: keyMouseTgl}
 		case b[0] == '\t':
 			out <- keyEvent{k: keyTab}
 		case b[0] == '\r' || b[0] == '\n':
@@ -2517,10 +2578,6 @@ func fleetReadKeys(out chan<- keyEvent) {
 				case m[1] == "65":
 					out <- keyEvent{k: keyDown}
 					out <- keyEvent{k: keyDown}
-				case m[1] == "35": // motion, no button held → hover
-					x, _ := strconv.Atoi(m[2])
-					y, _ := strconv.Atoi(m[3])
-					out <- keyEvent{k: keyHover, x: x, y: y}
 				case m[1] == "0" && m[4] == "M": // left press
 					x, _ := strconv.Atoi(m[2])
 					y, _ := strconv.Atoi(m[3])
@@ -2556,6 +2613,32 @@ func fleetReadKeys(out chan<- keyEvent) {
 			}
 		}
 	}
+}
+
+// incompleteEscape returns how many bytes at the end of b are the start of
+// an escape sequence that hasn't arrived in full yet, so the caller can hold
+// them back until the rest lands.
+func incompleteEscape(b []byte) int {
+	for i := len(b) - 1; i >= 0 && i > len(b)-24; i-- {
+		if b[i] != 0x1b {
+			continue
+		}
+		tail := b[i:]
+		// CSI sequences end in a letter; SGR mouse reports end in M or m.
+		if len(tail) < 2 {
+			return len(tail)
+		}
+		if tail[1] != '[' {
+			return 0 // not a CSI; a bare Esc is complete on its own
+		}
+		for _, c := range tail[2:] {
+			if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+				return 0 // terminator present — the sequence is whole
+			}
+		}
+		return len(tail)
+	}
+	return 0
 }
 
 func sttyGet() (string, error) {
