@@ -14,6 +14,13 @@ type Compute struct {
 	LastHeartbeatAt string `json:"last_heartbeat_at"`
 	Capabilities    struct {
 		CliTools []string `json:"cli_tools"`
+		// LocalModels are models that exist only on this machine — today
+		// that's whatever Ollama has pulled. Keyed by harness. Hosted
+		// harnesses are absent on purpose: their model list is identical
+		// everywhere, so it belongs in the client, not in a per-machine
+		// report. These have to come from the compute, because a model
+		// pulled on the laptop isn't on the mac mini.
+		LocalModels map[string][]string `json:"local_models"`
 	} `json:"capabilities"`
 }
 

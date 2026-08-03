@@ -14,12 +14,12 @@ import (
 // SessionCreate builds and POSTs a /v2/sessions request. Returns the
 // new session_id.
 type SessionCreate struct {
-	SessionType string                 `json:"session_type"`
-	Compute     map[string]any         `json:"compute"`
-	Task        string                 `json:"task"`
-	Workload    string                 `json:"workload"`
-	SessionName string                 `json:"session_name,omitempty"`
-	Metadata    map[string]any         `json:"metadata,omitempty"`
+	SessionType string         `json:"session_type"`
+	Compute     map[string]any `json:"compute"`
+	Task        string         `json:"task"`
+	Workload    string         `json:"workload"`
+	SessionName string         `json:"session_name,omitempty"`
+	Metadata    map[string]any `json:"metadata,omitempty"`
 	// Agent references a saved agent by id or slug. The gateway resolves it,
 	// injects its AGENTS.md into the session, and applies config defaults
 	// (harness/model/workload) that explicit fields still override.
@@ -97,6 +97,24 @@ func (c *Client) SwitchTool(ctx context.Context, sessionID, cliTool, content str
 	return c.Do(ctx, "POST", fmt.Sprintf("/v2/sessions/%s/switch-tool", sessionID), body, nil)
 }
 
+// SwitchModel changes what a live session runs on, from the next turn.
+//
+// Passing only a model is the cheap case: the agent keeps its native CLI
+// thread, its sandbox and its workspace, and simply answers the next turn on
+// the new model. Changing the harness cannot preserve the native thread — the
+// gateway restarts the agent under the new CLI and replays the conversation
+// into it, so what was said carries over but the old CLI's working state
+// (todo list, tool history, open files) does not.
+//
+// An empty model means "that harness's own default".
+func (c *Client) SwitchModel(ctx context.Context, sessionID, cliTool, model string) error {
+	body := map[string]any{"cli_model": model}
+	if cliTool != "" {
+		body["cli_tool"] = cliTool
+	}
+	return c.Do(ctx, "POST", fmt.Sprintf("/v2/sessions/%s/switch-tool", sessionID), body, nil)
+}
+
 // Session is the GET /v2/sessions/:id response, slimmed to fields the
 // CLI actually reads. There's more in the wire JSON; we ignore the rest.
 //
@@ -167,14 +185,14 @@ func (c *Client) GetSessionSince(ctx context.Context, sessionID string, sinceIdx
 // SessionSummary is the slim shape returned in the list view — we don't
 // pull full transcripts here, just enough to render `cerver sessions`.
 type SessionSummary struct {
-	SessionID    string         `json:"sessionId"`
-	SessionName  string         `json:"sessionName"`
-	Status       string         `json:"status"`
-	ComputeID    string         `json:"computeId"`
-	CreatedAt    string         `json:"createdAt"`
-	UpdatedAt    string         `json:"updatedAt"`
-	Workload     string         `json:"workload"`
-	Metadata     map[string]any `json:"metadata"`
+	SessionID   string         `json:"sessionId"`
+	SessionName string         `json:"sessionName"`
+	Status      string         `json:"status"`
+	ComputeID   string         `json:"computeId"`
+	CreatedAt   string         `json:"createdAt"`
+	UpdatedAt   string         `json:"updatedAt"`
+	Workload    string         `json:"workload"`
+	Metadata    map[string]any `json:"metadata"`
 	// MessageCount is a denormalized count of transcript entries,
 	// computed server-side via jsonb_array_length. Avoids shipping the
 	// full transcript on list responses. Zero for older gateway builds
