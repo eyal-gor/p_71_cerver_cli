@@ -323,6 +323,8 @@ const (
 	keyScrollDn
 	keyPageUp // PageUp/PageDown — a screenful
 	keyPageDn
+	keyHistPrev // ctrl+↑ — the previous prompt you sent
+	keyHistNext
 )
 
 // paletteCmd is one row in the Ctrl-P command palette: what it does, and
@@ -341,6 +343,7 @@ func fleetPalette(view string) []paletteCmd {
 	case "session":
 		return []paletteCmd{
 			{"reply", "Reply to this agent", "type + enter"},
+			{"history", "Bring back the previous prompt you sent", "ctrl+↑"},
 			{"older", "Load the previous session above", "scroll up"},
 			{"copyreply", "Copy the last reply", ""},
 			{"copyall", "Copy the whole transcript", ""},
@@ -667,9 +670,9 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 	// animating while we wait for the gateway.
 	boardCh := make(chan *fleetBoard, 1)
 	type sessSnap struct {
-		id, title, status, lastRole, lastAt, lastUser, lastReply string
-		side                                                     sideInfo
-		lines                                                    []string
+		id, title, status, lastRole, lastAt, lastUser, lastReply, activity string
+		side                                                               sideInfo
+		lines                                                              []string
 	}
 	sessCh := make(chan sessSnap, 1)
 
@@ -696,6 +699,7 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 	sessCancelled := false // Esc dismissed the wait on the pending turn
 	sessLastUser := ""
 	sessLastReply := ""
+	sessActivity := ""
 	sessSide := sideInfo{} // the agent's latest text, for "copy the last reply"
 	boardLoading := true
 	sessLoading := false
@@ -898,6 +902,7 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 			harnessLbl, _ := s.Metadata["cli_tool"].(string)
 			snap := sessSnap{id: id, lines: renderTranscript(s, cols-sideCols(), harnessLabel(harnessLbl)), status: s.Status}
 			snap.lastReply = strings.TrimSpace(s.LastAssistantText())
+			snap.activity = latestActivity(s)
 			if len(s.Transcript) > 0 {
 				snap.lastRole = s.Transcript[len(s.Transcript)-1].Role
 				snap.lastAt = s.Transcript[len(s.Transcript)-1].At
@@ -1096,7 +1101,7 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 			if t, err := time.Parse(time.RFC3339, sessLastAt); err == nil {
 				quiet = time.Since(t)
 			}
-			drawSession(sessTitle, sessLines, &scroll, sessPastes.display(sessInput), launchMsg, frame, sessActive() && !sessCancelled, sessLoading, owed, quiet, sessSide, showSide, relayComputes)
+			drawSession(sessTitle, sessLines, &scroll, sessPastes.display(sessInput), launchMsg, frame, sessActive() && !sessCancelled, sessLoading, owed, quiet, sessSide, showSide, relayComputes, sessActivity)
 		}
 	}
 
@@ -1241,6 +1246,13 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 				case "dismiss":
 					dismissOnboard()
 					launchMsg = "card dismissed"
+					ev = keyEvent{k: keyNone}
+				case "history":
+					if t, ok := history.prev(sessInput); ok {
+						sessInput = t
+					} else {
+						launchMsg = "no earlier prompt"
+					}
 					ev = keyEvent{k: keyNone}
 				case "older":
 					if selectedID != "" {
@@ -1525,17 +1537,20 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 				}
 			case "session":
 				switch ev.k {
-				case keyUp:
-					// Arrows walk the prompts you've sent, like a shell. The
-					// transcript moves with the wheel or PageUp/PageDown.
+				case keyHistPrev:
+					// ctrl+↑/↓ walk the prompts you've sent, like a shell.
+					// Bare arrows can't: alternate scroll mode delivers wheel
+					// notches as bare arrows, so binding history there means a
+					// scroll up rewrites what you're typing instead of moving
+					// the transcript.
 					if t, ok := history.prev(sessInput); ok {
 						sessInput = t
 					}
-				case keyDown:
+				case keyHistNext:
 					if t, ok := history.next(); ok {
 						sessInput = t
 					}
-				case keyScrollUp, keyPageUp:
+				case keyUp, keyScrollUp, keyPageUp:
 					// "Already at the top" has to be judged before the scroll
 					// moves, or the first notch past the end is swallowed.
 					lines, _ := termSize()
@@ -1551,7 +1566,7 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 					if atTop && selectedID != "" {
 						loadOlder(selectedID)
 					}
-				case keyScrollDn, keyPageDn:
+				case keyDown, keyScrollDn, keyPageDn:
 					lines, _ := termSize()
 					step := 3
 					if ev.k == keyPageDn {
@@ -1651,6 +1666,7 @@ func fleetInteractive(ctx context.Context, gw *gateway.Client, limit int, projec
 				sessLastAt = s.lastAt
 				sessLastUser = s.lastUser
 				sessLastReply = s.lastReply
+				sessActivity = s.activity
 				sessSide = s.side
 				// The agent has answered — cancelled-wait state and any
 				// lingering "✳ sent" note are stale the moment the reply
@@ -2494,9 +2510,33 @@ func renderTranscript(s *gateway.Session, cols int, harness string) []string {
 	var out []string
 	prevUser := ""
 	lastLabel := ""
+
+	// A run of tool calls collapses to one line naming the last thing it did
+	// and how many steps it took. Rendering every call and result in full
+	// buries the conversation in machinery you've already scrolled past —
+	// what you want later is what it touched, not the transcript of it.
+	work := 0
+	lastWork := ""
+	flushWork := func() {
+		if work == 0 {
+			return
+		}
+		label := lastWork
+		if label == "" {
+			label = "worked"
+		}
+		steps := ""
+		if work > 1 {
+			steps = fmt.Sprintf(" · %d steps", work)
+		}
+		out = append(out, dim+"⋯ "+truncate(label, width-14)+steps+reset, "")
+		work, lastWork = 0, ""
+		lastLabel = ""
+	}
+
 	for _, e := range s.Transcript {
-		// cerver run registers the task at create AND sends it as the
-		// first input — the same text lands twice back-to-back. Show it once.
+		// cerver run registers the task at create AND sends it as the first
+		// input — the same text lands twice back-to-back. Show it once.
 		if e.Role == "user" {
 			if strings.TrimSpace(e.Content) == prevUser {
 				continue
@@ -2505,25 +2545,32 @@ func renderTranscript(s *gateway.Session, cols int, harness string) []string {
 		} else if e.Role == "assistant" {
 			prevUser = ""
 		}
-		// Relay bookkeeping: after every turn a session_completed system
-		// event lands in the transcript (exit code, duration, usage). It's
-		// plumbing, not conversation — hide it. Other system events stay.
+		// Relay bookkeeping: after every turn a session_completed system event
+		// lands in the transcript (exit code, duration, usage). It's plumbing,
+		// not conversation — hide it. Other system events stay.
 		if e.Role == "system" && strings.HasPrefix(strings.TrimSpace(e.Content), "{") &&
 			strings.Contains(e.Content, `"session_completed"`) {
 			continue
 		}
+
+		// Working entries accumulate into the collapsed line instead of
+		// printing; anything else flushes it first so order is preserved.
+		if e.Role == "assistant" && e.Kind != "" && e.Kind != "text" {
+			if act := e.Activity(); act != "" {
+				work++
+				lastWork = act
+			}
+			continue
+		}
+		flushWork()
 
 		icon, label, style := "·", e.Role, dim
 		bodyStyle := ""
 		switch {
 		case e.Role == "user":
 			icon, label, style = "▍", "you", cyan+bold
-		case e.Role == "assistant" && (e.Kind == "" || e.Kind == "text"):
-			icon, label, style = "◆", agentName, green+bold
 		case e.Role == "assistant":
-			// Thinking and tool calls are the agent working, not talking —
-			// one dim glyph so they read as texture, not as turns.
-			icon, label, bodyStyle = "⋯", e.Kind, dim
+			icon, label, style = "◆", agentName, green+bold
 		default:
 			if e.Kind != "" {
 				label = e.Role + " · " + e.Kind
@@ -2531,8 +2578,6 @@ func renderTranscript(s *gateway.Session, cols int, harness string) []string {
 			bodyStyle = dim
 		}
 
-		// Consecutive entries from the same speaker (thinking, then a tool
-		// call, then the answer) don't each need a header.
 		if label != lastLabel {
 			out = append(out, speakerLine(icon, label, shortClock(e.At), style, dim, width))
 			lastLabel = label
@@ -2552,10 +2597,41 @@ func renderTranscript(s *gateway.Session, cols int, harness string) []string {
 		}
 		out = append(out, "")
 	}
+	flushWork()
+
 	if len(out) == 0 {
 		out = []string{dim + "empty transcript" + reset}
 	}
 	return out
+}
+
+// latestActivity is what the agent is doing right now — the newest working
+// entry after the last thing it said. Drives the live spinner line.
+func latestActivity(s *gateway.Session) string {
+	for i := len(s.Transcript) - 1; i >= 0; i-- {
+		e := s.Transcript[i]
+		if e.Role == "assistant" && (e.Kind == "" || e.Kind == "text") {
+			return "" // it has spoken since; nothing in flight to report
+		}
+		if act := e.Activity(); act != "" {
+			return act
+		}
+	}
+	return ""
+}
+
+// nearTopOfTranscript reports whether the view has reached the oldest lines
+// it holds, which is when the previous session should be pulled in above.
+//
+// It fires just before the very top rather than exactly at it: the fetch
+// takes a moment, and arriving to find the older session already there beats
+// bumping into a wall and waiting.
+func nearTopOfTranscript(scroll, total, termLines int) bool {
+	viewport := termLines - 6
+	if viewport < 1 {
+		viewport = 1
+	}
+	return scroll >= total-viewport-3
 }
 
 // Agents answer in markdown. Rendered as source it reads like a diff of a
@@ -2591,20 +2667,6 @@ func styleMarkdown(line string) string {
 	// link actually goes, which matters when an agent cites sources.
 	line = mdLink.ReplaceAllString(line, blue+"$1"+reset+dim+" ($2)"+reset)
 	return line
-}
-
-// nearTopOfTranscript reports whether the view has reached the oldest lines
-// it holds, which is when the previous session should be pulled in above.
-//
-// It fires just before the very top rather than exactly at it: the fetch
-// takes a moment, and arriving to find the older session already there beats
-// bumping into a wall and waiting.
-func nearTopOfTranscript(scroll, total, termLines int) bool {
-	viewport := termLines - 6
-	if viewport < 1 {
-		viewport = 1
-	}
-	return scroll >= total-viewport-3
 }
 
 // speakerLine renders "◆ agent                         12:04".
@@ -2865,7 +2927,7 @@ func wrapLine(s string, width int) []string {
 	return out
 }
 
-func drawSession(title string, content []string, scroll *int, displayInput, msg string, frame int, active, loading, owed bool, quiet time.Duration, si sideInfo, showSide bool, relayComputes []gateway.Compute) {
+func drawSession(title string, content []string, scroll *int, displayInput, msg string, frame int, active, loading, owed bool, quiet time.Duration, si sideInfo, showSide bool, relayComputes []gateway.Compute, activity string) {
 	lines, cols := termSize()
 	dim, reset := "\x1b[2m", "\x1b[0m"
 	var sb strings.Builder
@@ -2880,17 +2942,23 @@ func drawSession(title string, content []string, scroll *int, displayInput, msg 
 	// Long silences say so and offer the nudge; very stale ones (the
 	// relay never woke an agent) drop the spinner but keep the hint.
 	if active || owed || msg == "sending…" {
-		think := spinnerFor(frame) + " thinking…"
+		// One line that swaps as the work moves, rather than a running log of
+		// every call. The activity name comes from the newest working entry,
+		// so it reads as "what is it doing now".
+		verb := "thinking…"
+		if activity != "" {
+			verb = activity
+		}
+		think := spinnerFor(frame) + " " + verb
 		switch {
 		case msg == "sending…":
-			// fresh send — plain thinking bubble
+			think = spinnerFor(frame) + " sending…"
 		case active && quiet > 90*time.Second:
-			think = spinnerFor(frame) + " still quiet · " + shortDur(quiet) + " — ctrl-r resends your message"
+			think = spinnerFor(frame) + " " + verb + " · quiet " + shortDur(quiet) + " — ctrl-r resends"
 		case !active && owed:
 			think = "no reply · quiet " + shortDur(quiet) + " — ctrl-r resends your message"
 		}
-		content = append(append([]string{}, content...),
-			"", dim+"── agent ──"+reset, dim+"  "+think+reset)
+		content = append(append([]string{}, content...), "", dim+"  "+think+reset)
 	}
 
 	// scroll counts lines up from the bottom; 0 = pinned to newest.
@@ -3124,6 +3192,31 @@ func saveFleetProject(slug string) {
 // mouseSeq: SGR mouse report — \x1b[<code;x;yM (press/wheel) or m (release).
 var mouseSeq = regexp.MustCompile(`\x1b\[<(\d+);(\d+);(\d+)([Mm])`)
 
+// modArrowSeq matches an arrow carrying a modifier — ESC [ 1;<mod> A|B, e.g.
+// ctrl+↑ as \x1b[1;5A. Alternate scroll mode (1007) rewrites wheel notches
+// into BARE arrows, so a modified arrow is the one thing a wheel can never
+// produce. That's what makes it a safe home for prompt history.
+var modArrowSeq = regexp.MustCompile(`\x1b\[1;\d+([AB])`)
+
+// splitModArrows pulls modified up/down arrows out of a read and returns the
+// history keys they mean plus the leftover bytes, so the plain-arrow count
+// below never sees their trailing A/B.
+func splitModArrows(s string) (string, []fleetKey) {
+	ms := modArrowSeq.FindAllStringSubmatch(s, -1)
+	if ms == nil {
+		return s, nil
+	}
+	keys := make([]fleetKey, 0, len(ms))
+	for _, m := range ms {
+		if m[1] == "A" {
+			keys = append(keys, keyHistPrev)
+		} else {
+			keys = append(keys, keyHistNext)
+		}
+	}
+	return modArrowSeq.ReplaceAllString(s, ""), keys
+}
+
 const (
 	pasteStartSeq = "\x1b[200~"
 	pasteEndSeq   = "\x1b[201~"
@@ -3216,6 +3309,11 @@ func fleetReadKeys(out chan<- keyEvent) {
 				}
 			}
 			s = mouseSeq.ReplaceAllString(s, "")
+			var histKeys []fleetKey
+			s, histKeys = splitModArrows(s)
+			for _, k := range histKeys {
+				out <- keyEvent{k: k}
+			}
 			if strings.Contains(s, "5~") {
 				out <- keyEvent{k: keyPageUp}
 			}

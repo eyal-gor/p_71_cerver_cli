@@ -136,6 +136,26 @@ type TranscriptEntry struct {
 	Kind    string `json:"kind"`
 	Content string `json:"content"`
 	At      string `json:"at"`
+	// ToolName is set on tool_use entries. Without it a collapsed activity
+	// line can only say "a tool ran", which is not worth a line.
+	ToolName string `json:"tool_name"`
+}
+
+// Activity returns a short present-tense label for what this entry is doing,
+// or "" when the entry is the agent talking rather than working.
+func (e TranscriptEntry) Activity() string {
+	switch e.Kind {
+	case "tool_use":
+		if e.ToolName != "" {
+			return e.ToolName
+		}
+		return "running a tool"
+	case "tool_result":
+		return "" // the result is the same step as its call — don't double-count
+	case "thinking":
+		return "thinking"
+	}
+	return ""
 }
 
 func (c *Client) GetSession(ctx context.Context, sessionID string) (*Session, error) {
