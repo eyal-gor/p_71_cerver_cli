@@ -49,6 +49,12 @@ commands:
                  cerver agents rm <id>
   chat       Multi-turn conversation; resume with: cerver chat <sid>
   compare    Run the same prompt across multiple CLIs in parallel.
+  split      Decompose one task across model tiers: a frontier planner splits
+               it, each piece runs on the cheapest capable model, a merge step
+               assembles the answer — with the cost vs frontier-only.
+                 cerver split "write a landing page with pricing + FAQ"
+                 cerver split --demo "…"   # also run it whole on the frontier
+                                           # model + publish a /c/<id> compare
   computes   List the computes registered to your account.
   projects       Manage your projects (per-account namespaces for sessions/keys/billing).
                cerver projects                          # list with this month's stats
@@ -179,6 +185,8 @@ func main() {
 		err = cmd.Chat(args)
 	case "compare":
 		err = cmd.Compare(args)
+	case "split":
+		err = cmd.Split(args)
 	case "computes":
 		err = cmd.Computes(args)
 	case "envs", "env", "environments":
