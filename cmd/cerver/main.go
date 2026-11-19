@@ -56,6 +56,12 @@ commands:
                  cerver split --demo "…"   # also run it whole on the frontier
                                            # model + publish a /c/<id> compare
   computes   List the computes registered to your account.
+  pool       Where your agents can run, and what is free right now.
+               cerver pool                      # providers + machines: free / busy / offline
+               cerver pool --state free         # only free machines
+               cerver run --on "$(cerver pool free)" "…"   # run on a free machine
+               cerver pool share <compute_id>   # share your machine (unshare to undo)
+               cerver pool invite               # the link that lets someone join
   projects       Manage your projects (per-account namespaces for sessions/keys/billing).
                cerver projects                          # list with this month's stats
                cerver projects create --name "Kompany" [--slug kompany]
@@ -189,6 +195,8 @@ func main() {
 		err = cmd.Split(args)
 	case "computes":
 		err = cmd.Computes(args)
+	case "pool", "pools":
+		err = cmd.Pool(args)
 	case "envs", "env", "environments":
 		err = cmd.Envs(args)
 	case "vaults", "vault":
