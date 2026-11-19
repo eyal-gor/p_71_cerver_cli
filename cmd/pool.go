@@ -1,10 +1,12 @@
 package cmd
 
 import (
+	"bufio"
 	"context"
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -24,6 +26,7 @@ import (
 //	cerver pool share <compute_id>  # share your machine with the pool
 //	cerver pool unshare <compute_id>
 //	cerver pool invite [--new]      # the invite link (--new replaces it)
+//	cerver pool add e2b             # connect a cloud provider (key from $E2B_API_KEY, a pipe, or typed hidden)
 //	cerver pool --pool <pool_id>    # a pool you joined
 func Pool(args []string) error {
 	sub := ""
@@ -88,6 +91,11 @@ func Pool(args []string) error {
 			fmt.Printf("%s is yours only again.\n", rest[0])
 		}
 		return nil
+	case "add", "connect":
+		if len(rest) != 1 {
+			return fmt.Errorf("usage: cerver pool add <e2b|vercel|daytona|modal>   (key from $E2B_API_KEY etc., a pipe, or typed)")
+		}
+		return poolAdd(ctx, gw, strings.ToLower(rest[0]))
 	case "invite":
 		if *fresh {
 			u, err := gw.NewPoolInvite(ctx)
@@ -112,7 +120,7 @@ func Pool(args []string) error {
 		fmt.Println(p.InviteURL)
 		return nil
 	default:
-		return fmt.Errorf("unknown: cerver pool %s (try: cerver pool, free, share, unshare, invite)", sub)
+		return fmt.Errorf("unknown: cerver pool %s (try: cerver pool, free, share, unshare, invite, add)", sub)
 	}
 	return nil
 }
@@ -201,6 +209,70 @@ func poolStatus(ctx context.Context, gw *gateway.Client, poolID, state string, j
 		}
 	}
 	return nil
+}
+
+// providerFields: what each cloud provider needs, and the env var it's usually in.
+var providerFields = map[string][]struct{ field, env, what string }{
+	"e2b":     {{"e2b_api_key", "E2B_API_KEY", "E2B API key (e2b.dev/dashboard → Keys)"}},
+	"vercel":  {{"vercel_token", "VERCEL_TOKEN", "Vercel access token (vercel.com/account/tokens)"}},
+	"daytona": {{"daytona_api_key", "DAYTONA_API_KEY", "Daytona API key"}},
+	"modal": {
+		{"modal_token_id", "MODAL_PROXY_TOKEN_ID", "Modal proxy token id"},
+		{"modal_token_secret", "MODAL_PROXY_TOKEN_SECRET", "Modal proxy token secret"},
+	},
+}
+
+// poolAdd connects a cloud provider account, so the pool can start computers
+// on it. Keys come from the environment, a pipe, or a hidden prompt — never
+// from a command-line argument, so they stay out of shell history.
+func poolAdd(ctx context.Context, gw *gateway.Client, provider string) error {
+	fields, ok := providerFields[provider]
+	if !ok {
+		return fmt.Errorf("unknown provider %q (try e2b, vercel, daytona or modal)", provider)
+	}
+	creds := map[string]string{}
+	stdin := bufio.NewReader(os.Stdin)
+	piped := false
+	if st, err := os.Stdin.Stat(); err == nil && st.Mode()&os.ModeCharDevice == 0 {
+		piped = true
+	}
+	for _, f := range fields {
+		v := strings.TrimSpace(os.Getenv(f.env))
+		if v == "" {
+			if !piped {
+				fmt.Fprintf(os.Stderr, "%s (hidden): ", f.what)
+				_ = sttyEcho(false)
+			}
+			line, _ := stdin.ReadString('\n')
+			if !piped {
+				_ = sttyEcho(true)
+				fmt.Fprintln(os.Stderr)
+			}
+			v = strings.TrimSpace(line)
+		}
+		if v == "" {
+			return fmt.Errorf("no %s given (set $%s or pipe it in)", f.what, f.env)
+		}
+		creds[f.field] = v
+	}
+	var out map[string]any
+	if err := gw.Do(ctx, "POST", "/v2/account/providers", map[string]any{"provider": provider, "credentials": creds}, &out); err != nil {
+		return err
+	}
+	fmt.Printf("Connected %s. Your pool can now start %s computers, billed to your own %s account.\n", provider, provider, provider)
+	fmt.Printf("  cerver run --on provider_%s \"…\"\n", provider)
+	return nil
+}
+
+// sttyEcho turns terminal echo on or off so a typed key isn't shown.
+func sttyEcho(on bool) error {
+	arg := "-echo"
+	if on {
+		arg = "echo"
+	}
+	c := exec.Command("stty", arg)
+	c.Stdin = os.Stdin
+	return c.Run()
 }
 
 func stateMark(s string) string {
