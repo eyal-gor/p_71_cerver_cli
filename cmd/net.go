@@ -41,13 +41,17 @@ func Net(args []string) error {
 		return netUp(args)
 	case "", "status", "ls":
 		return netStatus()
+	case "install":
+		return netInstall(args)
+	case "uninstall":
+		return netUninstall()
 	case "rm", "remove":
 		if len(args) != 1 {
 			return fmt.Errorf("usage: cerver net rm <name|address>")
 		}
 		return netRemove(args[0])
 	default:
-		return fmt.Errorf("unknown: cerver net %s (try: up, status, rm)", sub)
+		return fmt.Errorf("unknown: cerver net %s (try: up, install, uninstall, status, rm)", sub)
 	}
 }
 
@@ -179,6 +183,8 @@ func netUp(args []string) error {
 	if err := configureInterface(ifname, ip, node.Answer.Prefix); err != nil {
 		return err
 	}
+	updateNames(*name, node)
+	defer wgnet.WriteHosts(hostsFile, "")
 	fmt.Printf("%s is on your Cerver network at %s (interface %s). Ctrl-C to leave.\n", *name, ip, ifname)
 	if len(node.Answer.Peers) == 0 {
 		fmt.Println("No other devices yet. Run `sudo cerver net up` on another one.")
@@ -198,6 +204,8 @@ func netUp(args []string) error {
 		case <-tick.C:
 			if err := node.Tick(ctx); err != nil && ctx.Err() == nil {
 				fmt.Printf("Couldn't reach Cerver (%v); keeping current peers.\n", err)
+			} else {
+				updateNames(*name, node)
 			}
 			for _, s := range node.Status() {
 				if s.Connected && !shown[s.IP] {
@@ -215,6 +223,28 @@ func netUp(args []string) error {
 				}
 			}
 		}
+	}
+}
+
+const hostsFile = "/etc/hosts"
+
+// updateNames makes every device reachable by name (ssh macbook).
+func updateNames(self string, node *wgnet.Node) {
+	if node.Answer == nil {
+		return
+	}
+	devices := map[string]string{node.Answer.IP: self}
+	for _, p := range node.Answer.Peers {
+		devices[p.IP] = p.Name
+	}
+	before, _ := os.ReadFile(hostsFile)
+	if err := wgnet.WriteHosts(hostsFile, wgnet.HostsBlock(devices)); err != nil {
+		fmt.Printf("Couldn't update device names: %v\n", err)
+		return
+	}
+	if after, _ := os.ReadFile(hostsFile); runtime.GOOS == "darwin" && string(after) != string(before) {
+		exec.Command("dscacheutil", "-flushcache").Run()
+		exec.Command("killall", "-HUP", "mDNSResponder").Run()
 	}
 }
 
