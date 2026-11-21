@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"strings"
 	"time"
 )
 
@@ -22,8 +24,13 @@ type Client struct {
 }
 
 func New(token string) *Client {
+	base := DefaultURL
+	// For testing against a local gateway: CERVER_GATEWAY_URL=http://127.0.0.1:8787
+	if u := strings.TrimRight(os.Getenv("CERVER_GATEWAY_URL"), "/"); u != "" {
+		base = u
+	}
 	return &Client{
-		BaseURL: DefaultURL,
+		BaseURL: base,
 		Token:   token,
 		http:    &http.Client{Timeout: 5 * time.Minute},
 	}

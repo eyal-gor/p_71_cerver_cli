@@ -62,6 +62,9 @@ commands:
                cerver run --on "$(cerver pool free)" "…"   # run on a free machine
                cerver pool share <compute_id>   # share your machine (unshare to undo)
                cerver pool invite               # the link that lets someone join
+  forward    Reach an app on one of your machines from here, peer to peer.
+               cerver forward MacBook-Air-2026 3456          # its port 3456 at localhost:3456 here
+               cerver forward MacBook-Air-2026 3456 --local 8080
   projects       Manage your projects (per-account namespaces for sessions/keys/billing).
                cerver projects                          # list with this month's stats
                cerver projects create --name "Kompany" [--slug kompany]
@@ -197,6 +200,8 @@ func main() {
 		err = cmd.Computes(args)
 	case "pool", "pools":
 		err = cmd.Pool(args)
+	case "forward":
+		err = cmd.Forward(args)
 	case "envs", "env", "environments":
 		err = cmd.Envs(args)
 	case "vaults", "vault":
