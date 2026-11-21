@@ -62,6 +62,10 @@ commands:
                cerver run --on "$(cerver pool free)" "…"   # run on a free machine
                cerver pool share <compute_id>   # share your machine (unshare to undo)
                cerver pool invite               # the link that lets someone join
+  net        A private network between your own devices (WireGuard, direct).
+               sudo cerver net up               # this device joins at 100.96.x.y
+               cerver net                       # your devices and their addresses
+               cerver net rm <name|address>     # take a device out
   forward    Reach an app on one of your machines from here, peer to peer.
                cerver forward MacBook-Air-2026 3456          # its port 3456 at localhost:3456 here
                cerver forward MacBook-Air-2026 3456 --local 8080
@@ -202,6 +206,8 @@ func main() {
 		err = cmd.Pool(args)
 	case "forward":
 		err = cmd.Forward(args)
+	case "net":
+		err = cmd.Net(args)
 	case "envs", "env", "environments":
 		err = cmd.Envs(args)
 	case "vaults", "vault":
