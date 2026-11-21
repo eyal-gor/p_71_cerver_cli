@@ -114,6 +114,17 @@ func findOwnMachine(ctx context.Context, gw *gateway.Client, want string) (*gate
 			return m, nil
 		}
 	}
+	// Cloud computers (E2B, Vercel) aren't pool machines; find them by id or label.
+	if computes, err := gw.ListComputes(ctx); err == nil {
+		for _, c := range computes {
+			if !strings.HasPrefix(c.ID, "comp_") {
+				continue // provider entries, not machines
+			}
+			if c.ID == want || strings.EqualFold(c.Label, want) {
+				return &gateway.PoolMachine{ComputeID: c.ID, Name: c.Label, Mine: true, State: "free"}, nil
+			}
+		}
+	}
 	if len(names) == 0 {
 		return nil, fmt.Errorf("you have no machines in your pool yet. Add one with `cerver connect` on it")
 	}
