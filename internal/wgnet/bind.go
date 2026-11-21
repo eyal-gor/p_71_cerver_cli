@@ -25,9 +25,14 @@ type Bind struct {
 	mu      sync.Mutex
 	conn    *net.UDPConn
 	waiting map[[12]byte]chan netip.AddrPort
+	relay   RelaySender
+	relayIn chan relayPacket
+	done    chan struct{}
 }
 
-func NewBind() *Bind { return &Bind{waiting: map[[12]byte]chan netip.AddrPort{}} }
+func NewBind() *Bind {
+	return &Bind{waiting: map[[12]byte]chan netip.AddrPort{}, relayIn: make(chan relayPacket, 256)}
+}
 
 type endpoint struct{ dst netip.AddrPort }
 
@@ -49,8 +54,9 @@ func (b *Bind) Open(port uint16) ([]conn.ReceiveFunc, uint16, error) {
 		return nil, 0, err
 	}
 	b.conn = c
+	b.done = make(chan struct{})
 	actual := uint16(c.LocalAddr().(*net.UDPAddr).Port)
-	return []conn.ReceiveFunc{b.receive(c)}, actual, nil
+	return []conn.ReceiveFunc{b.receive(c), b.receiveRelay(b.done)}, actual, nil
 }
 
 func (b *Bind) receive(c *net.UDPConn) conn.ReceiveFunc {
@@ -78,6 +84,7 @@ func (b *Bind) Close() error {
 	}
 	err := b.conn.Close()
 	b.conn = nil
+	close(b.done)
 	return err
 }
 
@@ -86,10 +93,21 @@ func (b *Bind) BatchSize() int       { return 1 }
 
 func (b *Bind) Send(bufs [][]byte, ep conn.Endpoint) error {
 	b.mu.Lock()
-	c := b.conn
+	c, relay := b.conn, b.relay
 	b.mu.Unlock()
 	if c == nil {
 		return net.ErrClosed
+	}
+	if re, ok := ep.(*relayEndpoint); ok {
+		if relay == nil {
+			return errors.New("no relay")
+		}
+		for _, buf := range bufs {
+			if err := relay.SendTo(re.key, buf); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 	e, ok := ep.(*endpoint)
 	if !ok {
@@ -104,6 +122,9 @@ func (b *Bind) Send(bufs [][]byte, ep conn.Endpoint) error {
 }
 
 func (b *Bind) ParseEndpoint(s string) (conn.Endpoint, error) {
+	if e, ok := parseRelayEndpoint(s); ok {
+		return e, nil
+	}
 	ap, err := netip.ParseAddrPort(s)
 	if err != nil {
 		return nil, err

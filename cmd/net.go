@@ -165,8 +165,11 @@ func netUp(args []string) error {
 	dev := device.NewDevice(self, bind, device.NewLogger(device.LogLevelError, "wireguard: "))
 	defer dev.Close()
 
+	relay := &wgnet.RelayClient{URL: gw.BaseURL, Token: gw.Token, PublicB64: key.PublicB64(), Bind: bind,
+		Log: func(f string, a ...any) { fmt.Printf(f+"\n", a...) }}
+	bind.SetRelay(relay)
 	node := &wgnet.Node{
-		Dev: dev, Bind: bind, Key: key, Name: *name, OS: runtime.GOOS,
+		Dev: dev, Bind: bind, Key: key, Name: *name, OS: runtime.GOOS, Relay: true,
 		Log: func(f string, a ...any) { fmt.Printf(f+"\n", a...) },
 		CheckIn: func(ctx context.Context, r wgnet.CheckInRequest) (*wgnet.CheckInAnswer, error) {
 			var ans wgnet.CheckInAnswer
@@ -182,6 +185,7 @@ func netUp(args []string) error {
 	}
 	ip := node.Answer.IP
 	self.SetSelf(ip)
+	go relay.Run(ctx) // after the first check-in: the relay only admits registered devices
 	if err := configureInterface(ifname, ip, node.Answer.Prefix); err != nil {
 		return err
 	}
@@ -197,6 +201,8 @@ func netUp(args []string) error {
 	defer tick.Stop()
 	report := time.NewTicker(time.Minute)
 	defer report.Stop()
+	retry := time.NewTicker(3 * time.Second) // move a silent peer on to its next address
+	defer retry.Stop()
 	shown := map[string]bool{}
 	for {
 		select {
@@ -218,6 +224,8 @@ func netUp(args []string) error {
 					fmt.Printf("Lost %s (%s); trying again\n", s.Name, s.IP)
 				}
 			}
+		case <-retry.C:
+			node.Retry()
 		case <-report.C:
 			for _, s := range node.Status() {
 				if !s.Connected {

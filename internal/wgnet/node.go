@@ -112,12 +112,18 @@ type Node struct {
 	Log func(format string, a ...any)
 	// LocalOnly skips STUN (tests on one machine).
 	LocalOnly bool
+	// Relay, when set, is every peer's last address to try.
+	Relay bool
+	// TryFor is how long one address gets before trying the next (default
+	// 12 s). WireGuard retries a handshake every 5 s, so under ~6 s an address
+	// isn't really tried.
+	TryFor time.Duration
 
-	mu       sync.Mutex
-	peers    map[string]*peerState
-	public   netip.Addr
-	Answer   *CheckInAnswer
-	natWarn  bool
+	mu      sync.Mutex
+	peers   map[string]*peerState
+	public  netip.Addr
+	Answer  *CheckInAnswer
+	natWarn bool
 }
 
 // Start sets the key and opens the socket.
@@ -256,11 +262,16 @@ func (n *Node) apply(peers []Peer) error {
 		}
 		st.peer = p
 		st.candidates = Order(p.Endpoints, n.public)
+		if n.Relay {
+			var k [32]byte
+			copy(k[:], raw)
+			st.candidates = append(st.candidates, RelayAddr(k))
+		}
 		fmt.Fprintf(&cfg, "public_key=%s\nreplace_allowed_ips=true\nallowed_ip=%s/32\npersistent_keepalive_interval=25\n", hexKey, p.IP)
 		// Keep the address that works (WireGuard follows a peer that moves).
 		// Only pick another when nothing has answered for a while.
 		connected := time.Since(handshakes[hexKey]) < 3*time.Minute
-		if len(st.candidates) > 0 && !connected && (st.current == "" || time.Since(st.setAt) > 12*time.Second) {
+		if len(st.candidates) > 0 && !connected && (st.current == "" || time.Since(st.setAt) > n.tryFor()) {
 			if st.current != "" {
 				st.idx = (st.idx + 1) % len(st.candidates)
 			}
@@ -286,12 +297,38 @@ func (n *Node) apply(peers []Peer) error {
 	return n.Dev.IpcSet(cfg.String())
 }
 
+func (n *Node) tryFor() time.Duration {
+	if n.TryFor > 0 {
+		return n.TryFor
+	}
+	return 12 * time.Second
+}
+
+// Retry moves peers that aren't answering on to their next address, without
+// checking in again. Call it every few seconds so a blocked direct path
+// gives way to the relay quickly.
+func (n *Node) Retry() error {
+	n.mu.Lock()
+	ans := n.Answer
+	n.mu.Unlock()
+	if ans == nil {
+		return nil
+	}
+	return n.apply(ans.Peers)
+}
+
 // handshakes reads each peer's last handshake time from the device.
 func (n *Node) handshakes() map[string]time.Time {
-	out := map[string]time.Time{}
+	t, _ := n.deviceState()
+	return t
+}
+
+// deviceState reads each peer's last handshake and current address from WireGuard.
+func (n *Node) deviceState() (map[string]time.Time, map[string]string) {
+	out, eps := map[string]time.Time{}, map[string]string{}
 	s, err := n.Dev.IpcGet()
 	if err != nil {
-		return out
+		return out, eps
 	}
 	var cur string
 	sc := bufio.NewScanner(strings.NewReader(s))
@@ -304,9 +341,11 @@ func (n *Node) handshakes() map[string]time.Time {
 			if sec, err := strconv.ParseInt(v, 10, 64); err == nil && sec > 0 {
 				out[cur] = time.Unix(sec, 0)
 			}
+		case "endpoint":
+			eps[cur] = v
 		}
 	}
-	return out
+	return out, eps
 }
 
 // Status is one line per peer for the person watching.
@@ -319,11 +358,18 @@ type PeerStatus struct {
 func (n *Node) Status() []PeerStatus {
 	n.mu.Lock()
 	defer n.mu.Unlock()
-	hs := n.handshakes()
+	hs, eps := n.deviceState()
 	var out []PeerStatus
 	for hexKey, st := range n.peers {
 		t := hs[hexKey]
-		out = append(out, PeerStatus{Name: st.peer.Name, IP: st.peer.IP, Endpoint: st.current, Connected: !t.IsZero() && time.Since(t) < 3*time.Minute, LastHandshake: t})
+		ep := eps[hexKey] // where WireGuard is actually sending (it follows a peer that moves)
+		if ep == "" {
+			ep = st.current
+		}
+		if strings.HasPrefix(ep, relayPrefix) {
+			ep = "Cerver relay"
+		}
+		out = append(out, PeerStatus{Name: st.peer.Name, IP: st.peer.IP, Endpoint: ep, Connected: !t.IsZero() && time.Since(t) < 3*time.Minute, LastHandshake: t})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].IP < out[j].IP })
 	return out
