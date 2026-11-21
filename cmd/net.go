@@ -160,8 +160,9 @@ func netUp(args []string) error {
 		return fmt.Errorf("can't create the network interface: %w", err)
 	}
 	ifname, _ := tdev.Name()
+	self := wgnet.NewSelfTUN(tdev)
 	bind := wgnet.NewBind()
-	dev := device.NewDevice(tdev, bind, device.NewLogger(device.LogLevelError, "wireguard: "))
+	dev := device.NewDevice(self, bind, device.NewLogger(device.LogLevelError, "wireguard: "))
 	defer dev.Close()
 
 	node := &wgnet.Node{
@@ -180,6 +181,7 @@ func netUp(args []string) error {
 		return fmt.Errorf("couldn't join your network: %w", err)
 	}
 	ip := node.Answer.IP
+	self.SetSelf(ip)
 	if err := configureInterface(ifname, ip, node.Answer.Prefix); err != nil {
 		return err
 	}
