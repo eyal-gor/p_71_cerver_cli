@@ -684,13 +684,13 @@ func howConnected(_ p: NetPeer) -> String {
 // MARK: - Window (sidebar + page, in the style of the ChatGPT Mac app)
 
 enum Page: Hashable {
-	case all, thisMac, computer(String), add
+	case all, thisMac, computer(String), add, settings
 }
 
 struct MainWindow: View {
 	@ObservedObject var m: Model
 	// `-startPage thisMac` on launch opens that page (for screenshots).
-	@State private var page: Page? = ["thisMac": Page.thisMac, "add": Page.add][UserDefaults.standard.string(forKey: "startPage") ?? ""] ?? .all
+	@State private var page: Page? = ["thisMac": Page.thisMac, "add": Page.add, "settings": Page.settings][UserDefaults.standard.string(forKey: "startPage") ?? ""] ?? .all
 
 	var body: some View {
 		NavigationSplitView {
@@ -747,11 +747,9 @@ struct MainWindow: View {
 
 	/// Bottom of the sidebar: who you're signed in as, how this computer is
 	/// connected (with ways to disconnect), and the version (with Update).
-	@State private var accountOpen = false
-
 	var footer: some View {
 		HStack(spacing: 8) {
-			Button { accountOpen.toggle() } label: {
+			Button { page = .settings } label: {
 				HStack(spacing: 8) {
 					ZStack(alignment: .bottomTrailing) {
 						Circle().fill(Color.accentColor.opacity(0.85)).frame(width: 24, height: 24)
@@ -764,7 +762,7 @@ struct MainWindow: View {
 				.contentShape(Rectangle())
 			}
 			.buttonStyle(.plain)
-			.popover(isPresented: $accountOpen, arrowEdge: .top) { accountPanel }
+			.help("Settings")
 			Spacer(minLength: 0)
 			if m.updateAvailable {
 				Button {
@@ -779,36 +777,6 @@ struct MainWindow: View {
 		}
 		.padding(.horizontal, 14).padding(.vertical, 10)
 		.overlay(alignment: .top) { Divider().padding(.horizontal, 12) }
-	}
-
-	/// What opens from your account row: the two things this computer is part
-	/// of, each with its switch (same words as This Mac → Overview).
-	var accountPanel: some View {
-		VStack(alignment: .leading, spacing: 10) {
-			Text(m.email ?? "Not signed in").font(.system(size: 13, weight: .semibold))
-			Divider()
-			panelSwitch("Agents can run here",
-				detail: "Cerver sends agent runs to this Mac.",
-				on: m.relay == .running || m.relay == .starting) { $0 ? m.relayOn() : m.relayOff() }
-			panelSwitch("My computers can reach it",
-				detail: m.isOn ? networkLine : "Your other computers reach it by name.",
-				on: m.isOn || m.phase == .starting) { $0 ? m.turnOn() : m.turnOff() }
-			Divider()
-			Text("Cerver " + appVersion).font(.system(size: 11)).foregroundStyle(.secondary)
-		}
-		.padding(14)
-		.frame(width: 270, alignment: .leading)
-	}
-
-	func panelSwitch(_ title: String, detail: String, on: Bool, set: @escaping (Bool) -> Void) -> some View {
-		HStack(alignment: .top) {
-			VStack(alignment: .leading, spacing: 2) {
-				Text(title).font(.system(size: 12.5, weight: .medium))
-				Text(detail).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-			}
-			Spacer()
-			Toggle("", isOn: Binding(get: { on }, set: set)).toggleStyle(.switch).labelsHidden().controlSize(.small)
-		}
 	}
 
 	var appVersion: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "" }
@@ -876,6 +844,7 @@ struct MainWindow: View {
 			case .computer(let id):
 				if let c = m.computers.first(where: { $0.id == id }) { ComputerPage(m: m, c: c) } else { AllComputersPage(m: m, open: { page = $0 }) }
 			case .add: AddPage(m: m)
+			case .settings: SettingsPage(m: m)
 			}
 		}
 	}
@@ -1184,7 +1153,7 @@ struct ThisMacPage: View {
 
 	var body: some View {
 		PageLayout(title: m.relayName, subtitle: "This Mac") {
-			Tabs(tab: $tab, tabs: [.overview, .agents, .network, .hardware, .settings])
+			Tabs(tab: $tab, tabs: [.overview, .agents, .network, .hardware])
 			if case .failed(let why) = m.phase { problem(why) }
 			if case .failed(let why) = m.relay { problem(why) }
 			switch tab {
@@ -1192,7 +1161,7 @@ struct ThisMacPage: View {
 			case .agents: agents
 			case .network: network
 			case .hardware: SpecSection(spec: me?.spec, showTitle: false)
-			case .settings: settings
+			case .settings: EmptyView()
 			}
 		}
 	}
@@ -1273,75 +1242,6 @@ struct ThisMacPage: View {
 			}
 		} else {
 			Text("Off. Turn it on in Overview.").font(.callout).foregroundStyle(.secondary)
-		}
-	}
-
-	@State private var confirmUninstall = false
-
-	func versionRow(_ label: String, _ p: UpdateInfo.Part?, prefix: String = "") -> some View {
-		Row(label: label) {
-			if let p = p {
-				Text(p.current.isEmpty ? "?" : prefix + p.current).font(.system(size: 13, design: .monospaced)).foregroundStyle(.secondary)
-				if p.update, let l = p.latest {
-					StatusPill(text: "New: " + prefix + l, color: .blue)
-				}
-			} else {
-				Text("not installed").foregroundStyle(.secondary)
-			}
-		}
-	}
-
-	@ViewBuilder var settings: some View {
-		Text("Version").font(.system(size: 15, weight: .semibold))
-		Card {
-			if let u = m.updates {
-				versionRow("Cerver app", u.app)
-				Divider().padding(.leading, 16)
-				versionRow("cerver program", u.cli)
-				Divider().padding(.leading, 16)
-				versionRow("Relay", u.relay, prefix: "v")
-				Divider().padding(.leading, 16)
-				versionRow("Network service", u.net)
-				Divider().padding(.leading, 16)
-				Row(label: u.any ? "An update is available" : (u.latest.isEmpty ? "Couldn't check for updates" : "Up to date")) {
-					if m.updating { ProgressView().controlSize(.small) }
-					if u.any {
-						Button("Update now") { m.updateNow() }.buttonStyle(.borderedProminent).disabled(m.updating)
-					} else {
-						Button("Check again") { m.checkUpdates(force: true) }.buttonStyle(.link)
-					}
-				}
-			} else {
-				Row(label: "Checking…") { ProgressView().controlSize(.small) }
-			}
-		}
-		Text("Cerver updates itself every few hours, and never while an agent is running.")
-			.font(.callout).foregroundStyle(.secondary)
-		if let p = m.updateProblem {
-			problem(p)
-		}
-
-		Text("This Mac").font(.system(size: 15, weight: .semibold)).padding(.top, 6)
-		Card {
-			Row(label: "Open Cerver at login") {
-				Toggle("", isOn: Binding(get: { m.openAtLogin }, set: { m.setOpenAtLogin($0) }))
-					.toggleStyle(.switch).labelsHidden()
-			}
-			Divider().padding(.leading, 16)
-			logRow("Agents log", NSHomeDirectory() + "/.cerver/relay.log")
-			Divider().padding(.leading, 16)
-			logRow("Network log", logFile)
-			Divider().padding(.leading, 16)
-			Row(label: "Remove Cerver from this Mac") {
-				if m.uninstalling { ProgressView().controlSize(.small) }
-				Button("Uninstall…", role: .destructive) { confirmUninstall = true }
-					.disabled(m.uninstalling)
-			}
-		}
-		.confirmationDialog("Remove Cerver from this Mac?", isPresented: $confirmUninstall) {
-			Button("Uninstall", role: .destructive) { m.uninstall() }
-		} message: {
-			Text("This Mac leaves your pool and network. Its sign-in, services, files and this app are deleted. You'll be asked for your password once.")
 		}
 	}
 
@@ -1544,6 +1444,121 @@ func qrImage(_ text: String) -> NSImage? {
 	let img = NSImage(size: rep.size)
 	img.addRepresentation(rep)
 	return img
+}
+
+/// Settings: your account, what this computer is part of, updates, and the rest.
+struct SettingsPage: View {
+	@ObservedObject var m: Model
+
+	var body: some View {
+		PageLayout(title: "Settings", subtitle: m.email.map { "Signed in as " + $0 } ?? "Not signed in") {
+			Text("This computer").font(.system(size: 15, weight: .semibold))
+			Card {
+				Row(label: "Agents can run here") {
+					Text("Cerver sends agent runs to this Mac").font(.callout).foregroundStyle(.secondary)
+					Toggle("", isOn: Binding(get: { m.relay == .running || m.relay == .starting }, set: { $0 ? m.relayOn() : m.relayOff() }))
+						.toggleStyle(.switch).labelsHidden()
+				}
+				Divider().padding(.leading, 16)
+				Row(label: "My computers can reach it") {
+					Text(m.isOn ? networkSummary : "Off").font(.callout).foregroundStyle(.secondary)
+					Toggle("", isOn: Binding(get: { m.isOn || m.phase == .starting }, set: { $0 ? m.turnOn() : m.turnOff() }))
+						.toggleStyle(.switch).labelsHidden().disabled(m.busy)
+				}
+			}
+			rest
+		}
+	}
+
+	var networkSummary: String {
+		guard let s = m.status else { return "On" }
+		let direct = s.peers.filter { $0.connected && $0.via == "direct" }.count
+		let relayed = s.peers.filter { $0.connected && $0.via == "relay" }.count
+		var parts: [String] = []
+		if direct > 0 { parts.append("direct to \(direct)") }
+		if relayed > 0 { parts.append("\(relayed) via backup") }
+		return parts.isEmpty ? "On" : parts.joined(separator: " · ")
+	}
+
+	@State private var confirmUninstall = false
+
+	func versionRow(_ label: String, _ p: UpdateInfo.Part?, prefix: String = "") -> some View {
+		Row(label: label) {
+			if let p = p {
+				Text(p.current.isEmpty ? "?" : prefix + p.current).font(.system(size: 13, design: .monospaced)).foregroundStyle(.secondary)
+				if p.update, let l = p.latest {
+					StatusPill(text: "New: " + prefix + l, color: .blue)
+				}
+			} else {
+				Text("not installed").foregroundStyle(.secondary)
+			}
+		}
+	}
+
+	@ViewBuilder var rest: some View {
+		Text("Version").font(.system(size: 15, weight: .semibold))
+		Card {
+			if let u = m.updates {
+				versionRow("Cerver app", u.app)
+				Divider().padding(.leading, 16)
+				versionRow("cerver program", u.cli)
+				Divider().padding(.leading, 16)
+				versionRow("Relay", u.relay, prefix: "v")
+				Divider().padding(.leading, 16)
+				versionRow("Network service", u.net)
+				Divider().padding(.leading, 16)
+				Row(label: u.any ? "An update is available" : (u.latest.isEmpty ? "Couldn't check for updates" : "Up to date")) {
+					if m.updating { ProgressView().controlSize(.small) }
+					if u.any {
+						Button("Update now") { m.updateNow() }.buttonStyle(.borderedProminent).disabled(m.updating)
+					} else {
+						Button("Check again") { m.checkUpdates(force: true) }.buttonStyle(.link)
+					}
+				}
+			} else {
+				Row(label: "Checking…") { ProgressView().controlSize(.small) }
+			}
+		}
+		Text("Cerver updates itself every few hours, and never while an agent is running.")
+			.font(.callout).foregroundStyle(.secondary)
+		if let p = m.updateProblem {
+			problem(p)
+		}
+
+		Text("This Mac").font(.system(size: 15, weight: .semibold)).padding(.top, 6)
+		Card {
+			Row(label: "Open Cerver at login") {
+				Toggle("", isOn: Binding(get: { m.openAtLogin }, set: { m.setOpenAtLogin($0) }))
+					.toggleStyle(.switch).labelsHidden()
+			}
+			Divider().padding(.leading, 16)
+			logRow("Agents log", NSHomeDirectory() + "/.cerver/relay.log")
+			Divider().padding(.leading, 16)
+			logRow("Network log", logFile)
+			Divider().padding(.leading, 16)
+			Row(label: "Remove Cerver from this Mac") {
+				if m.uninstalling { ProgressView().controlSize(.small) }
+				Button("Uninstall…", role: .destructive) { confirmUninstall = true }
+					.disabled(m.uninstalling)
+			}
+		}
+		.confirmationDialog("Remove Cerver from this Mac?", isPresented: $confirmUninstall) {
+			Button("Uninstall", role: .destructive) { m.uninstall() }
+		} message: {
+			Text("This Mac leaves your pool and network. Its sign-in, services, files and this app are deleted. You'll be asked for your password once.")
+		}
+	}
+
+
+	func problem(_ why: String) -> some View {
+		HStack(spacing: 8) {
+			Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+			Text(why).font(.callout).textSelection(.enabled)
+			Spacer()
+		}
+		.padding(12)
+		.background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.1)))
+	}
 }
 
 // MARK: - Menu bar
