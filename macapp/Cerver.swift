@@ -747,48 +747,69 @@ struct MainWindow: View {
 
 	/// Bottom of the sidebar: who you're signed in as, how this computer is
 	/// connected (with ways to disconnect), and the version (with Update).
+	@State private var accountOpen = false
+
 	var footer: some View {
-		VStack(alignment: .leading, spacing: 8) {
-			Divider()
-			VStack(alignment: .leading, spacing: 5) {
-				if let e = m.email {
-					Label(e, systemImage: "person.crop.circle").font(.system(size: 11.5)).lineLimit(1).truncationMode(.middle)
-				}
-				HStack(spacing: 6) {
-					Circle().fill(m.relay == .running ? Color.green : Color.secondary.opacity(0.4)).frame(width: 6, height: 6)
-					Text(m.relay == .running ? "Agents can run here" : "Agents: off here").font(.system(size: 11.5))
-				}
-				HStack(spacing: 6) {
-					Circle().fill(m.isOn ? Color.green : Color.secondary.opacity(0.4)).frame(width: 6, height: 6)
-					Text(networkLine).font(.system(size: 11.5)).lineLimit(1)
-				}
-				Menu("Disconnect") {
-					if m.isOn { Button("Leave the network") { m.turnOff() } } else { Button("Join the network") { m.turnOn() } }
-					if m.relay == .running || m.relay == .starting { Button("Stop running agents here") { m.relayOff() } } else { Button("Let agents run here") { m.relayOn() } }
-					if m.isOn && (m.relay == .running || m.relay == .starting) {
-						Divider()
-						Button("Disconnect everything") { m.turnOff(); m.relayOff() }
+		HStack(spacing: 8) {
+			Button { accountOpen.toggle() } label: {
+				HStack(spacing: 8) {
+					ZStack(alignment: .bottomTrailing) {
+						Circle().fill(Color.accentColor.opacity(0.85)).frame(width: 24, height: 24)
+							.overlay(Text(String((m.email ?? "?").prefix(1)).uppercased()).font(.system(size: 11, weight: .semibold)).foregroundStyle(.white))
+						Circle().fill(thisMacDot).frame(width: 8, height: 8)
+							.overlay(Circle().stroke(Color(nsColor: .windowBackgroundColor), lineWidth: 1.5))
 					}
+					Text(m.email ?? "Not signed in").font(.system(size: 12.5)).lineLimit(1).truncationMode(.middle)
 				}
-				.menuStyle(.borderlessButton).fixedSize().font(.system(size: 11.5))
+				.contentShape(Rectangle())
 			}
-			.foregroundStyle(.secondary)
-			HStack(spacing: 6) {
-				Text("Cerver " + appVersion).font(.system(size: 11)).foregroundStyle(.tertiary)
-				Spacer()
-				if m.updateAvailable {
-					Button {
-						m.updateNow()
-					} label: {
-						if m.updating { ProgressView().controlSize(.mini) } else { Text("Update").font(.system(size: 11, weight: .semibold)) }
-					}
-					.buttonStyle(.borderedProminent).controlSize(.small).clipShape(Capsule())
-					.disabled(m.updating)
-					.help("Cerver \(m.updates?.latest ?? "") is out")
+			.buttonStyle(.plain)
+			.popover(isPresented: $accountOpen, arrowEdge: .top) { accountPanel }
+			Spacer(minLength: 0)
+			if m.updateAvailable {
+				Button {
+					m.updateNow()
+				} label: {
+					if m.updating { ProgressView().controlSize(.mini) } else { Text("Update").font(.system(size: 11, weight: .semibold)) }
 				}
+				.buttonStyle(.borderedProminent).controlSize(.small).clipShape(Capsule())
+				.disabled(m.updating)
+				.help("Cerver \(m.updates?.latest ?? "") is out")
 			}
 		}
-		.padding(.horizontal, 14).padding(.bottom, 12)
+		.padding(.horizontal, 14).padding(.vertical, 10)
+		.overlay(alignment: .top) { Divider().padding(.horizontal, 12) }
+	}
+
+	/// What opens from your account row: how this computer is connected, and ways to disconnect.
+	var accountPanel: some View {
+		VStack(alignment: .leading, spacing: 8) {
+			Text(m.email ?? "Not signed in").font(.system(size: 13, weight: .semibold))
+			HStack(spacing: 6) {
+				Circle().fill(m.relay == .running ? Color.green : Color.secondary.opacity(0.4)).frame(width: 6, height: 6)
+				Text(m.relay == .running ? "Agents can run here" : "Agents: off here")
+			}
+			HStack(spacing: 6) {
+				Circle().fill(m.isOn ? Color.green : Color.secondary.opacity(0.4)).frame(width: 6, height: 6)
+				Text(networkLine)
+			}
+			Divider()
+			if m.isOn { Button("Leave the network") { m.turnOff(); accountOpen = false } } else { Button("Join the network") { m.turnOn(); accountOpen = false } }
+			if m.relay == .running || m.relay == .starting {
+				Button("Stop running agents here") { m.relayOff(); accountOpen = false }
+			} else {
+				Button("Let agents run here") { m.relayOn(); accountOpen = false }
+			}
+			if m.isOn && (m.relay == .running || m.relay == .starting) {
+				Button("Disconnect everything") { m.turnOff(); m.relayOff(); accountOpen = false }
+			}
+			Divider()
+			Text("Cerver " + appVersion).foregroundStyle(.secondary)
+		}
+		.font(.system(size: 12.5))
+		.buttonStyle(.link)
+		.padding(14)
+		.frame(width: 240, alignment: .leading)
 	}
 
 	var appVersion: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "" }
