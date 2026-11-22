@@ -497,6 +497,7 @@ struct Spec: Decodable {
 	let tools: [String]?
 	let coding_agents: [String]?
 	let desktop: Bool?
+	var installs_tools: Bool? = nil
 	let reported: Bool?
 
 	var system: String? {
@@ -767,7 +768,7 @@ struct MainWindow: View {
 				Section("Cerver Compute") {
 					Label("Ask your computers", systemImage: "bubble.left.and.text.bubble.right")
 						.tag(Page.session)
-					Label("Your pool", systemImage: "square.stack.3d.up")
+					Label("Your pool", systemImage: "server.rack")
 						.tag(Page.pool)
 					ForEach(m.computers.filter { !$0.isPhone }) { c in
 						sidebarRow(name: c.name, dot: c.isThisMac ? thisMacDot : computerDot(c), icon: c.icon, you: c.isThisMac)
@@ -1035,8 +1036,6 @@ struct SpecSection: View {
 			("Free disk", s.disk_free_gb.map(gb)),
 			("Graphics", (s.gpus ?? []).compactMap { g in g.name.map { n in g.memory_gb.map { "\(n), \(gb($0))" } ?? n } }.joined(separator: ", ").nilIfEmpty),
 			("Screen", s.desktop.map { $0 ? "Yes, agents can use the desktop" : "No, terminal only" }),
-			("Coding agents", (s.coding_agents ?? []).joined(separator: ", ").nilIfEmpty),
-			("Tools", (s.tools ?? []).joined(separator: ", ").nilIfEmpty),
 		].compactMap { k, v in v.map { (k, $0) } }
 		ForEach(Array(items.enumerated()), id: \.offset) { i, kv in
 			if i > 0 { Divider().padding(.leading, 16) }
@@ -1052,6 +1051,51 @@ struct SpecSection: View {
 
 extension String {
 	var nilIfEmpty: String? { isEmpty ? nil : self }
+}
+
+/// What software a computer has for agents: coding agents and tools, as its relay found them.
+struct SoftwareSection: View {
+	let spec: Spec?
+
+	static let names: [String: String] = [
+		"claude": "Claude Code", "codex": "Codex", "grok": "Grok", "gemini": "Gemini CLI", "gemma": "Gemma", "opencode": "OpenCode",
+		"git": "Git", "docker": "Docker", "ffmpeg": "FFmpeg", "node": "Node.js", "npm": "npm", "bun": "Bun", "python3": "Python",
+		"uv": "uv", "go": "Go", "cargo": "Rust (cargo)", "java": "Java", "psql": "PostgreSQL client", "kubectl": "kubectl", "gh": "GitHub CLI",
+	]
+
+	var body: some View {
+		if let s = spec {
+			group("Coding agents", "The agents Cerver can run here.", s.coding_agents ?? [])
+			group("Tools", "Programs agents can use here.", s.tools ?? [])
+			if let i = s.installs_tools {
+				Text(i ? "Agents can install more software here as they need it." : "Agents use what's installed; to add software, install it on this computer.")
+					.font(.callout).foregroundStyle(.secondary)
+			}
+		} else {
+			Text("Not reported yet. A computer tells Cerver what it has when its relay starts.")
+				.font(.callout).foregroundStyle(.secondary)
+		}
+	}
+
+	func group(_ title: String, _ note: String, _ items: [String]) -> some View {
+		VStack(alignment: .leading, spacing: 8) {
+			Text(title).font(.system(size: 15, weight: .semibold)).padding(.top, 6)
+			Text(note).font(.callout).foregroundStyle(.secondary)
+			Card {
+				if items.isEmpty {
+					Row(label: "None found") { EmptyView() }
+				} else {
+					ForEach(Array(items.enumerated()), id: \.offset) { n, t in
+						if n > 0 { Divider().padding(.leading, 16) }
+						Row(label: Self.names[t] ?? t) {
+							Text(t).font(.system(size: 12, design: .monospaced)).foregroundStyle(.tertiary)
+							Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+						}
+					}
+				}
+			}
+		}
+	}
 }
 
 /// Every computer in one table: can agents run on it, is it on the network,
@@ -1285,7 +1329,7 @@ struct PoolPage: View {
 // MARK: Tabs for a computer's page
 
 enum Tab: String, CaseIterable, Identifiable {
-	case overview = "Overview", agents = "Agents", network = "Network", hardware = "Hardware", settings = "Settings"
+	case overview = "Overview", agents = "Agents", network = "Network", software = "Software", hardware = "Hardware", settings = "Settings"
 	var id: String { rawValue }
 }
 
@@ -1322,13 +1366,14 @@ struct ThisMacPage: View {
 
 	var body: some View {
 		PageLayout(title: m.relayName, subtitle: "This Mac") {
-			Tabs(tab: $tab, tabs: [.overview, .agents, .network, .hardware])
+			Tabs(tab: $tab, tabs: [.overview, .agents, .network, .software, .hardware])
 			if case .failed(let why) = m.phase { problem(why) }
 			if case .failed(let why) = m.relay { problem(why) }
 			switch tab {
 			case .overview: overview
 			case .agents: agents
 			case .network: network
+			case .software: SoftwareSection(spec: me?.spec)
 			case .hardware: SpecSection(spec: me?.spec, showTitle: false)
 			case .settings: EmptyView()
 			}
@@ -1457,11 +1502,12 @@ struct ComputerPage: View {
 
 	var body: some View {
 		PageLayout(title: c.name, subtitle: subtitle) {
-			Tabs(tab: $tab, tabs: [.overview, .agents, .network, .hardware])
+			Tabs(tab: $tab, tabs: [.overview, .agents, .network, .software, .hardware])
 			switch tab {
 			case .overview: overview
 			case .agents: agents
 			case .network: network
+			case .software: SoftwareSection(spec: c.spec)
 			case .hardware, .settings: SpecSection(spec: c.spec, showTitle: false)
 			}
 		}
@@ -2097,7 +2143,7 @@ struct NetworkMap: View {
 					box(icon: "sparkles", title: "Agents", tint: .secondary,
 						line: running == 0 ? "none running now" : "\(running) running now")
 						.position(agents)
-					box(icon: "square.stack.3d.up.fill", title: "Your pool", tint: .secondary,
+					box(icon: "server.rack", title: "Your pool", tint: .secondary,
 						line: "\(free) free · \(busy) busy · \(pooled.count - free - busy) offline")
 						.position(compute)
 						.onTapGesture { open(.pool) }
