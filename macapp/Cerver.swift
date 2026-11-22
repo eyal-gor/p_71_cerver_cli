@@ -300,8 +300,8 @@ final class Model: ObservableObject {
 		}
 	}
 
-	func relayOn() { runRelay(["relay", "install"], doing: "Adding this Mac to your pool…") }
-	func relayOff() { runRelay(["relay", "uninstall"], doing: "Taking this Mac out of your pool…") }
+	func relayOn() { runRelay(["relay", "install"], doing: "Adding this Mac to your compute pool…") }
+	func relayOff() { runRelay(["relay", "uninstall"], doing: "Taking this Mac out of your compute pool…") }
 
 	private func runRelay(_ args: [String], doing: String) {
 		guard let bin = Bundle.main.path(forResource: "cerver", ofType: nil) else {
@@ -364,7 +364,7 @@ final class Model: ObservableObject {
 				_ = shell("curl -LsSf https://astral.sh/uv/install.sh | sh")
 			}
 			// 4. The pool.
-			await MainActor.run { self.connecting = "Joining your pool…" }
+			await MainActor.run { self.connecting = "Joining your compute pool…" }
 			let (ok, out) = runCerver(["relay", "install"])
 			await MainActor.run {
 				self.connecting = nil
@@ -776,7 +776,7 @@ struct MainWindow: View {
 				Section("Cerver Compute") {
 					Label("Ask your computers", systemImage: "bubble.left.and.text.bubble.right")
 						.tag(Page.session)
-					Label("Your pool", systemImage: "server.rack")
+					Label("Compute pool", systemImage: "server.rack")
 						.tag(Page.pool)
 					ForEach(m.computers.filter { !$0.isPhone }) { c in
 						sidebarRow(name: c.name, dot: c.isThisMac ? thisMacDot : computerDot(c), icon: c.icon, you: c.isThisMac)
@@ -888,7 +888,7 @@ struct MainWindow: View {
 			VStack(spacing: 18) {
 				Image(nsImage: logoImage(size: 56)).clipShape(RoundedRectangle(cornerRadius: 13))
 				Text("Connect this Mac to Cerver").font(.system(size: 26, weight: .semibold))
-				Text("Sign in in your browser. Then this Mac joins your pool, so agents can run on it, and your network, so your computers reach it.")
+				Text("Sign in in your browser. Then this Mac joins your compute pool, so agents can run on it, and your network, so your computers reach it.")
 					.font(.system(size: 15)).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 460)
 				Button {
 					m.connect()
@@ -1135,7 +1135,7 @@ struct PoolPage: View {
 	@State private var copied = false
 
 	var body: some View {
-		PageLayout(title: info?.name ?? "Your pool", subtitle: "Every computer your agents can run on, and who can use them.") {
+		PageLayout(title: "Compute pool", subtitle: "Every computer your agents can run on, and who can use them.") {
 			HStack {
 				Picker("", selection: $view) {
 					Text("Computers").tag("Computers")
@@ -1413,7 +1413,7 @@ struct ThisMacPage: View {
 			}
 			if let me = me, let p = me.pool {
 				Divider().padding(.leading, 16)
-				Row(label: "Others in your pool can use it") {
+				Row(label: "People you invite can use it", note: "Invited people's agents may run on it, fenced off from your files.") {
 					if let id = p.compute_id, m.sharing.contains(id) { ProgressView().controlSize(.small) }
 					Toggle("", isOn: Binding(get: { p.shared == true }, set: { m.setShared(me, $0) }))
 						.toggleStyle(.switch).labelsHidden()
@@ -1546,7 +1546,7 @@ struct ComputerPage: View {
 			}
 			if let p = c.pool {
 				Divider().padding(.leading, 16)
-				Row(label: "Others in your pool can use it") {
+				Row(label: "People you invite can use it", note: "Invited people's agents may run on it, fenced off from your files.") {
 					if let id = p.compute_id, m.sharing.contains(id) { ProgressView().controlSize(.small) }
 					Toggle("", isOn: Binding(get: { p.shared == true }, set: { m.setShared(c, $0) }))
 						.toggleStyle(.switch).labelsHidden()
@@ -1555,7 +1555,7 @@ struct ComputerPage: View {
 			}
 		}
 		if c.pool == nil {
-			Text("Not in your pool. On that computer, run the Cerver install.").font(.callout).foregroundStyle(.secondary)
+			Text("Not in your compute pool. On that computer, run the Cerver install.").font(.callout).foregroundStyle(.secondary)
 		} else if c.pool?.online == false {
 			Text("Its relay isn't running. Turn the computer on, or run the Cerver install on it again.").font(.callout).foregroundStyle(.secondary)
 		}
@@ -1598,7 +1598,7 @@ struct AddPage: View {
 				VStack(alignment: .leading, spacing: 10) {
 					Text("1.  Open a terminal on that computer and run:").font(.system(size: 14))
 					CommandBox(cmd: addDeviceCommand, m: m)
-					Text("2.  It asks for that computer's password once, then shows up in your pool within seconds.")
+					Text("2.  It asks for that computer's password once, then shows up in your compute pool within seconds.")
 						.font(.system(size: 14))
 				}
 				.padding(16)
@@ -1895,7 +1895,7 @@ struct SettingsPage: View {
 		.confirmationDialog("Remove Cerver from this Mac?", isPresented: $confirmUninstall) {
 			Button("Uninstall", role: .destructive) { m.uninstall() }
 		} message: {
-			Text("This Mac leaves your pool and network. Its sign-in, services, files and this app are deleted. You'll be asked for your password once.")
+			Text("This Mac leaves your compute pool and network. Its sign-in, services, files and this app are deleted. You'll be asked for your password once.")
 		}
 	}
 
@@ -2230,7 +2230,7 @@ struct NetworkMap: View {
 					// The three layers.
 					VStack(spacing: 0) {
 						band("CERVER AGENTS", "Agents running for you", height: band1, tint: .secondary)
-						band("CERVER COMPUTE", "Your pool: where each agent run goes", height: band2 - band1, tint: .secondary)
+						band("CERVER COMPUTE", "Compute pool: where each agent run goes", height: band2 - band1, tint: .secondary)
 						band("YOUR NETWORK", "Your computers and how they reach each other", height: height - band2, tint: .secondary)
 					}
 
@@ -2278,7 +2278,7 @@ struct NetworkMap: View {
 					box(icon: "sparkles", title: "Agents", tint: .secondary,
 						line: running == 0 ? "none running now" : "\(running) running now")
 						.position(agents)
-					box(icon: "server.rack", title: "Your pool", tint: .secondary,
+					box(icon: "server.rack", title: "Compute pool", tint: .secondary,
 						line: "\(free) free · \(busy) busy · \(pooled.count - free - busy) offline")
 						.position(compute)
 						.onTapGesture { open(.pool) }
