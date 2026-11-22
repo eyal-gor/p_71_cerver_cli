@@ -137,6 +137,13 @@ final class Model: ObservableObject {
 func shq(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
 
 func defaultName() -> String {
+	// Installed before (by the app or `sudo cerver net install --name X`): keep that name.
+	if let plist = NSDictionary(contentsOfFile: "/Library/LaunchDaemons/ai.cerver.net.plist"),
+		let args = plist["ProgramArguments"] as? [String],
+		let i = args.firstIndex(of: "--name"), i + 1 < args.count
+	{
+		return args[i + 1]
+	}
 	let raw = (Host.current().localizedName ?? ProcessInfo.processInfo.hostName).lowercased()
 	let cleaned = raw.map { $0.isLetter || $0.isNumber ? $0 : "-" }
 	let s = String(cleaned).split(separator: "-").joined(separator: "-")
