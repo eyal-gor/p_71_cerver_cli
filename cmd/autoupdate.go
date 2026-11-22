@@ -107,7 +107,12 @@ func Update(args []string) error {
 
 	// 4. The network service updates itself (it runs as admin).
 	if st.Net != nil && st.Net.Update {
-		say("network service: %s → %s within the hour (it updates itself)", st.Net.Current, st.Latest)
+		if st.Net.Current == "dev" {
+			// From before releases: it can't update itself yet. One reinstall fixes that for good.
+			say("network service: from before automatic updates; reinstall it once (admin password): sudo %s net install", cliTarget())
+		} else {
+			say("network service: %s → %s within the hour (it updates itself)", st.Net.Current, st.Latest)
+		}
 	}
 	return nil
 }
