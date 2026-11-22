@@ -12,7 +12,6 @@
 import AppKit
 import ServiceManagement
 import SwiftUI
-import CoreImage.CIFilterBuiltins
 
 let statusFile = "/var/run/cerver-net.json"
 let logFile = "/var/log/cerver-net.log"
@@ -565,8 +564,36 @@ func fetchComputers(thisMac: String, thisMacNet: String?) async -> [Computer]? {
 	}
 }
 
+/// The pool's own facts: name, invite link, people, cloud providers.
+struct PoolInfo: Decodable {
+	struct Person: Decodable { let account_id: String; let name: String?; let email: String?; let status: String? }
+	struct Provider: Decodable { let name: String; let billed_by: String? }
+	struct Cloud { let name: String; let connected: Bool; let yours: Bool }
+	let name: String?
+	let invite_url: String?
+	let people: [Person]
+	let providers: [Provider]?
+	let can_add: [String]?
+
+	/// The cloud providers you have, then the ones you can connect.
+	var cloud: [Cloud] {
+		let known = ["E2B", "Daytona", "Modal", "Vercel"]
+		var out = (providers ?? []).map { Cloud(name: $0.name, connected: true, yours: ($0.billed_by ?? "").lowercased().contains("your own")) }
+		for n in can_add ?? [] where known.contains(n) && !out.contains(where: { $0.name == n }) {
+			out.append(Cloud(name: n, connected: false, yours: false))
+		}
+		return out
+	}
+}
+
+func openWeb(_ path: String) {
+	if let u = URL(string: "https://cerver.ai" + path) { NSWorkspace.shared.open(u) }
+}
+
 /// GET from the Cerver gateway with your key from ~/.cerver/cerver.env.
-func gatewayGET(_ path: String) async -> Data? {
+func gatewayGET(_ path: String) async -> Data? { await gatewayRequest("GET", path) }
+
+func gatewayRequest(_ method: String, _ path: String) async -> Data? {
 	let envPath = NSHomeDirectory() + "/.cerver/cerver.env"
 	guard let text = try? String(contentsOfFile: envPath, encoding: .utf8) else { return nil }
 	var env: [String: String] = [:]
@@ -578,6 +605,7 @@ func gatewayGET(_ path: String) async -> Data? {
 	let base = env["CERVER_GATEWAY_URL"].flatMap { $0.isEmpty ? nil : $0 } ?? "https://gateway.cerver.ai"
 	guard let url = URL(string: base + path) else { return nil }
 	var req = URLRequest(url: url, timeoutInterval: 15)
+	req.httpMethod = method
 	req.setValue("Bearer " + key, forHTTPHeaderField: "Authorization")
 	guard let (data, resp) = try? await URLSession.shared.data(for: req), (resp as? HTTPURLResponse)?.statusCode == 200 else { return nil }
 	return data
@@ -686,14 +714,14 @@ func howConnected(_ p: NetPeer) -> String {
 // MARK: - Window (sidebar + page, in the style of the ChatGPT Mac app)
 
 enum Page: Hashable {
-	case all, thisMac, computer(String), add, settings, session
+	case map, pool, thisMac, computer(String), add, settings, session
 }
 
 struct MainWindow: View {
 	@ObservedObject var m: Model
 	@StateObject private var session = SessionModel()
 	// `-startPage thisMac` on launch opens that page (for screenshots).
-	@State private var page: Page? = ["thisMac": Page.thisMac, "add": Page.add, "settings": Page.settings, "session": Page.session][UserDefaults.standard.string(forKey: "startPage") ?? ""] ?? .all
+	@State private var page: Page? = ["thisMac": Page.thisMac, "add": Page.add, "settings": Page.settings, "session": Page.session, "pool": Page.pool][UserDefaults.standard.string(forKey: "startPage") ?? ""] ?? .map
 
 	var body: some View {
 		NavigationSplitView {
@@ -709,7 +737,7 @@ struct MainWindow: View {
 		.onChange(of: m.openSettings) { _ in page = .settings }
 		.onChange(of: m.computers.map(\.id)) { ids in
 			// The computer on screen left: go back to the list.
-			if case .computer(let id) = page, !ids.contains(id) { page = .all }
+			if case .computer(let id) = page, !ids.contains(id) { page = .pool }
 		}
 	}
 
@@ -717,32 +745,43 @@ struct MainWindow: View {
 
 	var sidebar: some View {
 		VStack(spacing: 0) {
-			HStack(spacing: 9) {
-				Image(nsImage: logoImage(size: 22))
-					.clipShape(RoundedRectangle(cornerRadius: 5))
-				Text("Cerver").font(.system(size: 15, weight: .semibold))
-				Spacer()
+			// The logo takes you to the map: the first page.
+			Button { page = .map } label: {
+				HStack(spacing: 9) {
+					Image(nsImage: logoImage(size: 22))
+						.clipShape(RoundedRectangle(cornerRadius: 5))
+					Text("Cerver").font(.system(size: 15, weight: .semibold))
+					Spacer()
+				}
+				.contentShape(Rectangle())
 			}
+			.buttonStyle(.plain)
+			.help("Map")
 			.padding(.horizontal, 16)
 			.padding(.top, 6)
 			.padding(.bottom, 10)
 
 			List(selection: $page) {
-				Label(session.started ? "Session" : "New session", systemImage: "bubble.left.and.text.bubble.right")
-					.tag(Page.session)
-				Label("All computers", systemImage: "square.grid.2x2")
-					.tag(Page.all)
-				Section("This computer (you're on it)") {
-					sidebarRow(name: m.relayName, dot: thisMacDot, icon: "laptopcomputer")
-						.tag(Page.thisMac)
+				Section("Cerver Agents") {
+					Label(session.started ? "Session" : "New session", systemImage: "bubble.left.and.text.bubble.right")
+						.tag(Page.session)
 				}
-				Section("Your computers") {
-					ForEach(m.computers.filter { !$0.isThisMac }) { c in
-						sidebarRow(name: c.name, dot: computerDot(c), icon: c.icon)
-							.tag(Page.computer(c.id))
+				Section("Cerver Compute") {
+					Label("Your pool", systemImage: "square.stack.3d.up")
+						.tag(Page.pool)
+					ForEach(m.computers.filter { !$0.isPhone }) { c in
+						sidebarRow(name: c.name, dot: c.isThisMac ? thisMacDot : computerDot(c), icon: c.icon, you: c.isThisMac)
+							.padding(.leading, 14)
+							.tag(c.isThisMac ? Page.thisMac : Page.computer(c.id))
+					}
+					if !m.computers.contains(where: { $0.isThisMac }) {
+						sidebarRow(name: m.relayName, dot: thisMacDot, icon: "laptopcomputer", you: true)
+							.padding(.leading, 14)
+							.tag(Page.thisMac)
 					}
 					Label("Add a computer", systemImage: "plus")
 						.foregroundStyle(.secondary)
+						.padding(.leading, 14)
 						.tag(Page.add)
 				}
 			}
@@ -818,10 +857,11 @@ struct MainWindow: View {
 		return Color.secondary.opacity(0.4)
 	}
 
-	func sidebarRow(name: String, dot: Color, icon: String) -> some View {
+	func sidebarRow(name: String, dot: Color, icon: String, you: Bool = false) -> some View {
 		HStack(spacing: 8) {
 			Image(systemName: icon).foregroundStyle(.secondary).frame(width: 18)
 			Text(name).lineLimit(1)
+			if you { Text("you").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary) }
 			Spacer()
 			Circle().fill(dot).frame(width: 7, height: 7)
 		}
@@ -855,11 +895,12 @@ struct MainWindow: View {
 			.padding(40)
 			.frame(maxWidth: .infinity, maxHeight: .infinity)
 		} else {
-			switch page ?? .all {
-			case .all: AllComputersPage(m: m, open: { page = $0 })
+			switch page ?? .map {
+			case .map: MapPage(m: m, open: { page = $0 })
+			case .pool: PoolPage(m: m, open: { page = $0 })
 			case .thisMac: ThisMacPage(m: m)
 			case .computer(let id):
-				if let c = m.computers.first(where: { $0.id == id }) { ComputerPage(m: m, c: c) } else { AllComputersPage(m: m, open: { page = $0 }) }
+				if let c = m.computers.first(where: { $0.id == id }) { ComputerPage(m: m, c: c) } else { PoolPage(m: m, open: { page = $0 }) }
 			case .add: AddPage(m: m)
 			case .settings: SettingsPage(m: m)
 			case .session: SessionPage(m: m, s: session)
@@ -1010,19 +1051,37 @@ extension String {
 
 /// Every computer in one table: can agents run on it, is it on the network,
 /// can people in your pool use it.
-struct AllComputersPage: View {
+/// The first page: agents on top, your pool in the middle, the network under it.
+struct MapPage: View {
 	@ObservedObject var m: Model
 	let open: (Page) -> Void
-	@State private var view = UserDefaults.standard.string(forKey: "startView") ?? "Computers"
-	@State private var help = false
 
 	var body: some View {
-		PageLayout(title: "Your computers", subtitle: "Where your agents can run.") {
+		PageLayout(title: "Map", subtitle: "Your agents, the pool they run in, and the network under it. Click anything to open it.") {
+			if m.computers.isEmpty {
+				Text(m.poolChecked ? "No computers yet." : "Loading…").foregroundStyle(.secondary)
+			} else {
+				NetworkMap(m: m, open: open)
+			}
+		}
+	}
+}
+
+/// Your pool: every computer agents can run on, and how the pool is run.
+struct PoolPage: View {
+	@ObservedObject var m: Model
+	let open: (Page) -> Void
+	@State private var view = "Computers"
+	@State private var help = false
+	@State private var info: PoolInfo?
+	@State private var copied = false
+
+	var body: some View {
+		PageLayout(title: info?.name ?? "Your pool", subtitle: "Every computer your agents can run on, and who can use them.") {
 			HStack {
 				Picker("", selection: $view) {
 					Text("Computers").tag("Computers")
 					Text("Coding agents").tag("Coding agents")
-					Text("Map").tag("Map")
 				}
 				.pickerStyle(.segmented).labelsHidden().fixedSize()
 				Spacer()
@@ -1039,8 +1098,6 @@ struct AllComputersPage: View {
 			}
 			if m.computers.isEmpty {
 				Text(m.poolChecked ? "No computers yet." : "Loading…").foregroundStyle(.secondary)
-			} else if view == "Map" {
-				NetworkMap(m: m, open: open)
 			} else if view == "Coding agents" {
 				harnessTable
 			} else {
@@ -1078,6 +1135,100 @@ struct AllComputersPage: View {
 					}
 				}
 			}
+			Button { open(.add) } label: { Label("Add a computer", systemImage: "plus") }.buttonStyle(.link)
+
+			section("Network between your computers")
+			Card {
+				Row(label: "Private network") {
+					let on = m.computers.filter { $0.net?.online == true }.count
+					Text("\(on) of \(m.computers.count) computers on it").foregroundStyle(.secondary)
+				}
+				Divider().padding(.leading, 16)
+				Row(label: "Connections") {
+					Text(connections).foregroundStyle(.secondary)
+				}
+				Divider().padding(.leading, 16)
+				Row(label: "This Mac can be reached") {
+					Toggle("", isOn: Binding(get: { m.isOn || m.phase == .starting }, set: { $0 ? m.turnOn() : m.turnOff() }))
+						.toggleStyle(.switch).labelsHidden().disabled(m.busy)
+				}
+			}
+			Text("Your computers connect directly, computer to computer, and use Cerver's backup route only when a direct connection can't be made.")
+				.font(.callout).foregroundStyle(.secondary)
+
+			section("Cloud computers")
+			Card {
+				if let i = info {
+					ForEach(Array(i.cloud.enumerated()), id: \.offset) { n, p in
+						if n > 0 { Divider().padding(.leading, 16) }
+						Row(label: p.name) {
+							Text(p.connected ? (p.yours ? "On your own account" : "Free first computers") : "Not connected").foregroundStyle(.secondary)
+							Button(p.connected && p.yours ? "Manage" : "Connect") { openWeb("/dashboard/connectors") }
+						}
+					}
+				} else {
+					Row(label: "Loading…") { ProgressView().controlSize(.small) }
+				}
+			}
+			Text("Connect your own E2B, Daytona, Modal or Vercel account and agents can start computers there. The provider bills you at its own price; Cerver adds nothing.")
+				.font(.callout).foregroundStyle(.secondary)
+
+			section("People")
+			Card {
+				if let i = info {
+					ForEach(Array(i.people.enumerated()), id: \.offset) { n, x in
+						if n > 0 { Divider().padding(.leading, 16) }
+						Row(label: x.email ?? x.name ?? "Someone") {
+							if x.status == "active" {
+								Text(n == 0 ? "Owner" : "Can run agents").foregroundStyle(.secondary)
+							} else {
+								Text("Asked to join").foregroundStyle(.orange)
+								Button("Approve") { act("POST", "/v2/pool/members/\(x.account_id)/approve") }
+							}
+						}
+					}
+					if let url = i.invite_url {
+						Divider().padding(.leading, 16)
+						Row(label: "Invite someone") {
+							Text(url).font(.system(size: 12, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+							Button(copied ? "Copied" : "Copy link") {
+								NSPasteboard.general.clearContents()
+								NSPasteboard.general.setString(url, forType: .string)
+								copied = true
+							}
+						}
+					}
+				} else {
+					Row(label: "Loading…") { ProgressView().controlSize(.small) }
+				}
+			}
+			Text("People you invite can run agents on the computers you share (Others can use it).")
+				.font(.callout).foregroundStyle(.secondary)
+		}
+		.task { await load() }
+	}
+
+	var connections: String {
+		guard m.isOn, let s = m.status else { return "This Mac is off the network" }
+		let direct = s.peers.filter { $0.connected && $0.via == "direct" }.count
+		let relayed = s.peers.filter { $0.connected && $0.via == "relay" }.count
+		if direct + relayed == 0 { return "No other computer connected" }
+		return [direct > 0 ? "\(direct) direct" : nil, relayed > 0 ? "\(relayed) via backup" : nil].compactMap { $0 }.joined(separator: " · ")
+	}
+
+	func section(_ t: String) -> some View {
+		Text(t).font(.system(size: 15, weight: .semibold)).padding(.top, 8)
+	}
+
+	func load() async {
+		if let d = await gatewayGET("/v2/pool"), let i = try? JSONDecoder().decode(PoolInfo.self, from: d) { info = i }
+	}
+
+	func act(_ method: String, _ path: String) {
+		Task {
+			_ = await gatewayRequest(method, path)
+			await load()
+			m.refreshPool(force: true)
 		}
 	}
 
@@ -1402,66 +1553,8 @@ struct AddPage: View {
 			Text("It signs in with your Cerver account, so only your computers join.")
 				.font(.callout).foregroundStyle(.secondary)
 
-			Text("Add a phone").font(.system(size: 20, weight: .semibold)).padding(.top, 14)
-			Text("Your phone joins your network with the free WireGuard app, so you can reach your computers from it (SSH, apps they serve). It connects best on the same Wi-Fi as your computers.")
-				.font(.system(size: 14)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-			HStack(spacing: 10) {
-				TextField("Name", text: $phoneName).textFieldStyle(.roundedBorder).frame(width: 160)
-				Button(making ? "Making…" : "Show QR code") { makePhone() }
-					.buttonStyle(.borderedProminent).disabled(making || cleanName(phoneName).isEmpty)
-			}
-			if let e = phoneError {
-				Text(e).font(.callout).foregroundStyle(.red).textSelection(.enabled)
-			}
-			if let qr = qr {
-				HStack(alignment: .top, spacing: 18) {
-					Image(nsImage: qr).interpolation(.none).resizable().frame(width: 220, height: 220)
-						.padding(10).background(RoundedRectangle(cornerRadius: 12).fill(.white))
-					VStack(alignment: .leading, spacing: 8) {
-						Text("1.  Install WireGuard from the App Store.")
-						Text("2.  Tap ＋, then Create from QR code, and scan this.")
-						Text("3.  Turn it on. Your phone shows up on the Map.")
-						Text("The code holds the phone's key: don't share it. It's made fresh each time and not saved.")
-							.font(.callout).foregroundStyle(.secondary).padding(.top, 4)
-					}
-					.font(.system(size: 14))
-				}
-			}
 		}
 	}
-
-	@State private var phoneName = "iphone"
-	@State private var making = false
-	@State private var qr: NSImage?
-	@State private var phoneError: String?
-
-	func makePhone() {
-		making = true
-		phoneError = nil
-		qr = nil
-		let name = cleanName(phoneName)
-		Task.detached {
-			let (ok, out) = runCerver(["net", "phone", "--config", "--name", name])
-			let img = ok ? qrImage(out) : nil
-			await MainActor.run {
-				making = false
-				if let i = img { qr = i } else { phoneError = out.trimmingCharacters(in: .whitespacesAndNewlines) }
-				m.refreshPool(force: true)
-			}
-		}
-	}
-}
-
-/// A QR code of text, as a crisp image.
-func qrImage(_ text: String) -> NSImage? {
-	let f = CIFilter.qrCodeGenerator()
-	f.message = Data(text.utf8)
-	f.correctionLevel = "L"
-	guard let out = f.outputImage?.transformed(by: CGAffineTransform(scaleX: 8, y: 8)) else { return nil }
-	let rep = NSCIImageRep(ciImage: out)
-	let img = NSImage(size: rep.size)
-	img.addRepresentation(rep)
-	return img
 }
 
 /// Settings: your account, what this computer is part of, updates, and the rest.
@@ -1949,6 +2042,7 @@ struct NetworkMap: View {
 					box(icon: "square.stack.3d.up.fill", title: "Your pool", tint: .blue,
 						line: "\(free) free · \(busy) busy · \(pooled.count - free - busy) offline")
 						.position(compute)
+						.onTapGesture { open(.pool) }
 					backupNode.position(backup)
 
 					ForEach(ordered) { c in
