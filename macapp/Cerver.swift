@@ -145,6 +145,7 @@ final class Model: ObservableObject {
 		refresh()
 		refreshRelay()
 		checkUpdates()
+		refreshAccount()
 		timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { _ in
 			Task { @MainActor in
 				self.refresh()
@@ -381,14 +382,14 @@ final class Model: ObservableObject {
 	// MARK: Versions, updates, uninstall
 
 	@Published var updates: UpdateInfo?
-	/// The account this Mac is signed in to (from ~/.cerver/cerver.env).
-	var email: String? {
-		guard let text = try? String(contentsOfFile: NSHomeDirectory() + "/.cerver/cerver.env", encoding: .utf8) else { return nil }
-		for line in text.split(separator: "\n") where line.hasPrefix("CERVER_EMAIL=") {
-			let v = line.dropFirst("CERVER_EMAIL=".count).trimmingCharacters(in: CharacterSet(charactersIn: "\"' "))
-			return v.isEmpty ? nil : v
+	/// The account this Mac is signed in to, as Cerver knows it.
+	@Published var email: String?
+	func refreshAccount() {
+		struct Account: Decodable { let email: String? }
+		Task.detached {
+			guard let d = await gatewayGET("/v2/auth/account"), let a = try? JSONDecoder().decode(Account.self, from: d) else { return }
+			await MainActor.run { self.email = a.email }
 		}
-		return nil
 	}
 	@Published var updating = false
 	@Published var updateProblem: String?
