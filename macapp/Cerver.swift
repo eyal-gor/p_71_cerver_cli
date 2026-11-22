@@ -1525,11 +1525,19 @@ struct ComputerPage: View {
 		if let n = c.net, let p = peer, p.connected {
 			HStack(spacing: 10) {
 				Button {
+					// macOS Screen Sharing, over your private network.
+					if let u = URL(string: "vnc://" + n.ip) { NSWorkspace.shared.open(u) }
+				} label: {
+					Label("View screen", systemImage: "display").padding(.horizontal, 6).padding(.vertical, 3)
+				}
+				.buttonStyle(.borderedProminent).controlSize(.large).clipShape(Capsule())
+				.help("Opens its screen in Screen Sharing. Needs Screen Sharing on in that Mac's System Settings → General → Sharing.")
+				Button {
 					openSSH(n.name)
 				} label: {
 					Label("Open SSH in Terminal", systemImage: "terminal").padding(.horizontal, 6).padding(.vertical, 3)
 				}
-				.buttonStyle(.borderedProminent).controlSize(.large).clipShape(Capsule())
+				.buttonStyle(.bordered).controlSize(.large).clipShape(Capsule())
 				Button(m.copied == n.name ? "Copied" : "Copy Name") { m.copy(n.name) }
 					.buttonStyle(.bordered).controlSize(.large).clipShape(Capsule())
 			}
