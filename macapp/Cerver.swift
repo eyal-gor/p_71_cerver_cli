@@ -322,6 +322,15 @@ final class Model: ObservableObject {
 	// MARK: Versions, updates, uninstall
 
 	@Published var updates: UpdateInfo?
+	/// The account this Mac is signed in to (from ~/.cerver/cerver.env).
+	var email: String? {
+		guard let text = try? String(contentsOfFile: NSHomeDirectory() + "/.cerver/cerver.env", encoding: .utf8) else { return nil }
+		for line in text.split(separator: "\n") where line.hasPrefix("CERVER_EMAIL=") {
+			let v = line.dropFirst("CERVER_EMAIL=".count).trimmingCharacters(in: CharacterSet(charactersIn: "\"' "))
+			return v.isEmpty ? nil : v
+		}
+		return nil
+	}
 	@Published var updating = false
 	@Published var updateProblem: String?
 	@Published var uninstalling = false
@@ -649,20 +658,6 @@ struct MainWindow: View {
 					.clipShape(RoundedRectangle(cornerRadius: 5))
 				Text("Cerver").font(.system(size: 15, weight: .semibold))
 				Spacer()
-				if m.updateAvailable {
-					Button {
-						m.updateNow()
-					} label: {
-						if m.updating {
-							ProgressView().controlSize(.mini)
-						} else {
-							Text("Update").font(.system(size: 11, weight: .semibold))
-						}
-					}
-					.buttonStyle(.borderedProminent).controlSize(.small).clipShape(Capsule())
-					.disabled(m.updating)
-					.help("A new version of Cerver is out")
-				}
 			}
 			.padding(.horizontal, 16)
 			.padding(.top, 6)
@@ -671,7 +666,7 @@ struct MainWindow: View {
 			List(selection: $page) {
 				Label("All computers", systemImage: "square.grid.2x2")
 					.tag(Page.all)
-				Section("This Mac") {
+				Section("This computer (you're on it)") {
 					sidebarRow(name: m.relayName, dot: thisMacDot, icon: "laptopcomputer")
 						.tag(Page.thisMac)
 				}
@@ -686,7 +681,68 @@ struct MainWindow: View {
 				}
 			}
 			.listStyle(.sidebar)
+			footer
 		}
+	}
+
+	/// Bottom of the sidebar: who you're signed in as, how this computer is
+	/// connected (with ways to disconnect), and the version (with Update).
+	var footer: some View {
+		VStack(alignment: .leading, spacing: 8) {
+			Divider()
+			VStack(alignment: .leading, spacing: 5) {
+				if let e = m.email {
+					Label(e, systemImage: "person.crop.circle").font(.system(size: 11.5)).lineLimit(1).truncationMode(.middle)
+				}
+				HStack(spacing: 6) {
+					Circle().fill(m.relay == .running ? Color.green : Color.secondary.opacity(0.4)).frame(width: 6, height: 6)
+					Text(m.relay == .running ? "Agents can run here" : "Agents: off here").font(.system(size: 11.5))
+				}
+				HStack(spacing: 6) {
+					Circle().fill(m.isOn ? Color.green : Color.secondary.opacity(0.4)).frame(width: 6, height: 6)
+					Text(networkLine).font(.system(size: 11.5)).lineLimit(1)
+				}
+				Menu("Disconnect") {
+					if m.isOn { Button("Leave the network") { m.turnOff() } } else { Button("Join the network") { m.turnOn() } }
+					if m.relay == .running || m.relay == .starting { Button("Stop running agents here") { m.relayOff() } } else { Button("Let agents run here") { m.relayOn() } }
+					if m.isOn && (m.relay == .running || m.relay == .starting) {
+						Divider()
+						Button("Disconnect everything") { m.turnOff(); m.relayOff() }
+					}
+				}
+				.menuStyle(.borderlessButton).fixedSize().font(.system(size: 11.5))
+			}
+			.foregroundStyle(.secondary)
+			HStack(spacing: 6) {
+				Text("Cerver " + appVersion).font(.system(size: 11)).foregroundStyle(.tertiary)
+				Spacer()
+				if m.updateAvailable {
+					Button {
+						m.updateNow()
+					} label: {
+						if m.updating { ProgressView().controlSize(.mini) } else { Text("Update").font(.system(size: 11, weight: .semibold)) }
+					}
+					.buttonStyle(.borderedProminent).controlSize(.small).clipShape(Capsule())
+					.disabled(m.updating)
+					.help("Cerver \(m.updates?.latest ?? "") is out")
+				}
+			}
+		}
+		.padding(.horizontal, 14).padding(.bottom, 12)
+	}
+
+	var appVersion: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "" }
+
+	/// "Network: direct to 2 · 1 via backup"
+	var networkLine: String {
+		guard m.isOn, let s = m.status else { return "Network: off" }
+		let direct = s.peers.filter { $0.connected && $0.via == "direct" }.count
+		let relayed = s.peers.filter { $0.connected && $0.via == "relay" }.count
+		var parts: [String] = []
+		if direct > 0 { parts.append("direct to \(direct)") }
+		if relayed > 0 { parts.append("\(relayed) via backup") }
+		if parts.isEmpty { parts.append("on, no one else yet") }
+		return "Network: " + parts.joined(separator: " · ")
 	}
 
 	/// Green when everything you turned on is working, orange while starting, gray when all off.
@@ -1485,24 +1541,29 @@ struct CerverApp: App {
 
 // MARK: Network map
 
-/// A picture of your network: your computers along the bottom, Cerver above.
-/// Green between two computers: they talk directly. Orange dashed through
-/// the backup relay: they talk through Cerver. Grey from a computer up to
-/// Cerver: its agents connection (where agent runs arrive).
+/// Your setup in three layers, top to bottom:
+///   Cerver Agents   the agents running for you right now
+///   Cerver Compute  your pool: where Cerver sends each agent run (through each computer's relay)
+///   Your network    your computers and phones, and how they reach each other
 struct NetworkMap: View {
 	@ObservedObject var m: Model
 	let open: (Page) -> Void
 
-	let height: CGFloat = 400
+	let height: CGFloat = 560
+	let agentsY: CGFloat = 62, computeY: CGFloat = 188, nodesY: CGFloat = 420
+	let band1: CGFloat = 120, band2: CGFloat = 255  // where each layer ends
 
 	var me: Computer? { m.computers.first { $0.isThisMac } }
 	var others: [Computer] { m.computers.filter { !$0.isThisMac } }
-	/// This Mac in the middle, the others around it.
 	var ordered: [Computer] {
 		var o = others
 		if let me = me { o.insert(me, at: o.count / 2) }
 		return o
 	}
+	var pooled: [Computer] { m.computers.filter { $0.pool != nil } }
+	var running: Int { pooled.reduce(0) { $0 + ($1.pool?.running ?? 0) } }
+	var free: Int { pooled.filter { $0.pool?.state == "free" }.count }
+	var busy: Int { pooled.filter { $0.pool?.state == "busy" }.count }
 
 	func peer(_ c: Computer) -> NetPeer? { m.status?.peers.first { $0.ip == c.net?.ip } }
 
@@ -1510,44 +1571,54 @@ struct NetworkMap: View {
 		VStack(alignment: .leading, spacing: 12) {
 			GeometryReader { g in
 				let w = g.size.width
-				let cloud = CGPoint(x: w / 2, y: 62)
-				let agentsPort = CGPoint(x: cloud.x - 70, y: cloud.y + 34)
-				let relayPort = CGPoint(x: cloud.x + 70, y: cloud.y + 34)
-				let row: CGFloat = 270
+				let agents = CGPoint(x: w / 2, y: agentsY)
+				let compute = CGPoint(x: w / 2, y: computeY)
+				let backup = CGPoint(x: w - 92, y: band2 + 44)
 				let pos: [String: CGPoint] = Dictionary(uniqueKeysWithValues: ordered.enumerated().map { i, c in
-					(c.id, CGPoint(x: w * CGFloat(i + 1) / CGFloat(ordered.count + 1), y: row))
+					(c.id, CGPoint(x: (w - 60) * CGFloat(i + 1) / CGFloat(ordered.count + 1) + 10, y: nodesY))
 				})
 				ZStack {
+					// The three layers.
+					VStack(spacing: 0) {
+						band("CERVER AGENTS", "Agents running for you", height: band1, tint: .purple)
+						band("CERVER COMPUTE", "Your pool: where each agent run goes", height: band2 - band1, tint: .blue)
+						band("YOUR NETWORK", "Your computers and how they reach each other", height: height - band2, tint: .green)
+					}
+
 					Canvas { ctx, _ in
-						// Agents connection: every computer up to Cerver.
+						// Agents → Compute
+						var a = Path()
+						a.move(to: CGPoint(x: agents.x, y: agents.y + 26))
+						a.addLine(to: CGPoint(x: compute.x, y: compute.y - 30))
+						ctx.stroke(a, with: .color(.purple.opacity(0.6)), style: StrokeStyle(lineWidth: 2, dash: running > 0 ? [] : [4, 4]))
+						// Compute → each computer's relay
 						for c in ordered {
-							guard let p = pos[c.id], c.pool != nil else { continue }
+							guard let p = pos[c.id], let pool = c.pool else { continue }
 							var path = Path()
-							path.move(to: CGPoint(x: p.x, y: p.y - 44))
-							path.addQuadCurve(to: agentsPort, control: CGPoint(x: p.x, y: agentsPort.y + 40))
-							let on = c.pool?.online == true
-							ctx.stroke(path, with: .color(on ? Color.secondary.opacity(0.55) : Color.secondary.opacity(0.25)),
-								style: StrokeStyle(lineWidth: 1.5, dash: on ? [] : [3, 4]))
+							path.move(to: CGPoint(x: compute.x, y: compute.y + 30))
+							path.addCurve(to: CGPoint(x: p.x, y: p.y - 46),
+								control1: CGPoint(x: compute.x, y: compute.y + 110), control2: CGPoint(x: p.x, y: p.y - 140))
+							ctx.stroke(path, with: .color(pool.online ? Color.blue.opacity(0.55) : Color.secondary.opacity(0.3)),
+								style: StrokeStyle(lineWidth: 1.5, dash: pool.online ? [] : [3, 4]))
 						}
 						guard let me = me, let mp = pos[me.id] else { return }
-						// This Mac's line to the backup relay (standing by, or carrying traffic).
+						// This computer's standby line to the network backup.
 						if m.status?.relay_connected == true {
 							var path = Path()
-							path.move(to: CGPoint(x: mp.x + 20, y: mp.y - 44))
-							path.addQuadCurve(to: relayPort, control: CGPoint(x: mp.x + 20, y: relayPort.y + 40))
+							path.move(to: CGPoint(x: mp.x + 40, y: mp.y - 46))
+							path.addQuadCurve(to: CGPoint(x: backup.x - 60, y: backup.y + 8), control: CGPoint(x: mp.x + 60, y: backup.y + 20))
 							ctx.stroke(path, with: .color(.orange.opacity(0.5)), style: StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
 						}
-						// Each computer this Mac talks to on the network.
 						for c in others {
 							guard let p = pos[c.id], let pr = peer(c), pr.connected else { continue }
 							if pr.via == "relay" {
 								var path = Path()
-								path.move(to: CGPoint(x: p.x, y: p.y - 44))
-								path.addQuadCurve(to: relayPort, control: CGPoint(x: p.x, y: relayPort.y + 40))
+								path.move(to: CGPoint(x: p.x, y: p.y - 46))
+								path.addQuadCurve(to: CGPoint(x: backup.x, y: backup.y + 16), control: CGPoint(x: p.x, y: backup.y + 40))
 								ctx.stroke(path, with: .color(.orange), style: StrokeStyle(lineWidth: 2.5, dash: [6, 4]))
 							} else {
 								var path = Path()
-								let a = CGPoint(x: mp.x, y: mp.y + 44), b = CGPoint(x: p.x, y: p.y + 44)
+								let a = CGPoint(x: mp.x, y: mp.y + 46), b = CGPoint(x: p.x, y: p.y + 46)
 								path.move(to: a)
 								path.addQuadCurve(to: b, control: CGPoint(x: (a.x + b.x) / 2, y: a.y + 70))
 								ctx.stroke(path, with: .color(.green), style: StrokeStyle(lineWidth: 3, lineCap: .round))
@@ -1555,7 +1626,13 @@ struct NetworkMap: View {
 						}
 					}
 
-					cloudNode.position(cloud)
+					box(icon: "sparkles", title: "Agents", tint: .purple,
+						line: running == 0 ? "none running now" : "\(running) running now")
+						.position(agents)
+					box(icon: "square.stack.3d.up.fill", title: "Your pool", tint: .blue,
+						line: "\(free) free · \(busy) busy · \(pooled.count - free - busy) offline")
+						.position(compute)
+					backupNode.position(backup)
 
 					ForEach(ordered) { c in
 						if let p = pos[c.id] {
@@ -1563,70 +1640,80 @@ struct NetworkMap: View {
 								.onTapGesture { open(c.isThisMac ? .thisMac : .computer(c.id)) }
 						}
 					}
-
-					// Labels on the direct links.
 					if let me = me, let mp = pos[me.id] {
 						ForEach(others) { c in
 							if let p = pos[c.id], let pr = peer(c), pr.connected, pr.via != "relay" {
 								Text("direct").font(.system(size: 11, weight: .semibold)).foregroundStyle(.green)
 									.padding(.horizontal, 6).padding(.vertical, 1)
 									.background(Capsule().fill(Color(nsColor: .windowBackgroundColor)))
-									.position(x: (mp.x + p.x) / 2, y: row + 44 + 35)
+									.position(x: (mp.x + p.x) / 2, y: nodesY + 46 + 35)
 							}
 						}
 					}
 				}
 			}
 			.frame(height: height)
-			.background(RoundedRectangle(cornerRadius: 14).fill(Color(nsColor: .controlBackgroundColor)))
+			.clipShape(RoundedRectangle(cornerRadius: 14))
 			.overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.08)))
 
-			HStack(spacing: 18) {
-				key(Color.green, solid: true, "Direct")
-				key(Color.orange, solid: false, "Through network backup")
-				key(Color.secondary, solid: true, "Relay ↔ Cerver")
+			HStack(spacing: 16) {
+				key(.purple, solid: true, "Agent runs")
+				key(.blue, solid: true, "Relay ↔ pool")
+				key(.green, solid: true, "Direct")
+				key(.orange, solid: false, "Network backup")
 			}
-			Text("Lines show what this Mac sees. Click a computer to open it.")
+			Text("Network lines show what this computer sees. Click a computer to open it.")
 				.font(.callout).foregroundStyle(.secondary)
 		}
 	}
 
-	var cloudNode: some View {
-		VStack(spacing: 6) {
-			HStack(spacing: 6) {
-				Image(systemName: "cloud.fill").foregroundStyle(.blue)
-				Text("Cerver").font(.system(size: 14, weight: .semibold))
+	func band(_ title: String, _ sub: String, height: CGFloat, tint: Color) -> some View {
+		ZStack(alignment: .topLeading) {
+			Rectangle().fill(tint.opacity(0.045))
+			VStack(alignment: .leading, spacing: 1) {
+				Text(title).font(.system(size: 10.5, weight: .bold)).tracking(0.8).foregroundStyle(tint.opacity(0.85))
+				Text(sub).font(.system(size: 10.5)).foregroundStyle(.secondary)
 			}
-			HStack(spacing: 8) {
-				chip("Agent runs", "bolt.horizontal.fill", .secondary)
-				chip(m.status?.relay_connected == true ? "Network backup · ready" : "Network backup", "arrow.triangle.branch", .orange)
-			}
+			.padding(.leading, 12).padding(.top, 9)
+			VStack { Spacer(); Divider() }
 		}
-		.padding(.horizontal, 12).padding(.vertical, 9)
-		.background(RoundedRectangle(cornerRadius: 12).fill(Color(nsColor: .windowBackgroundColor)))
-		.overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.blue.opacity(0.35)))
+		.frame(height: height)
 	}
 
-	func chip(_ t: String, _ icon: String, _ color: Color) -> some View {
-		HStack(spacing: 4) {
-			Image(systemName: icon).font(.system(size: 10))
-			Text(t).font(.system(size: 11))
+	func box(icon: String, title: String, tint: Color, line: String) -> some View {
+		VStack(spacing: 3) {
+			HStack(spacing: 6) {
+				Image(systemName: icon).foregroundStyle(tint)
+				Text(title).font(.system(size: 13.5, weight: .semibold))
+			}
+			Text(line).font(.system(size: 11)).foregroundStyle(.secondary)
 		}
-		.foregroundStyle(color)
-		.padding(.horizontal, 7).padding(.vertical, 2)
-		.background(Capsule().fill(color.opacity(0.1)))
+		.padding(.horizontal, 14).padding(.vertical, 8)
+		.background(RoundedRectangle(cornerRadius: 12).fill(Color(nsColor: .windowBackgroundColor)))
+		.overlay(RoundedRectangle(cornerRadius: 12).stroke(tint.opacity(0.4)))
+	}
+
+	var backupNode: some View {
+		HStack(spacing: 5) {
+			Image(systemName: "cloud.fill").font(.system(size: 11)).foregroundStyle(.orange)
+			VStack(alignment: .leading, spacing: 0) {
+				Text("Network backup").font(.system(size: 11, weight: .semibold))
+				Text(m.status?.relay_connected == true ? "ready, on standby" : "not connected").font(.system(size: 10)).foregroundStyle(.secondary)
+			}
+		}
+		.padding(.horizontal, 9).padding(.vertical, 5)
+		.background(RoundedRectangle(cornerRadius: 10).fill(Color(nsColor: .windowBackgroundColor)))
+		.overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.orange.opacity(0.4)))
 	}
 
 	func node(_ c: Computer) -> some View {
 		let relayOn = c.pool?.online == true
-		let netOn = c.net?.online == true || peer(c)?.connected == true  // a phone never checks in; this Mac sees it
+		let netOn = c.net?.online == true || peer(c)?.connected == true  // a phone never checks in; this computer sees it
 		return VStack(spacing: 4) {
 			HStack(spacing: 5) {
-				Image(systemName: c.icon).font(.system(size: 13))
-					.foregroundStyle(.secondary)
+				Image(systemName: c.icon).font(.system(size: 13)).foregroundStyle(.secondary)
 				Text(c.name).font(.system(size: 12.5, weight: .semibold)).lineLimit(1)
 			}
-			// The two programs that run on it.
 			if c.isPhone {
 				program("Relay", "none (a phone)", .gray)
 			} else {
@@ -1637,7 +1724,15 @@ struct NetworkMap: View {
 		.padding(.horizontal, 8)
 		.frame(width: 170, height: 86)
 		.background(RoundedRectangle(cornerRadius: 12).fill(Color(nsColor: .windowBackgroundColor)))
-		.overlay(RoundedRectangle(cornerRadius: 12).stroke(c.isThisMac ? Color.accentColor.opacity(0.6) : Color.primary.opacity(0.12), lineWidth: c.isThisMac ? 1.5 : 1))
+		.overlay(RoundedRectangle(cornerRadius: 12).stroke(c.isThisMac ? Color.accentColor : Color.primary.opacity(0.12), lineWidth: c.isThisMac ? 2 : 1))
+		.overlay(alignment: .top) {
+			if c.isThisMac {
+				Text("THIS COMPUTER").font(.system(size: 9.5, weight: .bold)).tracking(0.6).foregroundStyle(.white)
+					.padding(.horizontal, 7).padding(.vertical, 2)
+					.background(Capsule().fill(Color.accentColor))
+					.offset(y: -9)
+			}
+		}
 		.contentShape(Rectangle())
 	}
 
