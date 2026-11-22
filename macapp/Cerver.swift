@@ -1803,19 +1803,6 @@ struct SettingsPage: View {
 
 	var body: some View {
 		PageLayout(title: "Settings", subtitle: m.email.map { "Signed in as " + $0 } ?? "Not signed in") {
-			Text("This computer").font(.system(size: 15, weight: .semibold))
-			Card {
-				Row(label: "Agents can run here", note: "Your agents may run on it, as you.") {
-					Toggle("", isOn: Binding(get: { m.relay == .running || m.relay == .starting }, set: { $0 ? m.relayOn() : m.relayOff() }))
-						.toggleStyle(.switch).labelsHidden()
-				}
-				Divider().padding(.leading, 16)
-				Row(label: "Your computers can reach it", note: "Your other computers can connect to it privately.") {
-					Text(m.isOn ? networkSummary : "Off").font(.callout).foregroundStyle(.secondary)
-					Toggle("", isOn: Binding(get: { m.isOn || m.phase == .starting }, set: { $0 ? m.turnOn() : m.turnOff() }))
-						.toggleStyle(.switch).labelsHidden().disabled(m.busy)
-				}
-			}
 			rest
 		}
 	}
@@ -1875,7 +1862,7 @@ struct SettingsPage: View {
 			problem(p)
 		}
 
-		Text("This Mac").font(.system(size: 15, weight: .semibold)).padding(.top, 6)
+		Text("General").font(.system(size: 15, weight: .semibold)).padding(.top, 6)
 		Card {
 			Row(label: "Open Cerver at login") {
 				Toggle("", isOn: Binding(get: { m.openAtLogin }, set: { m.setOpenAtLogin($0) }))
