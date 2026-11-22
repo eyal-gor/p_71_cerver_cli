@@ -1208,23 +1208,6 @@ struct PoolPage: View {
 			Text("Your computers connect directly, computer to computer, and use Cerver's backup route only when a direct connection can't be made.")
 				.font(.callout).foregroundStyle(.secondary)
 
-			section("Cloud computers")
-			Card {
-				if let i = info {
-					ForEach(Array(i.cloud.enumerated()), id: \.offset) { n, p in
-						if n > 0 { Divider().padding(.leading, 16) }
-						Row(label: p.name) {
-							Text(p.connected ? (p.yours ? "On your own account" : "Free first computers") : "Not connected").foregroundStyle(.secondary)
-							Button(p.connected && p.yours ? "Manage" : "Connect") { openWeb("/dashboard/connectors") }
-						}
-					}
-				} else {
-					Row(label: "Loading…") { ProgressView().controlSize(.small) }
-				}
-			}
-			Text("Connect your own E2B, Daytona, Modal or Vercel account and agents can start computers there. The provider bills you at its own price; Cerver adds nothing.")
-				.font(.callout).foregroundStyle(.secondary)
-
 			section("People")
 			Card {
 				if let i = info {
@@ -1603,18 +1586,69 @@ struct ComputerPage: View {
 
 struct AddPage: View {
 	@ObservedObject var m: Model
-	var body: some View {
-		PageLayout(title: "Add a computer", subtitle: "Any Mac or Linux computer, at home, at work or in the cloud.") {
-			VStack(alignment: .leading, spacing: 10) {
-				Text("1.  Open a terminal on that computer and run:").font(.system(size: 14))
-				CommandBox(cmd: addDeviceCommand, m: m)
-			}
-			Text("2.  It asks for that computer's password once, then shows up here within a few seconds. Reach it by its name.")
-				.font(.system(size: 14))
-			Text("It signs in with your Cerver account, so only your computers join.")
-				.font(.callout).foregroundStyle(.secondary)
+	@State private var info: PoolInfo?
 
+	var body: some View {
+		PageLayout(title: "Add a computer", subtitle: "Your own computer, or computers from a cloud provider.") {
+			Text("Your own computer").font(.system(size: 17, weight: .semibold))
+			Text("Private. A Mac or Linux computer you own, at home, at work or a server you rent.")
+				.font(.callout).foregroundStyle(.secondary)
+			Card {
+				VStack(alignment: .leading, spacing: 10) {
+					Text("1.  Open a terminal on that computer and run:").font(.system(size: 14))
+					CommandBox(cmd: addDeviceCommand, m: m)
+					Text("2.  It asks for that computer's password once, then shows up in your pool within seconds.")
+						.font(.system(size: 14))
+				}
+				.padding(16)
+			}
+
+			Text("Cloud computers").font(.system(size: 17, weight: .semibold)).padding(.top, 10)
+			Text("Public. Agents start a fresh computer at a provider when they need one. Connect your own account and the provider bills you at its price; Cerver adds nothing.")
+				.font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+			LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
+				ForEach(clouds, id: \.name) { p in vendor(p) }
+			}
 		}
+		.task {
+			if let d = await gatewayGET("/v2/pool"), let i = try? JSONDecoder().decode(PoolInfo.self, from: d) { info = i }
+		}
+	}
+
+	var clouds: [PoolInfo.Cloud] {
+		let order = ["E2B", "Daytona", "Modal", "Vercel"]
+		var list = info?.cloud ?? []
+		for n in order where !list.contains(where: { $0.name == n }) {
+			list.append(PoolInfo.Cloud(name: n, connected: false, yours: false))
+		}
+		return list.sorted { (order.firstIndex(of: $0.name) ?? 9) < (order.firstIndex(of: $1.name) ?? 9) }
+	}
+
+	func vendor(_ p: PoolInfo.Cloud) -> some View {
+		VStack(alignment: .leading, spacing: 10) {
+			HStack(spacing: 10) {
+				vendorLogo(p.name).frame(width: 30, height: 30).clipShape(RoundedRectangle(cornerRadius: 7))
+				Text(p.name).font(.system(size: 15, weight: .semibold))
+				Spacer()
+			}
+			Text(p.connected ? (p.yours ? "On your own account" : "Free first computers, on Cerver") : "Not connected")
+				.font(.system(size: 12)).foregroundStyle(.secondary)
+			Button(p.connected && p.yours ? "Manage" : (p.connected ? "Use my account" : "Connect")) { openWeb("/dashboard/connectors") }
+				.buttonStyle(.bordered)
+		}
+		.padding(14)
+		.frame(maxWidth: .infinity, alignment: .leading)
+		.background(RoundedRectangle(cornerRadius: 12).fill(Color(nsColor: .controlBackgroundColor)))
+		.overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.08)))
+	}
+}
+
+/// A cloud provider's logo, bundled with the app.
+@ViewBuilder func vendorLogo(_ name: String) -> some View {
+	if let path = Bundle.main.path(forResource: name.lowercased(), ofType: "png"), let img = NSImage(contentsOfFile: path) {
+		Image(nsImage: img).resizable().interpolation(.high).aspectRatio(contentMode: .fit)
+	} else {
+		Image(systemName: "cloud").resizable().aspectRatio(contentMode: .fit).foregroundStyle(.secondary)
 	}
 }
 

@@ -18,6 +18,7 @@ LDFLAGS="-X github.com/eyal-gor/p_71_cerver_cli/internal/version.Version=${VERSI
 swift make-icon.swift build/AppIcon.iconset
 iconutil -c icns build/AppIcon.iconset -o "$APP/Contents/Resources/AppIcon.icns"
 rm -rf build/AppIcon.iconset
+cp logos/*.png "$APP/Contents/Resources/"
 
 for arch in arm64 x86_64; do
 	swiftc -parse-as-library -O -target "$arch-apple-macos13.0" Cerver.swift -o "build/app-$arch"
