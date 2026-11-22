@@ -2433,6 +2433,12 @@ struct NetworkMap: View {
 								.onTapGesture { open(.connectors) }
 						}
 					}
+					Button { open(.connectors) } label: {
+						Label("Connect apps", systemImage: "plus")
+							.font(.system(size: 11.5, weight: .medium))
+					}
+					.buttonStyle(.bordered).controlSize(.small)
+					.position(x: w - 70, y: 22)
 					box(icon: "sparkles", title: "Agents", tint: .secondary,
 						line: running == 0 ? "none running now" : "\(running) running now")
 						.position(agents)
