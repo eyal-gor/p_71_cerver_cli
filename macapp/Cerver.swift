@@ -1,4 +1,4 @@
-// Cerver Net — the Mac app for `cerver net`.
+// Cerver — the Mac app. For now it connects this Mac to your other computers (`cerver net`).
 //
 // It doesn't run the network itself: the system service (launchd
 // ai.cerver.net, the bundled `cerver` binary) does. The app turns that
@@ -7,7 +7,7 @@
 // rewrites every few seconds.
 //
 // A window (opens at launch and from the menu bar) and a menu bar icon.
-// Build: ./build.sh  →  build/Cerver Net.app
+// Build: ./build.sh  →  build/Cerver.app
 
 import AppKit
 import ServiceManagement
@@ -135,7 +135,7 @@ final class Model: ObservableObject {
 		}
 		if let n = name { deviceName = n }
 		let cmd = "SUDO_USER=\(shq(NSUserName())) \(shq(bin)) net install --name \(shq(deviceName))"
-		runAsAdmin(cmd, doing: name == nil ? "Turning on…" : "Renaming…") { ok in
+		runAsAdmin(cmd, doing: name == nil ? "Connecting…" : "Renaming…") { ok in
 			if ok { self.wantOnUntil = Date().addingTimeInterval(45) }
 		}
 	}
@@ -143,7 +143,7 @@ final class Model: ObservableObject {
 	func turnOff() {
 		let bin = FileManager.default.fileExists(atPath: "/usr/local/lib/cerver/cerver")
 			? "/usr/local/lib/cerver/cerver" : (Bundle.main.path(forResource: "cerver", ofType: nil) ?? "")
-		runAsAdmin("SUDO_USER=\(shq(NSUserName())) \(shq(bin)) net uninstall", doing: "Turning off…") { _ in }
+		runAsAdmin("SUDO_USER=\(shq(NSUserName())) \(shq(bin)) net uninstall", doing: "Disconnecting…") { _ in }
 	}
 
 	/// Runs a shell command as admin through the standard macOS password prompt.
@@ -261,7 +261,7 @@ struct MainWindow: View {
 			Image(nsImage: logoImage(size: 28, gray: !m.isOn))
 				.clipShape(RoundedRectangle(cornerRadius: 6))
 			VStack(alignment: .leading, spacing: 2) {
-				Text("Cerver Net").font(.title2.weight(.semibold))
+				Text("Cerver").font(.title2.weight(.semibold))
 				Text(subtitle).font(.callout).foregroundStyle(.secondary)
 			}
 			Spacer()
@@ -281,11 +281,11 @@ struct MainWindow: View {
 	var subtitle: String {
 		switch m.phase {
 		case .notSignedIn: return "Sign in to Cerver first"
-		case .off: return "Off. Your devices can't reach this Mac."
+		case .off: return "Not connected. Your other computers can't reach this Mac."
 		case .starting: return "Starting…"
 		case .working(let w): return w
 		case .failed: return "Something went wrong"
-		case .on: return "On. Your devices can reach this Mac."
+		case .on: return "Connected. Your other computers can reach this Mac."
 		}
 	}
 
@@ -296,7 +296,7 @@ struct MainWindow: View {
 		}
 		switch m.phase {
 		case .notSignedIn:
-			Text("Cerver Net connects your computers into one private network, so you can reach any of them by name from anywhere.")
+			Text("Cerver connects your computers into one private network, so you can reach any of them by name from anywhere.")
 			Text("To start, install Cerver on this Mac and sign in:")
 			commandBox("curl -fsSL https://cerver.ai/install.sh | sh")
 			Text("Then come back here and turn it on.").foregroundStyle(.secondary)
@@ -306,10 +306,10 @@ struct MainWindow: View {
 				devices(s)
 			}
 		default:
-			Text("Cerver Net connects your computers into one private network, so you can reach any of them by name from anywhere, at home or away.")
-			Text("Turn it on to join this Mac. macOS will ask for your password once.")
+			Text("Cerver connects your computers into one private network, so you can reach any of them by name from anywhere, at home or away.")
+			Text("Connect this Mac to start. macOS will ask for your password once.")
 				.foregroundStyle(.secondary)
-			Button("Turn On") { m.turnOn() }
+			Button("Connect This Mac") { m.turnOn() }
 				.buttonStyle(.borderedProminent)
 				.disabled(m.busy)
 		}
@@ -357,10 +357,10 @@ struct MainWindow: View {
 	}
 
 	@ViewBuilder func devices(_ s: NetStatus) -> some View {
-		Text("Your other devices").font(.headline)
+		Text("Your other computers").font(.headline)
 		if s.peers.isEmpty {
 			VStack(alignment: .leading, spacing: 8) {
-				Text("No other devices yet. To add a computer (Mac or Linux), run this on it:")
+				Text("No other computers yet. To add one (Mac or Linux), run this on it:")
 					.foregroundStyle(.secondary)
 				commandBox(addDeviceCommand)
 			}
@@ -420,7 +420,7 @@ struct MenuView: View {
 			if let s = m.status {
 				Text("This Mac: \(s.name) · \(s.ip)")
 				if s.peers.isEmpty {
-					Text("No other devices yet")
+					Text("No other computers yet")
 				}
 				ForEach(s.peers) { p in
 					Menu("\(p.connected ? "●" : "○")  \(p.name)   \(howConnected(p))") {
@@ -430,20 +430,20 @@ struct MenuView: View {
 					}
 				}
 				Divider()
-				Button("Turn Off") { m.turnOff() }
+				Button("Disconnect This Mac") { m.turnOff() }
 			}
 		case .off, .failed:
-			Text("Cerver Net is off")
-			Button("Turn On") { m.turnOn() }
+			Text("This Mac isn’t connected")
+			Button("Connect This Mac") { m.turnOn() }
 		case .notSignedIn:
-			Text("Cerver Net: sign in first")
+			Text("Cerver: sign in first")
 		case .starting:
 			Text("Starting…")
 		case .working(let what):
 			Text(what)
 		}
 		Divider()
-		Button("Open Cerver Net…") { show() }
+		Button("Open Cerver…") { show() }
 		Button("Show Log") { NSWorkspace.shared.open(URL(fileURLWithPath: logFile)) }
 		Toggle("Open at Login", isOn: Binding(get: { m.openAtLogin }, set: { m.setOpenAtLogin($0) }))
 		Button("Quit") { NSApp.terminate(nil) }
@@ -456,11 +456,11 @@ struct MenuView: View {
 }
 
 @main
-struct CerverNetApp: App {
+struct CerverApp: App {
 	@StateObject private var m = Model()
 
 	var body: some Scene {
-		Window("Cerver Net", id: "main") {
+		Window("Cerver", id: "main") {
 			MainWindow(m: m)
 				.onAppear { NSApp.activate(ignoringOtherApps: true) }
 		}

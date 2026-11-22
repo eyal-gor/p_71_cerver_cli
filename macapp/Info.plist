@@ -3,13 +3,13 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleName</key>
-	<string>Cerver Net</string>
+	<string>Cerver</string>
 	<key>CFBundleDisplayName</key>
-	<string>Cerver Net</string>
+	<string>Cerver</string>
 	<key>CFBundleIdentifier</key>
-	<string>ai.cerver.net.app</string>
+	<string>ai.cerver.app</string>
 	<key>CFBundleExecutable</key>
-	<string>CerverNet</string>
+	<string>Cerver</string>
 	<key>CFBundleIconFile</key>
 	<string>AppIcon</string>
 	<key>CFBundlePackageType</key>
