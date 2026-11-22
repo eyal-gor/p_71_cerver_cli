@@ -764,11 +764,9 @@ struct MainWindow: View {
 			List(selection: $page) {
 				Label("Map", systemImage: "map")
 					.tag(Page.map)
-				Section("Cerver Agents") {
-					Label(session.started ? "Session" : "New session", systemImage: "bubble.left.and.text.bubble.right")
-						.tag(Page.session)
-				}
 				Section("Cerver Compute") {
+					Label("Ask your computers", systemImage: "bubble.left.and.text.bubble.right")
+						.tag(Page.session)
 					Label("Your pool", systemImage: "square.stack.3d.up")
 						.tag(Page.pool)
 					ForEach(m.computers.filter { !$0.isPhone }) { c in
@@ -1781,7 +1779,7 @@ struct SessionPage: View {
 
 	var header: some View {
 		HStack(spacing: 12) {
-			Text(s.started ? "Session" : "New session").font(.system(size: 17, weight: .semibold))
+			Text("Ask your computers").font(.system(size: 17, weight: .semibold))
 			Spacer()
 			// Where it runs and which agent: chosen before the first message.
 			Menu {
@@ -1798,7 +1796,7 @@ struct SessionPage: View {
 			}
 			.pickerStyle(.segmented).labelsHidden().fixedSize().disabled(s.started)
 			if s.started {
-				Button("New session") { s.reset(); draft = "" }.disabled(s.working)
+				Button("Start over") { s.reset(); draft = "" }.disabled(s.working)
 			}
 		}
 		.padding(.horizontal, 24).padding(.top, 40).padding(.bottom, 12)
@@ -1806,8 +1804,8 @@ struct SessionPage: View {
 
 	var empty: some View {
 		VStack(alignment: .leading, spacing: 8) {
-			Text("What should the agent do?").font(.system(size: 22, weight: .semibold))
-			Text("It runs on \(target?.name ?? "one of your computers"), as you, with that computer's files and your \(s.cli == "codex" ? "Codex" : "Claude") login. Cerver records the session.")
+			Text("Ask \(target?.name ?? "your computer") anything").font(.system(size: 22, weight: .semibold))
+			Text("An agent (\(s.cli == "codex" ? "Codex" : "Claude"), with your login) answers on that computer, as you, so it can look and act there. Try: what's using the disk? · is Node installed? · update Homebrew.")
 				.foregroundStyle(.secondary)
 		}
 		.padding(.top, 30)
@@ -1834,7 +1832,7 @@ struct SessionPage: View {
 
 	var composer: some View {
 		HStack(alignment: .bottom, spacing: 10) {
-			TextField(target == nil ? "No computer is ready for agents" : "Message the agent…", text: $draft, axis: .vertical)
+			TextField(target == nil ? "No computer is ready" : "Ask \(target?.name ?? "it")…", text: $draft, axis: .vertical)
 				.textFieldStyle(.plain)
 				.lineLimit(1...8)
 				.focused($focused)
