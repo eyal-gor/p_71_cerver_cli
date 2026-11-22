@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -191,6 +192,8 @@ func netUp(args []string) error {
 	}
 	updateNames(*name, node)
 	defer wgnet.WriteHosts(hostsFile, "")
+	writeNetStatus(*name, ip, false, node.Status())
+	defer os.Remove(netStatusFile)
 	fmt.Printf("%s is on your Cerver network at %s (interface %s). Ctrl-C to leave.\n", *name, ip, ifname)
 	if len(node.Answer.Peers) == 0 {
 		fmt.Println("No other devices yet. Run `sudo cerver net up` on another one.")
@@ -226,6 +229,7 @@ func netUp(args []string) error {
 			}
 		case <-retry.C:
 			node.Retry()
+			writeNetStatus(*name, ip, relay.Connected(), node.Status())
 		case <-report.C:
 			for _, s := range node.Status() {
 				if !s.Connected {
@@ -237,6 +241,44 @@ func netUp(args []string) error {
 }
 
 const hostsFile = "/etc/hosts"
+
+// netStatusFile is what a running device is doing, for the menu bar app
+// (which can't ask the root service directly). Readable by everyone; holds
+// names and addresses only, no keys.
+const netStatusFile = "/var/run/cerver-net.json"
+
+type netStatusPeer struct {
+	Name      string `json:"name"`
+	IP        string `json:"ip"`
+	Connected bool   `json:"connected"`
+	Via       string `json:"via"` // "direct", "relay" or ""
+}
+
+func writeNetStatus(name, ip string, relayUp bool, peers []wgnet.PeerStatus) {
+	st := struct {
+		Name    string          `json:"name"`
+		IP      string          `json:"ip"`
+		Relay   bool            `json:"relay_connected"`
+		Updated int64           `json:"updated"`
+		Peers   []netStatusPeer `json:"peers"`
+	}{Name: name, IP: ip, Relay: relayUp, Updated: time.Now().Unix(), Peers: []netStatusPeer{}}
+	for _, p := range peers {
+		via := ""
+		if p.Connected {
+			via = "direct"
+			if p.Endpoint == "Cerver relay" {
+				via = "relay"
+			}
+		}
+		st.Peers = append(st.Peers, netStatusPeer{p.Name, p.IP, p.Connected, via})
+	}
+	b, _ := json.Marshal(st)
+	tmp := netStatusFile + ".tmp"
+	if os.WriteFile(tmp, b, 0o644) == nil {
+		os.Chmod(tmp, 0o644)
+		os.Rename(tmp, netStatusFile)
+	}
+}
 
 // updateNames makes every device reachable by name (ssh macbook).
 func updateNames(self string, node *wgnet.Node) {
