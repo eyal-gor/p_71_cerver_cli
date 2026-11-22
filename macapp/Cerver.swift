@@ -1354,7 +1354,7 @@ struct NetworkMap: View {
 			HStack(spacing: 18) {
 				key(Color.green, solid: true, "Direct")
 				key(Color.orange, solid: false, "Through network backup")
-				key(Color.secondary, solid: true, "Relay ↔ Cerver"
+				key(Color.secondary, solid: true, "Relay ↔ Cerver")
 			}
 			Text("Lines show what this Mac sees. Click a computer to open it.")
 				.font(.callout).foregroundStyle(.secondary)
