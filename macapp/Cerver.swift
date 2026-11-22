@@ -714,14 +714,14 @@ func howConnected(_ p: NetPeer) -> String {
 // MARK: - Window (sidebar + page, in the style of the ChatGPT Mac app)
 
 enum Page: Hashable {
-	case map, pool, thisMac, computer(String), add, settings, session
+	case map, pool, permissions, thisMac, computer(String), add, settings, session
 }
 
 struct MainWindow: View {
 	@ObservedObject var m: Model
 	@StateObject private var session = SessionModel()
 	// `-startPage thisMac` on launch opens that page (for screenshots).
-	@State private var page: Page? = ["thisMac": Page.thisMac, "add": Page.add, "settings": Page.settings, "session": Page.session, "pool": Page.pool][UserDefaults.standard.string(forKey: "startPage") ?? ""] ?? .map
+	@State private var page: Page? = ["thisMac": Page.thisMac, "add": Page.add, "settings": Page.settings, "session": Page.session, "pool": Page.pool, "permissions": Page.permissions][UserDefaults.standard.string(forKey: "startPage") ?? ""] ?? .map
 
 	var body: some View {
 		NavigationSplitView {
@@ -898,6 +898,7 @@ struct MainWindow: View {
 			switch page ?? .map {
 			case .map: MapPage(m: m, open: { page = $0 })
 			case .pool: PoolPage(m: m, open: { page = $0 })
+			case .permissions: PermissionsPage(m: m)
 			case .thisMac: ThisMacPage(m: m)
 			case .computer(let id):
 				if let c = m.computers.first(where: { $0.id == id }) { ComputerPage(m: m, c: c) } else { PoolPage(m: m, open: { page = $0 }) }
@@ -1091,7 +1092,6 @@ struct PoolPage: View {
 						VStack(alignment: .leading, spacing: 6) {
 							legend("Agents", "Ready: agents can run on it now. Busy: running as many as it takes. Offline: its relay isn't running.")
 							legend("Network", "On: your computers reach it by name. Direct means computer to computer; via relay means through Cerver's backup relay.")
-							legend("Others can use it", "People you invited to your pool can run agents on it.")
 						}
 						.padding(16).frame(width: 360)
 					}
@@ -1107,11 +1107,10 @@ struct PoolPage: View {
 							header("Computer")
 							header("Agents")
 							header("Network")
-							header("Others can use it")
 						}
 						.padding(.horizontal, 16).padding(.vertical, 10)
 						ForEach(m.computers) { c in
-							Divider().gridCellColumns(4)
+							Divider().gridCellColumns(3)
 							GridRow {
 								HStack(spacing: 8) {
 									Image(systemName: c.isThisMac ? "laptopcomputer" : "desktopcomputer").foregroundStyle(.secondary)
@@ -1124,19 +1123,8 @@ struct PoolPage: View {
 									}
 									.layoutPriority(1)
 								}
-								// This Mac switches here; another computer's agents and network
-								// switch on that computer (turning them off from afar would cut
-								// the line used to turn them back on).
-								switchCell(on: c.isThisMac ? (m.relay == .running || m.relay == .starting) : c.pool?.online == true,
-									note: agentsStatus(c).0, enabled: c.isThisMac && !relayBusy,
-									why: c.isThisMac ? nil : "Switch this on \(c.name) itself") { $0 ? m.relayOn() : m.relayOff() }
-								switchCell(on: c.isThisMac ? (m.isOn || m.phase == .starting) : c.net?.online == true,
-									note: networkNote(c), enabled: c.isThisMac && !m.busy,
-									why: c.isThisMac ? nil : "Switch this on \(c.name) itself") { $0 ? m.turnOn() : m.turnOff() }
-								switchCell(on: c.pool?.shared == true,
-									note: c.pool?.shared == true ? "Shared" : "Only you",
-									enabled: c.pool?.compute_id.map { !m.sharing.contains($0) } ?? false,
-									why: c.pool == nil ? "Not in your pool" : nil) { m.setShared(c, $0) }
+								StatusPill(text: agentsStatus(c).0, color: agentsStatus(c).1)
+								StatusPill(text: networkStatus(c, peer: peer(c)).0.hasPrefix("On") ? "On" : "Off", color: networkStatus(c, peer: peer(c)).1)
 							}
 							.padding(.horizontal, 16).padding(.vertical, 9)
 							.contentShape(Rectangle())
@@ -1145,7 +1133,10 @@ struct PoolPage: View {
 					}
 				}
 			}
-			Button { open(.add) } label: { Label("Add a computer", systemImage: "plus") }.buttonStyle(.link)
+			HStack(spacing: 18) {
+				Button { open(.permissions) } label: { Label("Permissions", systemImage: "lock.shield") }.buttonStyle(.link)
+				Button { open(.add) } label: { Label("Add a computer", systemImage: "plus") }.buttonStyle(.link)
+			}
 
 			section("Network between your computers")
 			Card {
@@ -1207,29 +1198,10 @@ struct PoolPage: View {
 					Row(label: "Loading…") { ProgressView().controlSize(.small) }
 				}
 			}
-			Text("People you invite can run agents on the computers you share (Others can use it).")
+			Text("People you invite can run agents only on computers you allow, in Permissions → Advanced.")
 				.font(.callout).foregroundStyle(.secondary)
 		}
 		.task { await load() }
-	}
-
-	var relayBusy: Bool { if case .working = m.relay { return true }; return false }
-
-	/// Same word for every computer: On or Off. How the others reach this
-	/// Mac (direct or via backup) is in Connections below.
-	func networkNote(_ c: Computer) -> String {
-		networkStatus(c, peer: peer(c)).0.hasPrefix("On") ? "On" : "Off"
-	}
-
-	/// A switch with a short word next to it saying what's happening.
-	func switchCell(on: Bool, note: String, enabled: Bool, why: String?, set: @escaping (Bool) -> Void) -> some View {
-		HStack(spacing: 8) {
-			Toggle("", isOn: Binding(get: { on }, set: set))
-				.toggleStyle(.switch).labelsHidden().controlSize(.small)
-				.disabled(!enabled)
-			Text(note).font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(1)
-		}
-		.help(why ?? "")
 	}
 
 	var connections: String {
@@ -1577,6 +1549,65 @@ struct AddPage: View {
 			Text("It signs in with your Cerver account, so only your computers join.")
 				.font(.callout).foregroundStyle(.secondary)
 
+		}
+	}
+}
+
+/// What each computer allows, one permission per card, each explained.
+struct PermissionsPage: View {
+	@ObservedObject var m: Model
+	@State private var advanced = false
+
+	var computers: [Computer] { m.computers.filter { !$0.isPhone } }
+
+	var body: some View {
+		PageLayout(title: "Permissions", subtitle: "What each of your computers allows. Your own computers switch here; another computer's agents and network switch on that computer.") {
+			permission("Agents can run here",
+				"Cerver may start your agents on this computer, as you, with its files and your logins. Off: it leaves your pool; nothing else changes.") { c in
+				cell(on: c.isThisMac ? (m.relay == .running || m.relay == .starting) : c.pool?.online == true,
+					enabled: c.isThisMac && !relayBusy, remote: !c.isThisMac) { $0 ? m.relayOn() : m.relayOff() }
+			}
+			permission("Your computers can reach it",
+				"Your other computers connect to it by name, privately (SSH, files, a page it serves). Off: it leaves your network; agents keep running. Turning it on or off asks for your password.") { c in
+				cell(on: c.isThisMac ? (m.isOn || m.phase == .starting) : c.net?.online == true,
+					enabled: c.isThisMac && !m.busy, remote: !c.isThisMac) { $0 ? m.turnOn() : m.turnOff() }
+			}
+
+			DisclosureGroup(isExpanded: $advanced) {
+				VStack(alignment: .leading, spacing: 14) {
+					permission("People you invite can use it",
+						"People you invited to your pool may run their agents on it. They run fenced in, away from your files, and never reach your network or other computers. Off by default.") { c in
+						cell(on: c.pool?.shared == true,
+							enabled: c.pool?.compute_id.map { !m.sharing.contains($0) } ?? false, remote: false) { m.setShared(c, $0) }
+					}
+				}
+				.padding(.top, 10)
+			} label: {
+				Text("Advanced").font(.system(size: 15, weight: .semibold))
+			}
+		}
+	}
+
+	var relayBusy: Bool { if case .working = m.relay { return true }; return false }
+
+	func permission(_ title: String, _ explain: String, @ViewBuilder control: @escaping (Computer) -> some View) -> some View {
+		VStack(alignment: .leading, spacing: 8) {
+			Text(title).font(.system(size: 15, weight: .semibold)).padding(.top, 6)
+			Text(explain).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+			Card {
+				ForEach(Array(computers.enumerated()), id: \.element.id) { n, c in
+					if n > 0 { Divider().padding(.leading, 16) }
+					Row(label: c.name + (c.isThisMac ? "  (this Mac)" : "")) { control(c) }
+				}
+			}
+		}
+	}
+
+	func cell(on: Bool, enabled: Bool, remote: Bool, set: @escaping (Bool) -> Void) -> some View {
+		HStack(spacing: 8) {
+			if remote { Text("switch on that computer").font(.system(size: 11)).foregroundStyle(.tertiary) }
+			Toggle("", isOn: Binding(get: { on }, set: set))
+				.toggleStyle(.switch).labelsHidden().disabled(!enabled)
 		}
 	}
 }
