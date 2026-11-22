@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -25,6 +26,7 @@ import (
 func Run(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	cli := fs.String("cli", "claude", "CLI to run: claude | codex | grok")
+	asJSON := fs.Bool("json", false, "Print {session_id, cli, seconds, reply} as JSON (for the Mac app)")
 	on := fs.String("on", "", "Compute name or id to run on (default: first local relay)")
 	bill := fs.String("bill", "", "Billing mode: subscription | api (alias: sub | api)")
 	model := fs.String("model", "", "Model override (e.g. sonnet, opus, gpt-5-codex). Empty = CLI's local default.")
@@ -210,8 +212,22 @@ func Run(args []string) error {
 		return err
 	}
 	elapsed := int(time.Since(start).Seconds())
+	// The reply can land a moment after the session reports it's done; give
+	// it a few seconds before calling it empty.
+	reply := s.LastAssistantText()
+	for i := 0; reply == "" && i < 10; i++ {
+		time.Sleep(700 * time.Millisecond)
+		if again, err := gw.GetSession(ctx, sessionID); err == nil {
+			s, reply = again, again.LastAssistantText()
+		}
+	}
+	if *asJSON {
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{
+			"session_id": sessionID, "cli": *cli, "seconds": elapsed, "reply": reply,
+		})
+	}
 	fmt.Println(output.Header(*cli, elapsed, mode, s.Usage()))
-	fmt.Println(s.LastAssistantText())
+	fmt.Println(reply)
 	return nil
 }
 

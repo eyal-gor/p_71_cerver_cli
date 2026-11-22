@@ -686,13 +686,14 @@ func howConnected(_ p: NetPeer) -> String {
 // MARK: - Window (sidebar + page, in the style of the ChatGPT Mac app)
 
 enum Page: Hashable {
-	case all, thisMac, computer(String), add, settings
+	case all, thisMac, computer(String), add, settings, session
 }
 
 struct MainWindow: View {
 	@ObservedObject var m: Model
+	@StateObject private var session = SessionModel()
 	// `-startPage thisMac` on launch opens that page (for screenshots).
-	@State private var page: Page? = ["thisMac": Page.thisMac, "add": Page.add, "settings": Page.settings][UserDefaults.standard.string(forKey: "startPage") ?? ""] ?? .all
+	@State private var page: Page? = ["thisMac": Page.thisMac, "add": Page.add, "settings": Page.settings, "session": Page.session][UserDefaults.standard.string(forKey: "startPage") ?? ""] ?? .all
 
 	var body: some View {
 		NavigationSplitView {
@@ -727,6 +728,8 @@ struct MainWindow: View {
 			.padding(.bottom, 10)
 
 			List(selection: $page) {
+				Label(session.started ? "Session" : "New session", systemImage: "bubble.left.and.text.bubble.right")
+					.tag(Page.session)
 				Label("All computers", systemImage: "square.grid.2x2")
 					.tag(Page.all)
 				Section("This computer (you're on it)") {
@@ -744,6 +747,16 @@ struct MainWindow: View {
 				}
 			}
 			.listStyle(.sidebar)
+			Button { page = .settings } label: {
+				Label("Settings", systemImage: "gearshape")
+					.font(.system(size: 13))
+					.frame(maxWidth: .infinity, alignment: .leading)
+					.padding(.horizontal, 8).padding(.vertical, 6)
+					.background(RoundedRectangle(cornerRadius: 6).fill(page == .settings ? Color.accentColor.opacity(0.15) : .clear))
+					.contentShape(Rectangle())
+			}
+			.buttonStyle(.plain)
+			.padding(.horizontal, 10).padding(.bottom, 4)
 			footer
 		}
 	}
@@ -767,11 +780,7 @@ struct MainWindow: View {
 			.buttonStyle(.plain)
 			.help("Settings")
 			Spacer(minLength: 0)
-			Button { page = .settings } label: {
-				Image(systemName: "gearshape").font(.system(size: 14)).foregroundStyle(page == .settings ? Color.accentColor : .secondary)
-			}
-			.buttonStyle(.borderless)
-			.help("Settings (⌘,)")
+
 			if m.updateAvailable {
 				Button {
 					m.updateNow()
@@ -853,6 +862,7 @@ struct MainWindow: View {
 				if let c = m.computers.first(where: { $0.id == id }) { ComputerPage(m: m, c: c) } else { AllComputersPage(m: m, open: { page = $0 }) }
 			case .add: AddPage(m: m)
 			case .settings: SettingsPage(m: m)
+			case .session: SessionPage(m: m, s: session)
 			}
 		}
 	}
@@ -1566,6 +1576,196 @@ struct SettingsPage: View {
 		}
 		.padding(12)
 		.background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.1)))
+	}
+}
+
+// MARK: - Session: run an agent on one of your computers, from the app
+
+/// One conversation with an agent (Claude or Codex) that Cerver runs on a
+/// computer you pick. The same as `cerver run`, here as a chat.
+final class SessionModel: ObservableObject {
+	struct Message: Identifiable {
+		let id = UUID()
+		let fromYou: Bool
+		let text: String
+		var meta: String = ""
+	}
+	@Published var messages: [Message] = []
+	@Published var working = false
+	@Published var problem: String?
+	@Published var computer = ""   // pool name; empty = this Mac
+	@Published var cli = "claude"
+	var sessionID: String?
+
+	var started: Bool { sessionID != nil || !messages.isEmpty }
+
+	func reset() {
+		messages = []
+		sessionID = nil
+		problem = nil
+	}
+
+	func send(_ text: String, on: String) {
+		let prompt = text.trimmingCharacters(in: .whitespacesAndNewlines)
+		guard !prompt.isEmpty, !working else { return }
+		messages.append(Message(fromYou: true, text: prompt))
+		working = true
+		problem = nil
+		var args = ["run", "--json", "--timeout", "1800"]
+		// A follow-up continues the session (it keeps its agent and computer).
+		if let sid = sessionID { args += ["--resume", sid] } else { args += ["--cli", cli] + (on.isEmpty ? [] : ["--on", on]) }
+		args.append(prompt)
+		Task.detached {
+			struct Reply: Decodable { let session_id: String; let seconds: Int; let reply: String }
+			let (ok, out) = runCerver(args)
+			let line = out.split(separator: "\n").last.map(String.init) ?? ""
+			let r = ok ? try? JSONDecoder().decode(Reply.self, from: Data(line.utf8)) : nil
+			await MainActor.run {
+				self.working = false
+				if let r = r {
+					self.sessionID = r.session_id
+					self.messages.append(Message(fromYou: false, text: r.reply, meta: "\(self.cli == "codex" ? "Codex" : "Claude") · \(r.seconds) s"))
+				} else {
+					self.problem = cleanError(out.isEmpty ? "No answer." : out)
+				}
+			}
+		}
+	}
+}
+
+struct SessionPage: View {
+	@ObservedObject var m: Model
+	@ObservedObject var s: SessionModel
+	@State private var draft = ""
+	@FocusState private var focused: Bool
+
+	/// Your computers agents can run on right now.
+	var ready: [Computer] { m.computers.filter { $0.pool?.online == true } }
+	var target: Computer? {
+		ready.first { $0.name == s.computer } ?? ready.first { $0.isThisMac } ?? ready.first
+	}
+
+	var body: some View {
+		VStack(spacing: 0) {
+			header
+			Divider()
+			ScrollViewReader { proxy in
+				ScrollView {
+					VStack(alignment: .leading, spacing: 14) {
+						if s.messages.isEmpty {
+							empty
+						}
+						ForEach(s.messages) { msg in bubble(msg).id(msg.id) }
+						if s.working {
+							HStack(spacing: 8) {
+								ProgressView().controlSize(.small)
+								Text("Working on \(target?.name ?? "your computer")…").foregroundStyle(.secondary)
+							}
+							.id("working")
+						}
+						if let p = s.problem {
+							Text(p).font(.callout).foregroundStyle(.red).textSelection(.enabled)
+						}
+					}
+					.frame(maxWidth: 680, alignment: .leading)
+					.padding(.horizontal, 32).padding(.vertical, 24)
+					.frame(maxWidth: .infinity)
+				}
+				.onChange(of: s.messages.count) { _ in
+					withAnimation {
+						if s.working { proxy.scrollTo("working", anchor: .bottom) } else if let id = s.messages.last?.id { proxy.scrollTo(id, anchor: .bottom) }
+					}
+				}
+				.onChange(of: s.working) { w in
+					if w { withAnimation { proxy.scrollTo("working", anchor: .bottom) } }
+				}
+			}
+			composer
+		}
+	}
+
+	var header: some View {
+		HStack(spacing: 12) {
+			Text(s.started ? "Session" : "New session").font(.system(size: 17, weight: .semibold))
+			Spacer()
+			// Where it runs and which agent: chosen before the first message.
+			Menu {
+				ForEach(ready) { c in
+					Button(c.name + (c.isThisMac ? " (this computer)" : "")) { s.computer = c.name }
+				}
+			} label: {
+				Label(target?.name ?? "No computer ready", systemImage: target?.icon ?? "desktopcomputer")
+			}
+			.fixedSize().disabled(s.started)
+			Picker("", selection: $s.cli) {
+				Text("Claude").tag("claude")
+				Text("Codex").tag("codex")
+			}
+			.pickerStyle(.segmented).labelsHidden().fixedSize().disabled(s.started)
+			if s.started {
+				Button("New session") { s.reset(); draft = "" }.disabled(s.working)
+			}
+		}
+		.padding(.horizontal, 24).padding(.top, 40).padding(.bottom, 12)
+	}
+
+	var empty: some View {
+		VStack(alignment: .leading, spacing: 8) {
+			Text("What should the agent do?").font(.system(size: 22, weight: .semibold))
+			Text("It runs on \(target?.name ?? "one of your computers"), as you, with that computer's files and your \(s.cli == "codex" ? "Codex" : "Claude") login. Cerver records the session.")
+				.foregroundStyle(.secondary)
+		}
+		.padding(.top, 30)
+	}
+
+	func bubble(_ msg: SessionModel.Message) -> some View {
+		HStack {
+			if msg.fromYou { Spacer(minLength: 80) }
+			VStack(alignment: .leading, spacing: 4) {
+				Text(markdown(msg.text)).textSelection(.enabled).font(.system(size: 13.5))
+				if !msg.meta.isEmpty {
+					Text(msg.meta).font(.system(size: 10.5)).foregroundStyle(.tertiary)
+				}
+			}
+			.padding(.horizontal, 14).padding(.vertical, 10)
+			.background(RoundedRectangle(cornerRadius: 14).fill(msg.fromYou ? Color.accentColor.opacity(0.14) : Color.primary.opacity(0.05)))
+			if !msg.fromYou { Spacer(minLength: 40) }
+		}
+	}
+
+	func markdown(_ t: String) -> AttributedString {
+		(try? AttributedString(markdown: t, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(t)
+	}
+
+	var composer: some View {
+		HStack(alignment: .bottom, spacing: 10) {
+			TextField(target == nil ? "No computer is ready for agents" : "Message the agent…", text: $draft, axis: .vertical)
+				.textFieldStyle(.plain)
+				.lineLimit(1...8)
+				.focused($focused)
+				.onSubmit(send)
+				.padding(.horizontal, 14).padding(.vertical, 10)
+				.background(RoundedRectangle(cornerRadius: 16).fill(Color.primary.opacity(0.05)))
+			Button(action: send) {
+				Image(systemName: "arrow.up").font(.system(size: 13, weight: .bold)).foregroundStyle(.white)
+					.frame(width: 30, height: 30)
+					.background(Circle().fill(canSend ? Color.accentColor : Color.secondary.opacity(0.4)))
+			}
+			.buttonStyle(.plain).disabled(!canSend)
+			.keyboardShortcut(.return, modifiers: .command)
+		}
+		.padding(.horizontal, 24).padding(.vertical, 14)
+		.frame(maxWidth: 740)
+		.frame(maxWidth: .infinity)
+		.onAppear { focused = true }
+	}
+
+	var canSend: Bool { !s.working && target != nil && !draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+
+	func send() {
+		guard canSend, let t = target else { return }
+		s.send(draft, on: t.isThisMac ? m.relayName : t.name)
+		draft = ""
 	}
 }
 
