@@ -507,6 +507,7 @@ struct Spec: Decodable {
 	let desktop: Bool?
 	var installs_tools: Bool? = nil
 	let reported: Bool?
+	var agent_access: AgentAccess? = nil
 
 	var system: String? {
 		guard let os = os else { return nil }
@@ -760,7 +761,7 @@ struct MainWindow: View {
 	@AppStorage("poolFolded") private var poolFolded = false
 	@State private var hoverPool = false
 	// `-startPage thisMac` on launch opens that page (for screenshots).
-	@State private var page: Page? = ["thisMac": Page.thisMac, "add": Page.add, "settings": Page.settings, "session": Page.session, "pool": Page.pool, "permissions": Page.permissions, "profile": Page.profile, "connectors": Page.connectors, "people": Page.people, "map": Page.map][UserDefaults.standard.string(forKey: "startPage") ?? ""] ?? .pool
+	@State private var page: Page? = ["thisMac": Page.thisMac, "add": Page.add, "settings": Page.settings, "session": Page.session, "pool": Page.pool, "permissions": Page.permissions, "security": Page.permissions, "profile": Page.profile, "connectors": Page.connectors, "people": Page.people, "map": Page.map][UserDefaults.standard.string(forKey: "startPage") ?? ""] ?? .pool
 
 	var body: some View {
 		NavigationSplitView {
@@ -846,6 +847,8 @@ struct MainWindow: View {
 						.tag(Page.connectors)
 					Label("People", systemImage: "person.2")
 						.tag(Page.people)
+					Label("Security", systemImage: "lock.shield")
+						.tag(Page.permissions)
 				}
 			}
 			.listStyle(.sidebar)
@@ -1302,7 +1305,7 @@ struct PoolPage: View {
 				}
 			}
 			HStack(spacing: 18) {
-				Button { open(.permissions) } label: { Label("Permissions", systemImage: "lock.shield") }.buttonStyle(.link)
+				Button { open(.permissions) } label: { Label("Security", systemImage: "lock.shield") }.buttonStyle(.link)
 				Button { open(.add) } label: { Label("Add Compute", systemImage: "plus") }.buttonStyle(.link)
 			}
 
@@ -1810,7 +1813,55 @@ struct PermissionsPage: View {
 	var computers: [Computer] { m.computers.filter { !$0.isPhone } }
 
 	var body: some View {
-		PageLayout(title: "Permissions", subtitle: "What each of your computers allows.") {
+		PageLayout(title: "Security", subtitle: "Who can use each computer, and what agents may touch there.") {
+			section("What your agents can touch")
+			Text("Your own agents. Other people's agents are always fenced off from your files.")
+				.font(.callout).foregroundStyle(.secondary)
+			Card {
+				ForEach(Array(computers.enumerated()), id: \.element.id) { n, c in
+					if n > 0 { Divider().padding(.leading, 16) }
+					Row(label: c.name + (c.isThisMac ? "  (this Mac)" : ""), note: accessNote(c)) {
+						if c.isThisMac {
+							Picker("", selection: Binding(get: { sec.mode }, set: { sec.mode = $0; saveSec() })) {
+								Text("As you").tag("as_you")
+								Text("Own folder only").tag("own_folder")
+							}
+							.pickerStyle(.segmented).labelsHidden().fixedSize()
+						} else {
+							HStack(spacing: 8) {
+								Text("change on that computer").font(.system(size: 11)).foregroundStyle(.tertiary)
+								Text(modeName(c.spec?.agent_access?.mode)).foregroundStyle(.secondary)
+							}
+						}
+					}
+				}
+			}
+
+			section("Blocked folders")
+			Text("No agent on this Mac can open these, in either mode, even when it acts as you.")
+				.font(.callout).foregroundStyle(.secondary)
+			Card {
+				if sec.blocked.isEmpty {
+					Row(label: "None yet") { EmptyView() }
+				}
+				ForEach(Array(sec.blocked.enumerated()), id: \.element) { n, f in
+					if n > 0 { Divider().padding(.leading, 16) }
+					Row(label: f) {
+						Button("Remove") { sec.blocked.removeAll { $0 == f }; saveSec() }.buttonStyle(.link)
+					}
+				}
+			}
+			HStack(spacing: 14) {
+				Button { addFolder() } label: { Label("Block a folder…", systemImage: "plus") }.buttonStyle(.link)
+				ForEach(suggested.filter { !sec.blocked.contains($0) }, id: \.self) { f in
+					Button(f) { sec.blocked.append(f); saveSec() }.buttonStyle(.link).font(.callout)
+				}
+			}
+			if let e = secError { Text(e).font(.callout).foregroundStyle(.red) }
+			Text("Applies from the next agent that starts. Enforced by macOS's own sandbox, the one Claude Code and Codex use.")
+				.font(.caption).foregroundStyle(.secondary)
+
+			section("Who can use each computer")
 			permission("Run agents",
 				"Part of your compute pool: Cerver can start your agents here, as you.") { c in
 				cell(on: c.isThisMac ? (m.relay == .running || m.relay == .starting) : c.pool?.online == true,
@@ -1822,22 +1873,58 @@ struct PermissionsPage: View {
 					enabled: c.isThisMac && !m.busy, remote: !c.isThisMac) { $0 ? m.turnOn() : m.turnOff() }
 			}
 
-			DisclosureGroup(isExpanded: $advanced) {
-				VStack(alignment: .leading, spacing: 14) {
-					permission("Share with people you invite",
-						"Their agents can run here, fenced off from your files.") { c in
-						cell(on: c.pool?.shared == true,
-							enabled: c.pool?.compute_id.map { !m.sharing.contains($0) } ?? false, remote: false) { m.setShared(c, $0) }
-					}
-				}
-				.padding(.top, 10)
-			} label: {
-				Text("Advanced").font(.system(size: 15, weight: .semibold))
+			permission("People you invite",
+				"Their agents can run here, fenced off from your files. Off unless you turn it on.") { c in
+				cell(on: c.pool?.shared == true,
+					enabled: c.pool?.compute_id.map { !m.sharing.contains($0) } ?? false, remote: false) { m.setShared(c, $0) }
 			}
 		}
 	}
 
 	var relayBusy: Bool { if case .working = m.relay { return true }; return false }
+
+	@State private var sec = SecurityRules.load()
+	@State private var secError: String?
+	let suggested = ["~/.ssh", "~/Documents", "~/Desktop"]
+
+	func section(_ t: String) -> some View {
+		Text(t).font(.system(size: 17, weight: .semibold)).padding(.top, 10)
+	}
+
+	func modeName(_ m: String?) -> String {
+		switch m {
+		case "own_folder": return "Own folder only"
+		case "as_you": return "As you"
+		default: return "Not reported yet"
+		}
+	}
+
+	func accessNote(_ c: Computer) -> String {
+		let mode = c.isThisMac ? sec.mode : (c.spec?.agent_access?.mode ?? "")
+		switch mode {
+		case "own_folder": return "Agents see only the folder they work in, plus their own settings."
+		case "as_you": return "Agents can open what you can, except blocked folders."
+		default: return "Its relay hasn't reported its rules yet."
+		}
+	}
+
+	func saveSec() {
+		secError = sec.save()
+	}
+
+	func addFolder() {
+		let p = NSOpenPanel()
+		p.canChooseDirectories = true; p.canChooseFiles = false; p.allowsMultipleSelection = true
+		p.directoryURL = URL(fileURLWithPath: NSHomeDirectory())
+		p.prompt = "Block"
+		guard p.runModal() == .OK else { return }
+		let home = NSHomeDirectory()
+		for u in p.urls {
+			let path = u.path.hasPrefix(home) ? "~" + u.path.dropFirst(home.count) : u.path
+			if !sec.blocked.contains(path) { sec.blocked.append(path) }
+		}
+		saveSec()
+	}
 
 	func permission(_ title: String, _ explain: String, @ViewBuilder control: @escaping (Computer) -> some View) -> some View {
 		VStack(alignment: .leading, spacing: 8) {
@@ -3024,7 +3111,7 @@ struct PeoplePage: View {
 					Row(label: "Loading…") { ProgressView().controlSize(.small) }
 				}
 			}
-			Text("People you invite can run agents only on computers you allow, in Permissions → Advanced.")
+			Text("People you invite can run agents only on computers you allow, in Security → People you invite.")
 				.font(.callout).foregroundStyle(.secondary)
 		}
 		.task { await load() }
@@ -3081,6 +3168,43 @@ struct RenameSheet: View {
 			let ok = await gatewayRequest("PATCH", "/v2/computes/" + computeID, body: body) != nil
 			saving = false
 			if ok { shown = false; m.refreshPool(force: true) } else { failed = true }
+		}
+	}
+}
+
+
+// MARK: - Security rules for your own agents (read by the relay: agent_policy.py)
+
+struct AgentAccess: Decodable {
+	let mode: String?
+	let blocked_folders: [String]?
+	let enforced_by: String?
+}
+
+struct SecurityRules {
+	var mode = "as_you"
+	var blocked: [String] = []
+	static let file = NSHomeDirectory() + "/.cerver/security.json"
+
+	static func load() -> SecurityRules {
+		var r = SecurityRules()
+		guard let d = FileManager.default.contents(atPath: file),
+			  let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return r }
+		if let m = o["agent_access"] as? String, ["as_you", "own_folder"].contains(m) { r.mode = m }
+		r.blocked = (o["blocked_folders"] as? [String]) ?? []
+		return r
+	}
+
+	/// nil when saved, else what went wrong.
+	func save() -> String? {
+		let o: [String: Any] = ["agent_access": mode, "blocked_folders": blocked]
+		do {
+			try FileManager.default.createDirectory(atPath: NSHomeDirectory() + "/.cerver", withIntermediateDirectories: true)
+			let d = try JSONSerialization.data(withJSONObject: o, options: [.prettyPrinted, .sortedKeys])
+			try d.write(to: URL(fileURLWithPath: SecurityRules.file), options: .atomic)
+			return nil
+		} catch {
+			return "Couldn't save: \(error.localizedDescription)"
 		}
 	}
 }
