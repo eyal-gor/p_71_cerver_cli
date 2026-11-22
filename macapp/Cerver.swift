@@ -762,6 +762,8 @@ struct MainWindow: View {
 			.padding(.bottom, 10)
 
 			List(selection: $page) {
+				Label("Map", systemImage: "map")
+					.tag(Page.map)
 				Section("Cerver Agents") {
 					Label(session.started ? "Session" : "New session", systemImage: "bubble.left.and.text.bubble.right")
 						.tag(Page.session)
