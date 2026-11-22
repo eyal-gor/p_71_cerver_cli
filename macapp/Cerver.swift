@@ -98,8 +98,12 @@ final class Model: ObservableObject {
 
 	init() {
 		refresh()
+		refreshRelay()
 		timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { _ in
-			Task { @MainActor in self.refresh() }
+			Task { @MainActor in
+				self.refresh()
+				self.refreshRelay()
+			}
 		}
 	}
 
@@ -173,6 +177,67 @@ final class Model: ObservableObject {
 		}
 	}
 
+	// MARK: The relay (this Mac in your pool, so agents can run on it)
+
+	@Published var relay: RelayState = .off
+	@Published var relayName = ""
+	private var relayBusy = false
+
+	/// Reads the relay service's state from launchd (it runs as you, so no password).
+	func refreshRelay() {
+		if relayBusy { return }
+		Task.detached {
+			let uid = getuid()
+			let new = launchctlState("gui/\(uid)/ai.cerver.relay")
+			let old = launchctlState("gui/\(uid)/dev.cerver.relay")  // set up by hand before the app
+			let name = relayPoolName()
+			await MainActor.run {
+				if self.relayBusy { return }
+				self.relayName = name
+				if new == "running" || old == "running" {
+					self.relay = .running
+				} else if new != nil {
+					self.relay = .starting  // installed; launchd restarts it on its own
+				} else if case .failed = self.relay {
+				} else {
+					self.relay = .off
+				}
+			}
+		}
+	}
+
+	func relayOn() { runRelay(["relay", "install"], doing: "Adding this Mac to your pool…") }
+	func relayOff() { runRelay(["relay", "uninstall"], doing: "Taking this Mac out of your pool…") }
+
+	private func runRelay(_ args: [String], doing: String) {
+		guard let bin = Bundle.main.path(forResource: "cerver", ofType: nil) else {
+			relay = .failed("The app is missing its cerver program. Download the app again.")
+			return
+		}
+		relayBusy = true
+		relay = .working(doing)
+		Task.detached {
+			let p = Process()
+			p.executableURL = URL(fileURLWithPath: bin)
+			p.arguments = args
+			var env = ProcessInfo.processInfo.environment
+			env["PATH"] = loginShellPath()  // so the relay finds uv, claude and codex like your terminal does
+			p.environment = env
+			let out = Pipe()
+			p.standardOutput = out
+			p.standardError = out
+			try? p.run()
+			p.waitUntilExit()
+			let msg = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+			let ok = p.terminationStatus == 0
+			await MainActor.run {
+				self.relayBusy = false
+				self.relay = ok ? .off : .failed(msg.replacingOccurrences(of: "error: ", with: "").trimmingCharacters(in: .whitespacesAndNewlines))
+				self.refreshRelay()
+			}
+		}
+	}
+
 	func setOpenAtLogin(_ on: Bool) {
 		do {
 			if on { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
@@ -191,6 +256,65 @@ final class Model: ObservableObject {
 			if self.copied == s { self.copied = nil }
 		}
 	}
+}
+
+enum RelayState: Equatable {
+	case off, starting, running, working(String), failed(String)
+}
+
+/// "running", "waiting" etc. for a launchd job, or nil when it isn't loaded.
+func launchctlState(_ target: String) -> String? {
+	let p = Process()
+	p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+	p.arguments = ["print", target]
+	let out = Pipe()
+	p.standardOutput = out
+	p.standardError = Pipe()
+	guard (try? p.run()) != nil else { return nil }
+	let data = out.fileHandleForReading.readDataToEndOfFile()
+	p.waitUntilExit()
+	if p.terminationStatus != 0 { return nil }
+	let text = String(data: data, encoding: .utf8) ?? ""
+	for line in text.split(separator: "\n") {
+		let t = line.trimmingCharacters(in: .whitespaces)
+		if t.hasPrefix("state = ") { return String(t.dropFirst("state = ".count)) }
+	}
+	return "loaded"
+}
+
+/// The name this Mac has in your pool (from the relay service's settings).
+func relayPoolName() -> String {
+	for label in ["ai.cerver.relay", "dev.cerver.relay"] {
+		let path = NSHomeDirectory() + "/Library/LaunchAgents/\(label).plist"
+		if let plist = NSDictionary(contentsOfFile: path), let args = plist["ProgramArguments"] as? [String],
+			let i = args.firstIndex(of: "--name"), i + 1 < args.count
+		{
+			return args[i + 1]
+		}
+	}
+	return ProcessInfo.processInfo.hostName.replacingOccurrences(of: ".local", with: "")
+}
+
+/// The PATH your terminal has (apps started from the Dock get a bare one).
+func loginShellPath() -> String {
+	let shell = ProcessInfo.processInfo.environment["SHELL"] ?? "/bin/zsh"
+	let p = Process()
+	p.executableURL = URL(fileURLWithPath: shell)
+	p.arguments = ["-ilc", "printf '__PATH__%s' \"$PATH\""]
+	let out = Pipe()
+	p.standardOutput = out
+	p.standardError = Pipe()
+	p.standardInput = FileHandle.nullDevice
+	if (try? p.run()) != nil {
+		let data = out.fileHandleForReading.readDataToEndOfFile()
+		p.waitUntilExit()
+		if let s = String(data: data, encoding: .utf8), let r = s.range(of: "__PATH__", options: .backwards) {
+			let path = String(s[r.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
+			if !path.isEmpty { return path }
+		}
+	}
+	let home = NSHomeDirectory()
+	return "\(home)/.local/bin:\(home)/.cerver/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 }
 
 func shq(_ s: String) -> String { "'" + s.replacingOccurrences(of: "'", with: "'\\''") + "'" }
@@ -237,12 +361,13 @@ func howConnected(_ p: NetPeer) -> String {
 // MARK: - Window (sidebar + page, in the style of the ChatGPT Mac app)
 
 enum Page: Hashable {
-	case thisMac, peer(String), add
+	case thisMac, pool, peer(String), add
 }
 
 struct MainWindow: View {
 	@ObservedObject var m: Model
-	@State private var page: Page? = .thisMac
+	// `-startPage pool` on launch opens that page (handy for screenshots).
+	@State private var page: Page? = UserDefaults.standard.string(forKey: "startPage") == "pool" ? .pool : .thisMac
 
 	var body: some View {
 		NavigationSplitView {
@@ -279,6 +404,8 @@ struct MainWindow: View {
 				Section("This Mac") {
 					sidebarRow(name: m.status?.name ?? m.deviceName, dot: m.isOn ? .green : Color.secondary.opacity(0.4), icon: "laptopcomputer")
 						.tag(Page.thisMac)
+					sidebarRow(name: "Agents", dot: relayDot, icon: "cpu")
+						.tag(Page.pool)
 				}
 				Section("Your computers") {
 					ForEach(m.status?.peers ?? []) { p in
@@ -321,6 +448,14 @@ struct MainWindow: View {
 		}
 	}
 
+	var relayDot: Color {
+		switch m.relay {
+		case .running: return .green
+		case .starting, .working: return .orange
+		default: return Color.secondary.opacity(0.4)
+		}
+	}
+
 	func dotColor(_ p: NetPeer) -> Color {
 		p.connected ? (p.via == "relay" ? .orange : .green) : Color.secondary.opacity(0.4)
 	}
@@ -328,6 +463,14 @@ struct MainWindow: View {
 	// MARK: Pages
 
 	@ViewBuilder var detail: some View {
+		if page == .pool && m.phase != .notSignedIn {
+			PoolPage(m: m)
+		} else {
+			netDetail
+		}
+	}
+
+	@ViewBuilder var netDetail: some View {
 		if case .failed(let why) = m.phase {
 			VStack {
 				banner(why)
@@ -347,7 +490,7 @@ struct MainWindow: View {
 		case .on, .working, .starting:
 			if let s = m.status {
 				switch page ?? .thisMac {
-				case .thisMac: ThisMacPage(m: m, s: s)
+				case .thisMac, .pool: ThisMacPage(m: m, s: s)
 				case .peer(let ip):
 					if let p = s.peers.first(where: { $0.ip == ip }) { PeerPage(m: m, p: p) } else { ThisMacPage(m: m, s: s) }
 				case .add: AddPage(m: m)
@@ -574,6 +717,57 @@ struct PeerPage: View {
 	}
 }
 
+struct PoolPage: View {
+	@ObservedObject var m: Model
+
+	var pill: (String, Color) {
+		switch m.relay {
+		case .running: return ("Running", .green)
+		case .starting: return ("Starting…", .orange)
+		case .working(let w): return (w, .orange)
+		case .failed: return ("Couldn't do that", .red)
+		case .off: return ("Off", .gray)
+		}
+	}
+
+	var on: Bool {
+		switch m.relay {
+		case .running, .starting: return true
+		default: return false
+		}
+	}
+
+	var body: some View {
+		PageLayout(title: "Agents on this Mac", subtitle: "When this is on, this Mac is in your Cerver pool and your agents can run on it.") {
+			HStack {
+				StatusPill(text: pill.0, color: pill.1)
+				Spacer()
+			}
+			if case .failed(let why) = m.relay {
+				Text(why).font(.callout).foregroundStyle(.red).textSelection(.enabled)
+			}
+			Card {
+				Row(label: "Available to agents") {
+					if case .working = m.relay { ProgressView().controlSize(.small) }
+					Toggle("", isOn: Binding(get: { on }, set: { $0 ? m.relayOn() : m.relayOff() }))
+						.toggleStyle(.switch).labelsHidden()
+						.disabled({ if case .working = m.relay { return true }; return false }())
+				}
+				Divider().padding(.leading, 16)
+				Row(label: "Name in your pool") { Text(m.relayName).foregroundStyle(.secondary) }
+				Divider().padding(.leading, 16)
+				Row(label: "Log") {
+					Button("Show") {
+						NSWorkspace.shared.open(URL(fileURLWithPath: NSHomeDirectory() + "/.cerver/relay.log"))
+					}.buttonStyle(.link)
+				}
+			}
+			Text("It starts with this Mac and restarts itself if it stops. Agents run as you, with your Claude and Codex logins.")
+				.font(.callout).foregroundStyle(.secondary)
+		}
+	}
+}
+
 struct AddPage: View {
 	@ObservedObject var m: Model
 	var body: some View {
@@ -623,6 +817,17 @@ struct MenuView: View {
 			Text("Starting…")
 		case .working(let what):
 			Text(what)
+		}
+		Divider()
+		switch m.relay {
+		case .running, .starting:
+			Text(m.relay == .running ? "Agents can run on this Mac" : "Agents: starting…")
+			Button("Stop Agents on This Mac") { m.relayOff() }
+		case .off, .failed:
+			Text("Agents can't run on this Mac")
+			Button("Let Agents Run on This Mac") { m.relayOn() }
+		case .working(let w):
+			Text(w)
 		}
 		Divider()
 		Button("Open Cerver…") { show() }
