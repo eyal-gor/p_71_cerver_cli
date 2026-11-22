@@ -1195,6 +1195,40 @@ struct MapPage: View {
 }
 
 /// Your pool: every computer agents can run on, and how the pool is run.
+/// Average round trip in ms over the private network (3 pings), nil if none came back.
+func pingMs(_ ip: String) async -> Double? {
+	await withCheckedContinuation { cont in
+		DispatchQueue.global().async {
+			let p = Process()
+			p.executableURL = URL(fileURLWithPath: "/sbin/ping")
+			p.arguments = ["-c", "3", "-i", "0.2", "-t", "3", "-q", ip]
+			let out = Pipe(); p.standardOutput = out; p.standardError = Pipe()
+			guard (try? p.run()) != nil else { return cont.resume(returning: nil) }
+			p.waitUntilExit()
+			let text = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+			// "round-trip min/avg/max/stddev = 4.1/5.2/6.3/0.8 ms"
+			guard let line = text.split(separator: "\n").first(where: { $0.contains("min/avg") }),
+				  let nums = line.split(separator: "=").last?.trimmingCharacters(in: .whitespaces).split(separator: "/"),
+				  nums.count >= 2, let avg = Double(nums[1]) else { return cont.resume(returning: nil) }
+			cont.resume(returning: avg)
+		}
+	}
+}
+
+/// Time for a small HTTPS request to Cerver's gateway (best of 2, connection reused).
+func cerverPing() async -> Double? {
+	guard let url = URL(string: "https://gateway.cerver.ai/health") else { return nil }
+	var best: Double?
+	for _ in 0..<2 {
+		var r = URLRequest(url: url); r.httpMethod = "HEAD"; r.timeoutInterval = 5
+		let t = Date()
+		guard (try? await URLSession.shared.data(for: r)) != nil else { continue }
+		let ms = Date().timeIntervalSince(t) * 1000
+		best = min(best ?? ms, ms)
+	}
+	return best
+}
+
 struct PoolPage: View {
 	@ObservedObject var m: Model
 	let open: (Page) -> Void
@@ -1202,6 +1236,8 @@ struct PoolPage: View {
 	@State private var help = false
 	@State private var info: PoolInfo?
 	@State private var copied = false
+	@State private var pings: [String: Double] = [:]      // net ip → ms; -1 = no reply
+	@State private var cerverMs: Double?
 
 	var body: some View {
 		PageLayout(title: "Compute pool", subtitle: "Every computer your agents can run on, and how they connect.") {
@@ -1242,15 +1278,21 @@ struct PoolPage: View {
 									Image(systemName: c.isThisMac ? "laptopcomputer" : "desktopcomputer").foregroundStyle(.secondary)
 									VStack(alignment: .leading, spacing: 1) {
 										Text(c.name).font(.system(size: 14, weight: .medium)).lineLimit(1)
-										let sub = ([c.isThisMac ? "This Mac" : nil, c.spec?.short].compactMap { $0 }).joined(separator: " · ")
+										let sub = ([c.isThisMac ? "This Mac" : nil, c.spec?.short, c.spec?.disk_free_gb.map { gb($0) + " free" }].compactMap { $0 }).joined(separator: " · ")
 										if !sub.isEmpty {
 											Text(sub).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
 										}
 									}
 									.layoutPriority(1)
 								}
-								StatusPill(text: agentsStatus(c).0, color: agentsStatus(c).1)
-								StatusPill(text: networkStatus(c, peer: peer(c)).0.hasPrefix("On") ? "On" : "Off", color: networkStatus(c, peer: peer(c)).1)
+								VStack(alignment: .leading, spacing: 3) {
+									StatusPill(text: agentsStatus(c).0, color: agentsStatus(c).1).fixedSize()
+									Text(running(c)).font(.system(size: 11).monospacedDigit()).foregroundStyle(.secondary).fixedSize()
+								}
+								VStack(alignment: .leading, spacing: 3) {
+									StatusPill(text: networkStatus(c, peer: peer(c)).0.hasPrefix("On") ? "On" : "Off", color: networkStatus(c, peer: peer(c)).1).fixedSize()
+									pingView(c).fixedSize()
+								}
 							}
 							.padding(.horizontal, 16).padding(.vertical, 9)
 							.contentShape(Rectangle())
@@ -1274,12 +1316,59 @@ struct PoolPage: View {
 				Row(label: "Connections") {
 					Text(connections).foregroundStyle(.secondary)
 				}
+				Divider().padding(.leading, 16)
+				Row(label: "Ping to Cerver", note: "From this Mac to Cerver, which starts your agents.") {
+					Text(cerverMs.map { "\(Int($0.rounded())) ms" } ?? "Measuring…").monospacedDigit()
+						.foregroundStyle(cerverMs.map { pingColor($0) } ?? .secondary)
+				}
 			}
 			Text("Your computers connect directly, computer to computer, and use Cerver's backup route only when a direct connection can't be made.")
 				.font(.callout).foregroundStyle(.secondary)
 
 		}
 		.task { await load() }
+		.task {
+			// Measure every 10 s while the page is open.
+			while !Task.isCancelled {
+				await measure()
+				try? await Task.sleep(nanoseconds: 10_000_000_000)
+			}
+		}
+	}
+
+	func running(_ c: Computer) -> String {
+		guard let p = c.pool, p.online else { return "not running" }
+		return "\(p.running ?? 0) of \(p.max ?? 1) running"
+	}
+
+	@ViewBuilder func pingView(_ c: Computer) -> some View {
+		let route = peer(c).flatMap { $0.connected ? ($0.via == "direct" ? "direct" : "via backup") : nil }
+		if c.isThisMac {
+			Text("this Mac").font(.system(size: 11)).foregroundStyle(.secondary)
+		} else if let ip = c.net?.ip, let ms = pings[ip] {
+			if ms < 0 {
+				Text("no reply").font(.system(size: 11)).foregroundStyle(.red)
+			} else {
+				(Text(ms < 10 ? String(format: "%.1f ms", ms) : "\(Int(ms.rounded())) ms").foregroundColor(pingColor(ms)).fontWeight(.medium)
+				 + Text(route.map { " · " + $0 } ?? "").foregroundColor(.secondary))
+					.font(.system(size: 11).monospacedDigit())
+			}
+		} else {
+			Text(route ?? (c.net == nil ? "not on it" : "measuring…")).font(.system(size: 11)).foregroundStyle(.secondary)
+		}
+	}
+
+	func pingColor(_ ms: Double) -> Color { ms < 40 ? .green : (ms < 150 ? .orange : .red) }
+
+	func measure() async {
+		if m.isOn {
+			let ips = m.computers.filter { !$0.isThisMac }.compactMap { $0.net?.ip }
+			await withTaskGroup(of: (String, Double).self) { g in
+				for ip in ips { g.addTask { (ip, await pingMs(ip) ?? -1) } }
+				for await (ip, ms) in g { pings[ip] = ms }
+			}
+		}
+		cerverMs = await cerverPing()
 	}
 
 	var connections: String {
