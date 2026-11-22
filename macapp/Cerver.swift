@@ -483,6 +483,7 @@ final class Model: ObservableObject {
 struct PoolMachine: Decodable {
 	let compute_id: String?
 	let name: String
+	var relay_name: String? = nil   // the relay's own name; stays when you rename the computer
 	let online: Bool
 	let state: String?  // free / busy / offline
 	let running: Int?
@@ -554,8 +555,9 @@ func fetchComputers(thisMac: String, thisMacNet: String?) async -> [Computer]? {
 	var out: [Computer] = []
 	var used = Set<String>()
 	for m in (pool.machines ?? []) where m.mine ?? true {
-		let me = m.name == thisMac
-		let node = nodes.first { !used.contains($0.ip) && ($0.name == cleanName(m.name) || (me && $0.name == thisMacNet)) }
+		let own = m.relay_name ?? m.name
+		let me = own == thisMac || m.name == thisMac
+		let node = nodes.first { !used.contains($0.ip) && ($0.name == cleanName(own) || $0.name == cleanName(m.name) || (me && $0.name == thisMacNet)) }
 		if let n = node { used.insert(n.ip) }
 		let spec = pool.computers?.first { $0.ref == m.compute_id && $0.reported == true }
 		out.append(Computer(name: m.name, pool: m, net: node, isThisMac: me, spec: spec))
@@ -798,10 +800,11 @@ struct MainWindow: View {
 
 			List(selection: $page) {
 				Section("Cerver Compute") {
-					Label("Ask Compute Pool", systemImage: "bubble.left.and.text.bubble.right")
-						.tag(Page.session)
 					Label("Compute pool", systemImage: "server.rack")
 						.tag(Page.pool)
+					Label("Ask Compute Pool", systemImage: "bubble.left.and.text.bubble.right")
+						.padding(.leading, 14)
+						.tag(Page.session)
 					ForEach(m.computers.filter { !$0.isPhone }) { c in
 						sidebarRow(name: c.name, dot: c.isThisMac ? thisMacDot : computerDot(c), icon: c.icon, you: c.isThisMac)
 							.padding(.leading, 14)
@@ -958,13 +961,24 @@ struct MainWindow: View {
 struct PageLayout<Content: View>: View {
 	let title: String
 	let subtitle: String
+	var rename: (() -> Void)? = nil
 	@ViewBuilder let content: Content
+
+	init(title: String, subtitle: String, rename: (() -> Void)? = nil, @ViewBuilder content: () -> Content) {
+		self.title = title; self.subtitle = subtitle; self.rename = rename; self.content = content()
+	}
 
 	var body: some View {
 		ScrollView {
 			VStack(alignment: .leading, spacing: 22) {
 				VStack(alignment: .leading, spacing: 6) {
-					Text(title).font(.system(size: 28, weight: .semibold))
+					HStack(spacing: 8) {
+						Text(title).font(.system(size: 28, weight: .semibold))
+						if let r = rename {
+							Button(action: r) { Image(systemName: "pencil").font(.system(size: 15)) }
+								.buttonStyle(.borderless).foregroundStyle(.secondary).help("Rename")
+						}
+					}
 					Text(subtitle).font(.system(size: 15)).foregroundStyle(.secondary)
 				}
 				content
@@ -1358,11 +1372,12 @@ struct ThisMacPage: View {
 	@State private var tab: Tab = Tab(rawValue: UserDefaults.standard.string(forKey: "startTab") ?? "") ?? .overview
 	@State private var editing = false
 	@State private var newName = ""
+	@State private var renaming = false
 
 	var me: Computer? { m.computers.first(where: { $0.isThisMac }) }
 
 	var body: some View {
-		PageLayout(title: m.relayName, subtitle: "This Mac") {
+		PageLayout(title: me?.name ?? m.relayName, subtitle: "This Mac", rename: me?.pool == nil ? nil : { renaming = true }) {
 			Tabs(tab: $tab, tabs: [.overview, .agents, .network, .software, .hardware])
 			if case .failed(let why) = m.phase { problem(why) }
 			if case .failed(let why) = m.relay { problem(why) }
@@ -1375,6 +1390,7 @@ struct ThisMacPage: View {
 			case .settings: EmptyView()
 			}
 		}
+		.sheet(isPresented: $renaming) { RenameSheet(m: m, computeID: me?.pool?.compute_id ?? "", current: me?.name ?? m.relayName, shown: $renaming) }
 	}
 
 	var overview: some View {
@@ -1494,11 +1510,12 @@ struct ComputerPage: View {
 	@ObservedObject var m: Model
 	let c: Computer
 	@State private var tab: Tab = .overview
+	@State private var renaming = false
 
 	var peer: NetPeer? { m.status?.peers.first { $0.ip == c.net?.ip } }
 
 	var body: some View {
-		PageLayout(title: c.name, subtitle: subtitle) {
+		PageLayout(title: c.name, subtitle: subtitle, rename: c.pool == nil ? nil : { renaming = true }) {
 			Tabs(tab: $tab, tabs: [.overview, .agents, .network, .software, .hardware])
 			switch tab {
 			case .overview: overview
@@ -1509,6 +1526,7 @@ struct ComputerPage: View {
 			}
 		}
 		.id(c.id)  // a different computer starts on Overview
+		.sheet(isPresented: $renaming) { RenameSheet(m: m, computeID: c.pool?.compute_id ?? "", current: c.name, shown: $renaming) }
 	}
 
 	@ViewBuilder var overview: some View {
@@ -2875,6 +2893,48 @@ struct PeoplePage: View {
 			_ = await gatewayRequest(method, path)
 			await load()
 			m.refreshPool(force: true)
+		}
+	}
+}
+
+/// Renames a computer everywhere you see it (the app, cerver.ai, `cerver pool`).
+/// Its relay keeps its own name, so nothing on the computer changes.
+struct RenameSheet: View {
+	@ObservedObject var m: Model
+	let computeID: String
+	let current: String
+	@Binding var shown: Bool
+	@State private var name = ""
+	@State private var saving = false
+	@State private var failed = false
+
+	var body: some View {
+		VStack(alignment: .leading, spacing: 12) {
+			Text("Rename computer").font(.headline)
+			TextField("Name", text: $name).textFieldStyle(.roundedBorder).frame(width: 280).onSubmit(save)
+			if failed { Text("Couldn't rename it. Try again.").font(.callout).foregroundStyle(.red) }
+			HStack {
+				Spacer()
+				if saving { ProgressView().controlSize(.small) }
+				Button("Cancel") { shown = false }.keyboardShortcut(.cancelAction)
+				Button("Rename", action: save).keyboardShortcut(.defaultAction)
+					.disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || saving)
+			}
+		}
+		.padding(20)
+		.onAppear { name = current }
+	}
+
+	func save() {
+		let n = name.trimmingCharacters(in: .whitespaces)
+		guard !n.isEmpty, !saving else { return }
+		if n == current { shown = false; return }
+		saving = true
+		Task {
+			let body = try? JSONSerialization.data(withJSONObject: ["label": n])
+			let ok = await gatewayRequest("PATCH", "/v2/computes/" + computeID, body: body) != nil
+			saving = false
+			if ok { shown = false; m.refreshPool(force: true) } else { failed = true }
 		}
 	}
 }
