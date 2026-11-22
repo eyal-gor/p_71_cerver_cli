@@ -160,7 +160,8 @@ func updateState(ctx context.Context) state {
 
 	if runtime.GOOS == "darwin" {
 		if v := appVersion(); v != "" {
-			st.App = &part{Current: v, Latest: latest, Update: newer(v)}
+			// "dev" is an app built on this Mac: leave it alone.
+			st.App = &part{Current: v, Latest: latest, Update: v != "dev" && newer(v)}
 		}
 	}
 	if relayInstalled() {

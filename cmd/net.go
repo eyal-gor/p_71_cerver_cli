@@ -48,13 +48,15 @@ func Net(args []string) error {
 		return netInstall(args)
 	case "uninstall":
 		return netUninstall()
+	case "phone":
+		return netPhone(args)
 	case "rm", "remove":
 		if len(args) != 1 {
 			return fmt.Errorf("usage: cerver net rm <name|address>")
 		}
 		return netRemove(args[0])
 	default:
-		return fmt.Errorf("unknown: cerver net %s (try: up, install, uninstall, status, rm)", sub)
+		return fmt.Errorf("unknown: cerver net %s (try: up, install, uninstall, status, phone, rm)", sub)
 	}
 }
 
@@ -172,7 +174,8 @@ func netUp(args []string) error {
 		Log: func(f string, a ...any) { fmt.Printf(f+"\n", a...) }}
 	bind.SetRelay(relay)
 	node := &wgnet.Node{
-		Dev: dev, Bind: bind, Key: key, Name: *name, OS: runtime.GOOS, Relay: true,
+		Port: key.StablePort(),
+		Dev:  dev, Bind: bind, Key: key, Name: *name, OS: runtime.GOOS, Relay: true,
 		Log: func(f string, a ...any) { fmt.Printf(f+"\n", a...) },
 		CheckIn: func(ctx context.Context, r wgnet.CheckInRequest) (*wgnet.CheckInAnswer, error) {
 			var ans wgnet.CheckInAnswer

@@ -12,10 +12,11 @@
 import AppKit
 import ServiceManagement
 import SwiftUI
+import CoreImage.CIFilterBuiltins
 
 let statusFile = "/var/run/cerver-net.json"
 let logFile = "/var/log/cerver-net.log"
-let addDeviceCommand = "curl -fsSL https://cerver.ai/install.sh | sh && sudo ~/.cerver/bin/cerver net install"
+let addDeviceCommand = "curl -fsSL https://cerver.ai/install.sh | sh"
 
 // MARK: - The logo (Cerver's coloured squares, as on cerver.ai)
 
@@ -450,6 +451,7 @@ struct NetNode: Decodable {
 	let name: String
 	let ip: String
 	let online: Bool
+	var os: String? = nil
 }
 
 /// One of your computers: its place in the pool and/or on the network.
@@ -460,6 +462,8 @@ struct Computer: Identifiable {
 	let isThisMac: Bool
 	var spec: Spec? = nil
 	var id: String { pool?.compute_id ?? "net:" + (net?.ip ?? name) }
+	var isPhone: Bool { net?.os == "phone" }
+	var icon: String { isThisMac ? "laptopcomputer" : (isPhone ? "iphone" : "desktopcomputer") }
 }
 
 /// Your computers: pool machines that are yours plus network devices, matched
@@ -617,7 +621,7 @@ enum Page: Hashable {
 struct MainWindow: View {
 	@ObservedObject var m: Model
 	// `-startPage thisMac` on launch opens that page (for screenshots).
-	@State private var page: Page? = UserDefaults.standard.string(forKey: "startPage") == "thisMac" ? .thisMac : .all
+	@State private var page: Page? = ["thisMac": Page.thisMac, "add": Page.add][UserDefaults.standard.string(forKey: "startPage") ?? ""] ?? .all
 
 	var body: some View {
 		NavigationSplitView {
@@ -673,7 +677,7 @@ struct MainWindow: View {
 				}
 				Section("Your computers") {
 					ForEach(m.computers.filter { !$0.isThisMac }) { c in
-						sidebarRow(name: c.name, dot: computerDot(c), icon: "desktopcomputer")
+						sidebarRow(name: c.name, dot: computerDot(c), icon: c.icon)
 							.tag(Page.computer(c.id))
 					}
 					Label("Add a computer", systemImage: "plus")
@@ -1330,12 +1334,71 @@ struct AddPage: View {
 				Text("1.  Open a terminal on that computer and run:").font(.system(size: 14))
 				CommandBox(cmd: addDeviceCommand, m: m)
 			}
-			Text("2.  It shows up here within a few seconds, and you can reach it by its name.")
+			Text("2.  It asks for that computer's password once, then shows up here within a few seconds. Reach it by its name.")
 				.font(.system(size: 14))
 			Text("It signs in with your Cerver account, so only your computers join.")
 				.font(.callout).foregroundStyle(.secondary)
+
+			Text("Add a phone").font(.system(size: 20, weight: .semibold)).padding(.top, 14)
+			Text("Your phone joins your network with the free WireGuard app, so you can reach your computers from it (SSH, apps they serve). It connects best on the same Wi-Fi as your computers.")
+				.font(.system(size: 14)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+			HStack(spacing: 10) {
+				TextField("Name", text: $phoneName).textFieldStyle(.roundedBorder).frame(width: 160)
+				Button(making ? "Making…" : "Show QR code") { makePhone() }
+					.buttonStyle(.borderedProminent).disabled(making || cleanName(phoneName).isEmpty)
+			}
+			if let e = phoneError {
+				Text(e).font(.callout).foregroundStyle(.red).textSelection(.enabled)
+			}
+			if let qr = qr {
+				HStack(alignment: .top, spacing: 18) {
+					Image(nsImage: qr).interpolation(.none).resizable().frame(width: 220, height: 220)
+						.padding(10).background(RoundedRectangle(cornerRadius: 12).fill(.white))
+					VStack(alignment: .leading, spacing: 8) {
+						Text("1.  Install WireGuard from the App Store.")
+						Text("2.  Tap ＋, then Create from QR code, and scan this.")
+						Text("3.  Turn it on. Your phone shows up on the Map.")
+						Text("The code holds the phone's key: don't share it. It's made fresh each time and not saved.")
+							.font(.callout).foregroundStyle(.secondary).padding(.top, 4)
+					}
+					.font(.system(size: 14))
+				}
+			}
 		}
 	}
+
+	@State private var phoneName = "iphone"
+	@State private var making = false
+	@State private var qr: NSImage?
+	@State private var phoneError: String?
+
+	func makePhone() {
+		making = true
+		phoneError = nil
+		qr = nil
+		let name = cleanName(phoneName)
+		Task.detached {
+			let (ok, out) = runCerver(["net", "phone", "--config", "--name", name])
+			let img = ok ? qrImage(out) : nil
+			await MainActor.run {
+				making = false
+				if let i = img { qr = i } else { phoneError = out.trimmingCharacters(in: .whitespacesAndNewlines) }
+				m.refreshPool(force: true)
+			}
+		}
+	}
+}
+
+/// A QR code of text, as a crisp image.
+func qrImage(_ text: String) -> NSImage? {
+	let f = CIFilter.qrCodeGenerator()
+	f.message = Data(text.utf8)
+	f.correctionLevel = "L"
+	guard let out = f.outputImage?.transformed(by: CGAffineTransform(scaleX: 8, y: 8)) else { return nil }
+	let rep = NSCIImageRep(ciImage: out)
+	let img = NSImage(size: rep.size)
+	img.addRepresentation(rep)
+	return img
 }
 
 // MARK: - Menu bar
@@ -1556,15 +1619,19 @@ struct NetworkMap: View {
 
 	func node(_ c: Computer) -> some View {
 		let relayOn = c.pool?.online == true
-		let netOn = c.net?.online == true
+		let netOn = c.net?.online == true || peer(c)?.connected == true  // a phone never checks in; this Mac sees it
 		return VStack(spacing: 4) {
 			HStack(spacing: 5) {
-				Image(systemName: c.isThisMac ? "laptopcomputer" : "desktopcomputer").font(.system(size: 13))
+				Image(systemName: c.icon).font(.system(size: 13))
 					.foregroundStyle(.secondary)
 				Text(c.name).font(.system(size: 12.5, weight: .semibold)).lineLimit(1)
 			}
 			// The two programs that run on it.
-			program("Relay", c.pool == nil ? "not installed" : (relayOn ? "connected" : "offline"), relayOn ? .green : .gray)
+			if c.isPhone {
+				program("Relay", "none (a phone)", .gray)
+			} else {
+				program("Relay", c.pool == nil ? "not installed" : (relayOn ? "connected" : "offline"), relayOn ? .green : .gray)
+			}
 			program("Network", c.net.map { netOn ? $0.ip : "off" } ?? "not installed", netOn ? .green : .gray)
 		}
 		.padding(.horizontal, 8)

@@ -73,6 +73,7 @@ commands:
                sudo cerver net up               # join until Ctrl-C
                sudo cerver net uninstall        # leave for good
                cerver net                       # your devices; reach them by name (ssh macbook)
+               cerver net phone [--name iphone] # QR code for the WireGuard app on a phone
                cerver net rm <name|address>     # take a device out
   forward    Reach an app on one of your machines from here, peer to peer.
                cerver forward MacBook-Air-2026 3456          # its port 3456 at localhost:3456 here

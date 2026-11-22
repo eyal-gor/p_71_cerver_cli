@@ -66,6 +66,12 @@ func LoadOrCreateKey(path string) (Key, error) {
 	return k, os.WriteFile(path, []byte(base64.StdEncoding.EncodeToString(k.Private[:])+"\n"), 0o600)
 }
 
+// StablePort is this device's own port, the same on every start: between
+// 41000 and 60999, picked from its key.
+func (k Key) StablePort() uint16 {
+	return 41000 + (uint16(k.Public[0])<<8|uint16(k.Public[1]))%20000
+}
+
 func (k Key) PublicB64() string { return base64.StdEncoding.EncodeToString(k.Public[:]) }
 
 // Peer is another device, as the gateway describes it.
@@ -118,6 +124,9 @@ type Node struct {
 	// 12 s). WireGuard retries a handshake every 5 s, so under ~6 s an address
 	// isn't really tried.
 	TryFor time.Duration
+	// Port to listen on; 0 picks one. A fixed port lets devices that can't
+	// be told about changes (a phone's WireGuard app) keep reaching this one.
+	Port uint16
 
 	mu      sync.Mutex
 	peers   map[string]*peerState
@@ -128,8 +137,14 @@ type Node struct {
 
 // Start sets the key and opens the socket.
 func (n *Node) Start() error {
-	if err := n.Dev.IpcSet(fmt.Sprintf("private_key=%s\nlisten_port=0\n", hex.EncodeToString(n.Key.Private[:]))); err != nil {
-		return err
+	if err := n.Dev.IpcSet(fmt.Sprintf("private_key=%s\nlisten_port=%d\n", hex.EncodeToString(n.Key.Private[:]), n.Port)); err != nil {
+		if n.Port == 0 {
+			return err
+		}
+		// That port is taken: any port still works for everything but phones.
+		if err := n.Dev.IpcSet(fmt.Sprintf("private_key=%s\nlisten_port=0\n", hex.EncodeToString(n.Key.Private[:]))); err != nil {
+			return err
+		}
 	}
 	return n.Dev.Up()
 }
