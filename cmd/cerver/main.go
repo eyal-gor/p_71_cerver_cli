@@ -62,7 +62,11 @@ commands:
                cerver run --on "$(cerver pool free)" "…"   # run on a free machine
                cerver pool share <compute_id>   # share your machine (unshare to undo)
                cerver pool invite               # the link that lets someone join
-  net        A private network between your own devices (WireGuard, direct).
+  relay      This computer in your pool: agents can run on it.
+               cerver relay install             # stay in the pool, also after restarts (no sudo)
+               cerver relay                     # is it running?
+               cerver relay uninstall           # leave the pool
+  net       A private network between your own devices (WireGuard, direct).
                sudo cerver net install          # join, and stay on after restarts
                sudo cerver net up               # join until Ctrl-C
                sudo cerver net uninstall        # leave for good
@@ -210,6 +214,8 @@ func main() {
 		err = cmd.Forward(args)
 	case "net":
 		err = cmd.Net(args)
+	case "relay":
+		err = cmd.Relay(args)
 	case "envs", "env", "environments":
 		err = cmd.Envs(args)
 	case "vaults", "vault":
