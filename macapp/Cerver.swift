@@ -697,141 +697,6 @@ struct CommandBox: View {
 	}
 }
 
-/// Everything about this Mac on one page: can your other computers reach it
-/// (the network), and can your agents run on it (the relay, in your pool).
-struct ThisMacPage: View {
-	@ObservedObject var m: Model
-	@State private var editing = false
-	@State private var newName = ""
-
-	var body: some View {
-		PageLayout(title: m.relayName, subtitle: "This Mac") {
-			if case .failed(let why) = m.phase { problem(why) }
-			if case .failed(let why) = m.relay { problem(why) }
-
-			section("Agents can run on it", detail: "Puts this Mac in your Cerver pool. Agents run as you, with your Claude and Codex logins.")
-			Card {
-				Row(label: "Agents can run here") {
-					if case .working = m.relay { ProgressView().controlSize(.small) }
-					Toggle("", isOn: Binding(get: { relayOn }, set: { $0 ? m.relayOn() : m.relayOff() }))
-						.toggleStyle(.switch).labelsHidden()
-						.disabled(relayWorking)
-				}
-				Divider().padding(.leading, 16)
-				Row(label: "Status") { StatusPill(text: relayText.0, color: relayText.1) }
-				if let pm = m.poolMachine, pm.online {
-					Divider().padding(.leading, 16)
-					Row(label: "Agents running now") {
-						Text(pm.max.map { "\(pm.running ?? 0) of \($0)" } ?? "\(pm.running ?? 0)").foregroundStyle(.secondary)
-					}
-				}
-				if let me = m.computers.first(where: { $0.isThisMac }), let p = me.pool {
-					Divider().padding(.leading, 16)
-					Row(label: "Others in your pool can use it") {
-						if let id = p.compute_id, m.sharing.contains(id) { ProgressView().controlSize(.small) }
-						Toggle("", isOn: Binding(get: { p.shared == true }, set: { m.setShared(me, $0) }))
-							.toggleStyle(.switch).labelsHidden()
-							.disabled(p.compute_id.map { m.sharing.contains($0) } ?? true)
-					}
-				}
-				Divider().padding(.leading, 16)
-				Row(label: "Log") {
-					Button("Show") {
-						NSWorkspace.shared.open(URL(fileURLWithPath: NSHomeDirectory() + "/.cerver/relay.log"))
-					}.buttonStyle(.link)
-				}
-			}
-
-			section("Your other computers can reach it", detail: "A private network between your computers. Reach this Mac from them by its name.")
-			Card {
-				Row(label: "Reachable") {
-					if m.busy { ProgressView().controlSize(.small) }
-					Toggle("", isOn: Binding(get: { m.isOn || m.phase == .starting }, set: { $0 ? m.turnOn() : m.turnOff() }))
-						.toggleStyle(.switch).labelsHidden()
-						.disabled(m.busy)
-				}
-				if let s = m.status {
-					Divider().padding(.leading, 16)
-					Row(label: "Name") {
-						if editing {
-							TextField("Name", text: $newName).textFieldStyle(.roundedBorder).frame(width: 180).onSubmit(save)
-							Button("Save", action: save).disabled(cleanName(newName).isEmpty)
-							Button("Cancel") { editing = false }
-						} else {
-							Text(s.name).font(.system(size: 13, design: .monospaced)).foregroundStyle(.secondary)
-							Button("Rename") { newName = s.name; editing = true }.buttonStyle(.link)
-						}
-					}
-					Divider().padding(.leading, 16)
-					Row(label: "Address") {
-						Text(s.ip).font(.system(size: 13, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
-						Button(m.copied == s.ip ? "Copied" : "Copy") { m.copy(s.ip) }.buttonStyle(.link)
-					}
-					Divider().padding(.leading, 16)
-					Row(label: "Backup relay") {
-						Text(s.relay_connected ? "Ready" : "Connecting…").foregroundStyle(.secondary)
-					}
-				} else if m.phase == .off {
-					Divider().padding(.leading, 16)
-					Row(label: "Turning it on asks for your Mac password once") { EmptyView() }
-				}
-			}
-
-			SpecSection(spec: m.computers.first(where: { $0.isThisMac })?.spec)
-
-			Card {
-				Row(label: "Open Cerver at login") {
-					Toggle("", isOn: Binding(get: { m.openAtLogin }, set: { m.setOpenAtLogin($0) }))
-						.toggleStyle(.switch).labelsHidden()
-				}
-			}
-		}
-	}
-
-	var relayWorking: Bool { if case .working = m.relay { return true }; return false }
-	var relayOn: Bool { m.relay == .running || m.relay == .starting }
-
-	/// What the relay is doing, as Cerver sees it when it can tell.
-	var relayText: (String, Color) {
-		switch m.relay {
-		case .working(let w): return (w, .orange)
-		case .failed: return ("Couldn't do that", .red)
-		case .off: return ("Off", .gray)
-		case .starting: return ("Starting…", .orange)
-		case .running:
-			guard let pm = m.poolMachine else { return (m.poolChecked ? "Running, connecting to Cerver…" : "Running", .orange) }
-			if !pm.online { return ("Running, connecting to Cerver…", .orange) }
-			if pm.state == "busy" { return ("Online, busy", .green) }
-			return ("Online, ready for agents", .green)
-		}
-	}
-
-	func section(_ title: String, detail: String) -> some View {
-		VStack(alignment: .leading, spacing: 3) {
-			Text(title).font(.system(size: 15, weight: .semibold))
-			Text(detail).font(.callout).foregroundStyle(.secondary)
-		}
-		.padding(.top, 6)
-	}
-
-	func problem(_ why: String) -> some View {
-		HStack(spacing: 8) {
-			Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
-			Text(why).font(.callout).textSelection(.enabled)
-			Spacer()
-		}
-		.padding(12)
-		.background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.1)))
-	}
-
-	func save() {
-		let n = cleanName(newName)
-		guard !n.isEmpty else { return }
-		editing = false
-		if n != m.status?.name { m.turnOn(name: n) }
-	}
-}
-
 // MARK: Computer status words (shared by the list and each computer's page)
 
 func agentsStatus(_ c: Computer) -> (String, Color) {
@@ -856,9 +721,10 @@ func sharedStatus(_ c: Computer) -> (String, Color) {
 /// What's on a computer: hardware, coding agents, tools.
 struct SpecSection: View {
 	let spec: Spec?
+	var showTitle = true
 
 	var body: some View {
-		Text("What's on it").font(.system(size: 15, weight: .semibold)).padding(.top, 6)
+		if showTitle { Text("What's on it").font(.system(size: 15, weight: .semibold)).padding(.top, 6) }
 		if let s = spec {
 			Card {
 				rows(s)
@@ -901,11 +767,33 @@ extension String {
 struct AllComputersPage: View {
 	@ObservedObject var m: Model
 	let open: (Page) -> Void
+	@State private var view = "Computers"
+	@State private var help = false
 
 	var body: some View {
-		PageLayout(title: "Your computers", subtitle: "Where your agents can run, which ones reach each other directly, and which ones others can use.") {
+		PageLayout(title: "Your computers", subtitle: "Where your agents can run.") {
+			HStack {
+				Picker("", selection: $view) {
+					Text("Computers").tag("Computers")
+					Text("Coding agents").tag("Coding agents")
+				}
+				.pickerStyle(.segmented).labelsHidden().fixedSize()
+				Spacer()
+				Button { help.toggle() } label: { Image(systemName: "questionmark.circle") }
+					.buttonStyle(.borderless).help("What these mean")
+					.popover(isPresented: $help) {
+						VStack(alignment: .leading, spacing: 6) {
+							legend("Agents", "Ready: agents can run on it now. Busy: running as many as it takes. Offline: its relay isn't running.")
+							legend("Network", "On: your computers reach it by name. Direct means computer to computer; via relay means through Cerver's backup relay.")
+							legend("Others can use it", "People you invited to your pool can run agents on it.")
+						}
+						.padding(16).frame(width: 360)
+					}
+			}
 			if m.computers.isEmpty {
 				Text(m.poolChecked ? "No computers yet." : "Loading…").foregroundStyle(.secondary)
+			} else if view == "Coding agents" {
+				harnessTable
 			} else {
 				Card {
 					Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 0) {
@@ -940,12 +828,6 @@ struct AllComputersPage: View {
 						}
 					}
 				}
-				harnessTable
-				VStack(alignment: .leading, spacing: 4) {
-					legend("Agents", "Ready: agents can run on it now. Busy: running as many as it takes. Offline: its relay isn't running.")
-					legend("Network", "On: your computers reach it by name. Direct means computer to computer; via relay means through Cerver's backup relay.")
-					legend("Others can use it", "People you invited to your pool can run agents on it.")
-				}
 			}
 		}
 	}
@@ -955,7 +837,6 @@ struct AllComputersPage: View {
 	/// Which coding agents (harnesses) each computer has, as its relay reported.
 	@ViewBuilder var harnessTable: some View {
 		let all = Array(Set(m.computers.flatMap { $0.spec?.coding_agents ?? [] })).sorted { harnessOrder($0) < harnessOrder($1) }
-		Text("Coding agents").font(.system(size: 15, weight: .semibold)).padding(.top, 8)
 		if all.isEmpty {
 			Text("No computer has reported its coding agents yet.").font(.callout).foregroundStyle(.secondary)
 		} else {
@@ -1001,86 +882,263 @@ struct AllComputersPage: View {
 	}
 }
 
-/// One of your other computers.
+// MARK: Tabs for a computer's page
+
+enum Tab: String, CaseIterable, Identifiable {
+	case overview = "Overview", agents = "Agents", network = "Network", hardware = "Hardware", settings = "Settings"
+	var id: String { rawValue }
+}
+
+/// Segmented tabs under the title (like System Settings), only the ones given.
+struct Tabs: View {
+	@Binding var tab: Tab
+	let tabs: [Tab]
+	var body: some View {
+		Picker("", selection: $tab) {
+			ForEach(tabs) { Text($0.rawValue).tag($0) }
+		}
+		.pickerStyle(.segmented)
+		.labelsHidden()
+		.fixedSize()
+		.padding(.bottom, 4)
+	}
+}
+
+func logRow(_ label: String, _ path: String) -> some View {
+	Row(label: label) {
+		Button("Show") { NSWorkspace.shared.open(URL(fileURLWithPath: path)) }.buttonStyle(.link)
+	}
+}
+
+/// This Mac: the two switches up front; details in tabs.
+struct ThisMacPage: View {
+	@ObservedObject var m: Model
+	@State private var tab: Tab = .overview
+	@State private var editing = false
+	@State private var newName = ""
+
+	var me: Computer? { m.computers.first(where: { $0.isThisMac }) }
+
+	var body: some View {
+		PageLayout(title: m.relayName, subtitle: "This Mac") {
+			Tabs(tab: $tab, tabs: [.overview, .agents, .network, .hardware, .settings])
+			if case .failed(let why) = m.phase { problem(why) }
+			if case .failed(let why) = m.relay { problem(why) }
+			switch tab {
+			case .overview: overview
+			case .agents: agents
+			case .network: network
+			case .hardware: SpecSection(spec: me?.spec, showTitle: false)
+			case .settings: settings
+			}
+		}
+	}
+
+	var overview: some View {
+		Card {
+			Row(label: "Agents can run here") {
+				StatusPill(text: relayText.0, color: relayText.1)
+				if relayWorking { ProgressView().controlSize(.small) }
+				Toggle("", isOn: Binding(get: { relayOn }, set: { $0 ? m.relayOn() : m.relayOff() }))
+					.toggleStyle(.switch).labelsHidden().disabled(relayWorking)
+			}
+			Divider().padding(.leading, 16)
+			Row(label: "Your computers can reach it") {
+				StatusPill(text: m.isOn ? "On" : (m.busy ? "…" : "Off"), color: m.isOn ? .green : .gray)
+				if m.busy { ProgressView().controlSize(.small) }
+				Toggle("", isOn: Binding(get: { m.isOn || m.phase == .starting }, set: { $0 ? m.turnOn() : m.turnOff() }))
+					.toggleStyle(.switch).labelsHidden().disabled(m.busy)
+			}
+		}
+	}
+
+	@ViewBuilder var agents: some View {
+		Text("Puts this Mac in your Cerver pool. Agents run as you, with your Claude and Codex logins.")
+			.font(.callout).foregroundStyle(.secondary)
+		Card {
+			Row(label: "Status") { StatusPill(text: relayText.0, color: relayText.1) }
+			if let pm = m.poolMachine, pm.online {
+				Divider().padding(.leading, 16)
+				Row(label: "Agents running now") {
+					Text(pm.max.map { "\(pm.running ?? 0) of \($0)" } ?? "\(pm.running ?? 0)").foregroundStyle(.secondary)
+				}
+			}
+			if let me = me, let p = me.pool {
+				Divider().padding(.leading, 16)
+				Row(label: "Others in your pool can use it") {
+					if let id = p.compute_id, m.sharing.contains(id) { ProgressView().controlSize(.small) }
+					Toggle("", isOn: Binding(get: { p.shared == true }, set: { m.setShared(me, $0) }))
+						.toggleStyle(.switch).labelsHidden()
+						.disabled(p.compute_id.map { m.sharing.contains($0) } ?? true)
+				}
+			}
+		}
+	}
+
+	@ViewBuilder var network: some View {
+		Text("A private network between your computers. Reach this Mac from them by its name.")
+			.font(.callout).foregroundStyle(.secondary)
+		if let s = m.status {
+			Card {
+				Row(label: "Name") {
+					if editing {
+						TextField("Name", text: $newName).textFieldStyle(.roundedBorder).frame(width: 180).onSubmit(save)
+						Button("Save", action: save).disabled(cleanName(newName).isEmpty)
+						Button("Cancel") { editing = false }
+					} else {
+						Text(s.name).font(.system(size: 13, design: .monospaced)).foregroundStyle(.secondary)
+						Button("Rename") { newName = s.name; editing = true }.buttonStyle(.link)
+					}
+				}
+				Divider().padding(.leading, 16)
+				Row(label: "Address") {
+					Text(s.ip).font(.system(size: 13, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
+					Button(m.copied == s.ip ? "Copied" : "Copy") { m.copy(s.ip) }.buttonStyle(.link)
+				}
+				Divider().padding(.leading, 16)
+				Row(label: "Backup relay") { Text(s.relay_connected ? "Ready" : "Connecting…").foregroundStyle(.secondary) }
+			}
+		} else {
+			Text("Off. Turn it on in Overview.").font(.callout).foregroundStyle(.secondary)
+		}
+	}
+
+	var settings: some View {
+		Card {
+			Row(label: "Open Cerver at login") {
+				Toggle("", isOn: Binding(get: { m.openAtLogin }, set: { m.setOpenAtLogin($0) }))
+					.toggleStyle(.switch).labelsHidden()
+			}
+			Divider().padding(.leading, 16)
+			logRow("Agents log", NSHomeDirectory() + "/.cerver/relay.log")
+			Divider().padding(.leading, 16)
+			logRow("Network log", logFile)
+		}
+	}
+
+	var relayWorking: Bool { if case .working = m.relay { return true }; return false }
+	var relayOn: Bool { m.relay == .running || m.relay == .starting }
+
+	var relayText: (String, Color) {
+		switch m.relay {
+		case .working: return ("…", .orange)
+		case .failed: return ("Problem", .red)
+		case .off: return ("Off", .gray)
+		case .starting: return ("Starting", .orange)
+		case .running:
+			guard let pm = m.poolMachine, pm.online else { return ("Connecting", .orange) }
+			return pm.state == "busy" ? ("Busy", .orange) : ("Ready", .green)
+		}
+	}
+
+	func problem(_ why: String) -> some View {
+		HStack(spacing: 8) {
+			Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+			Text(why).font(.callout).textSelection(.enabled)
+			Spacer()
+		}
+		.padding(12)
+		.background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.1)))
+	}
+
+	func save() {
+		let n = cleanName(newName)
+		guard !n.isEmpty else { return }
+		editing = false
+		if n != m.status?.name { m.turnOn(name: n) }
+	}
+}
+
+/// One of your other computers: status and SSH up front; details in tabs.
 struct ComputerPage: View {
 	@ObservedObject var m: Model
 	let c: Computer
+	@State private var tab: Tab = .overview
 
 	var peer: NetPeer? { m.status?.peers.first { $0.ip == c.net?.ip } }
 
 	var body: some View {
 		PageLayout(title: c.name, subtitle: subtitle) {
-			if let n = c.net, let p = peer, p.connected {
-				HStack(spacing: 10) {
-					Button {
-						openSSH(n.name)
-					} label: {
-						Label("Open SSH in Terminal", systemImage: "terminal").padding(.horizontal, 6).padding(.vertical, 3)
-					}
-					.buttonStyle(.borderedProminent).controlSize(.large).clipShape(Capsule())
-					Button(m.copied == n.name ? "Copied" : "Copy Name") { m.copy(n.name) }
-						.buttonStyle(.bordered).controlSize(.large).clipShape(Capsule())
-				}
+			Tabs(tab: $tab, tabs: [.overview, .agents, .network, .hardware])
+			switch tab {
+			case .overview: overview
+			case .agents: agents
+			case .network: network
+			case .hardware, .settings: SpecSection(spec: c.spec, showTitle: false)
 			}
+		}
+		.id(c.id)  // a different computer starts on Overview
+	}
 
-			section("Agents")
-			Card {
-				Row(label: "Status") { StatusPill(text: agentsStatus(c).0, color: agentsStatus(c).1) }
-				if let p = c.pool, p.online {
-					Divider().padding(.leading, 16)
-					Row(label: "Agents running now") {
-						Text(p.max.map { "\(p.running ?? 0) of \($0)" } ?? "\(p.running ?? 0)").foregroundStyle(.secondary)
-					}
+	@ViewBuilder var overview: some View {
+		Card {
+			Row(label: "Agents") { StatusPill(text: agentsStatus(c).0, color: agentsStatus(c).1) }
+			Divider().padding(.leading, 16)
+			Row(label: "Network") { StatusPill(text: networkStatus(c, peer: peer).0, color: networkStatus(c, peer: peer).1) }
+			Divider().padding(.leading, 16)
+			Row(label: "Others can use it") { StatusPill(text: sharedStatus(c).0, color: sharedStatus(c).1) }
+		}
+		if let n = c.net, let p = peer, p.connected {
+			HStack(spacing: 10) {
+				Button {
+					openSSH(n.name)
+				} label: {
+					Label("Open SSH in Terminal", systemImage: "terminal").padding(.horizontal, 6).padding(.vertical, 3)
 				}
-				if let p = c.pool {
-					Divider().padding(.leading, 16)
-					Row(label: "Others in your pool can use it") {
-						if let id = p.compute_id, m.sharing.contains(id) { ProgressView().controlSize(.small) }
-						Toggle("", isOn: Binding(get: { p.shared == true }, set: { m.setShared(c, $0) }))
-							.toggleStyle(.switch).labelsHidden()
-							.disabled(p.compute_id.map { m.sharing.contains($0) } ?? true)
-					}
-				}
+				.buttonStyle(.borderedProminent).controlSize(.large).clipShape(Capsule())
+				Button(m.copied == n.name ? "Copied" : "Copy Name") { m.copy(n.name) }
+					.buttonStyle(.bordered).controlSize(.large).clipShape(Capsule())
 			}
-			if c.pool == nil {
-				Text("Agents can't run on it: it's on your network but not in your pool. On that computer, run: cerver relay install")
-					.font(.callout).foregroundStyle(.secondary)
-			} else if c.pool?.online == false {
-				Text("To bring it back, on that computer run: cerver relay install")
-					.font(.callout).foregroundStyle(.secondary)
-			}
+		}
+	}
 
-			section("Network")
-			Card {
-				Row(label: "Status") {
-					StatusPill(text: networkStatus(c, peer: peer).0, color: networkStatus(c, peer: peer).1)
-				}
-				if let n = c.net {
-					Divider().padding(.leading, 16)
-					Row(label: "Name") { Text(n.name).font(.system(size: 13, design: .monospaced)).foregroundStyle(.secondary) }
-					Divider().padding(.leading, 16)
-					Row(label: "Address") {
-						Text(n.ip).font(.system(size: 13, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
-						Button(m.copied == n.ip ? "Copied" : "Copy") { m.copy(n.ip) }.buttonStyle(.link)
-					}
+	@ViewBuilder var agents: some View {
+		Card {
+			Row(label: "Status") { StatusPill(text: agentsStatus(c).0, color: agentsStatus(c).1) }
+			if let p = c.pool, p.online {
+				Divider().padding(.leading, 16)
+				Row(label: "Agents running now") {
+					Text(p.max.map { "\(p.running ?? 0) of \($0)" } ?? "\(p.running ?? 0)").foregroundStyle(.secondary)
 				}
 			}
-			if c.net == nil {
-				Text("Not on your network. On that computer, run: sudo cerver net install")
-					.font(.callout).foregroundStyle(.secondary)
+			if let p = c.pool {
+				Divider().padding(.leading, 16)
+				Row(label: "Others in your pool can use it") {
+					if let id = p.compute_id, m.sharing.contains(id) { ProgressView().controlSize(.small) }
+					Toggle("", isOn: Binding(get: { p.shared == true }, set: { m.setShared(c, $0) }))
+						.toggleStyle(.switch).labelsHidden()
+						.disabled(p.compute_id.map { m.sharing.contains($0) } ?? true)
+				}
 			}
+		}
+		if c.pool == nil {
+			Text("Not in your pool. On that computer, run the Cerver install.").font(.callout).foregroundStyle(.secondary)
+		} else if c.pool?.online == false {
+			Text("Its relay isn't running. Turn the computer on, or run the Cerver install on it again.").font(.callout).foregroundStyle(.secondary)
+		}
+	}
 
-			SpecSection(spec: c.spec)
+	@ViewBuilder var network: some View {
+		Card {
+			Row(label: "Status") { StatusPill(text: networkStatus(c, peer: peer).0, color: networkStatus(c, peer: peer).1) }
+			if let n = c.net {
+				Divider().padding(.leading, 16)
+				Row(label: "Name") { Text(n.name).font(.system(size: 13, design: .monospaced)).foregroundStyle(.secondary) }
+				Divider().padding(.leading, 16)
+				Row(label: "Address") {
+					Text(n.ip).font(.system(size: 13, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
+					Button(m.copied == n.ip ? "Copied" : "Copy") { m.copy(n.ip) }.buttonStyle(.link)
+				}
+			}
+		}
+		if c.net == nil {
+			Text("Not on your network. On that computer, run the Cerver install.").font(.callout).foregroundStyle(.secondary)
 		}
 	}
 
 	var subtitle: String {
 		if c.pool?.online == true || c.net?.online == true { return "Online" }
 		return "Offline. It may be off or asleep."
-	}
-
-	func section(_ t: String) -> some View {
-		Text(t).font(.system(size: 15, weight: .semibold)).padding(.top, 6)
 	}
 }
 
