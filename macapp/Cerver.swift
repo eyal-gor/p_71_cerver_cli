@@ -1507,13 +1507,31 @@ struct ComputerPage: View {
 	}
 
 	@ViewBuilder var overview: some View {
+		// Same rows as This Mac. Run agents and Private network switch on that
+		// computer itself (turning them off from here would cut the way back).
 		Card {
-			Row(label: "Agents") { StatusPill(text: agentsStatus(c).0, color: agentsStatus(c).1) }
+			Row(label: "Run agents", note: "Part of your compute pool: Cerver can start your agents here, as you.") {
+				StatusPill(text: agentsStatus(c).0, color: agentsStatus(c).1)
+				Toggle("", isOn: .constant(c.pool?.online == true)).toggleStyle(.switch).labelsHidden().disabled(true)
+					.help("Switch this on \(c.name) itself")
+			}
 			Divider().padding(.leading, 16)
-			Row(label: "Network") { StatusPill(text: networkStatus(c, peer: peer).0, color: networkStatus(c, peer: peer).1) }
+			Row(label: "Private network", note: "Your other computers can reach it: SSH, files, its screen.") {
+				StatusPill(text: networkStatus(c, peer: peer).0, color: networkStatus(c, peer: peer).1)
+				Toggle("", isOn: .constant(c.net?.online == true)).toggleStyle(.switch).labelsHidden().disabled(true)
+					.help("Switch this on \(c.name) itself")
+			}
 			Divider().padding(.leading, 16)
-			Row(label: "Share with people you invite", note: "Their agents can run here, fenced off from your files.") { StatusPill(text: sharedStatus(c).0, color: sharedStatus(c).1) }
+			Row(label: "Share with people you invite", note: "Their agents can run here, fenced off from your files.") {
+				StatusPill(text: sharedStatus(c).0, color: sharedStatus(c).1)
+				if let id = c.pool?.compute_id, m.sharing.contains(id) { ProgressView().controlSize(.small) }
+				Toggle("", isOn: Binding(get: { c.pool?.shared == true }, set: { m.setShared(c, $0) }))
+					.toggleStyle(.switch).labelsHidden()
+					.disabled(c.pool?.compute_id.map { m.sharing.contains($0) } ?? true)
+			}
 		}
+		Text("Run agents and Private network switch on \(c.name) itself.")
+			.font(.callout).foregroundStyle(.secondary)
 		if let n = c.net, let p = peer, p.connected {
 			HStack(spacing: 10) {
 				Button {
