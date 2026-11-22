@@ -949,6 +949,16 @@ struct ThisMacPage: View {
 				Toggle("", isOn: Binding(get: { m.isOn || m.phase == .starting }, set: { $0 ? m.turnOn() : m.turnOff() }))
 					.toggleStyle(.switch).labelsHidden().disabled(m.busy)
 			}
+			if let me = me, let p = me.pool {
+				Divider().padding(.leading, 16)
+				Row(label: "Others can use it") {
+					StatusPill(text: sharedStatus(me).0, color: sharedStatus(me).1)
+					if let id = p.compute_id, m.sharing.contains(id) { ProgressView().controlSize(.small) }
+					Toggle("", isOn: Binding(get: { p.shared == true }, set: { m.setShared(me, $0) }))
+						.toggleStyle(.switch).labelsHidden()
+						.disabled(p.compute_id.map { m.sharing.contains($0) } ?? true)
+				}
+			}
 		}
 	}
 
