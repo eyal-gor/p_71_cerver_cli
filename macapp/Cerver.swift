@@ -207,20 +207,48 @@ final class Model: ObservableObject {
 		}
 	}
 
-	// What Cerver itself sees of this Mac (online, free or busy, agents running).
-	@Published var poolMachine: PoolMachine?
+	// Your computers as Cerver sees them: the pool (agents, shared) and the
+	// network (reachable), joined by name.
+	@Published var computers: [Computer] = []
 	@Published var poolChecked = false
+	@Published var sharing: Set<String> = []  // compute ids being switched right now
 	private var lastPoolFetch = Date.distantPast
+
+	/// This Mac in the pool, when Cerver knows it.
+	var poolMachine: PoolMachine? { computers.first { $0.isThisMac }?.pool }
 
 	func refreshPool(force: Bool = false) {
 		if !force && Date().timeIntervalSince(lastPoolFetch) < 8 { return }
 		lastPoolFetch = Date()
-		let name = relayName
+		let me = relayName
+		let netMe = status?.name
 		Task.detached {
-			let m = await fetchPoolMachine(named: name)
+			guard let list = await fetchComputers(thisMac: me, thisMacNet: netMe) else {
+				await MainActor.run { self.poolChecked = true }
+				return
+			}
 			await MainActor.run {
 				self.poolChecked = true
-				self.poolMachine = m
+				self.computers = list
+			}
+		}
+	}
+
+	/// Lets people in your pool use this computer (or stops it).
+	func setShared(_ c: Computer, _ on: Bool) {
+		guard let id = c.pool?.compute_id, let bin = Bundle.main.path(forResource: "cerver", ofType: nil) else { return }
+		sharing.insert(id)
+		Task.detached {
+			let p = Process()
+			p.executableURL = URL(fileURLWithPath: bin)
+			p.arguments = ["pool", on ? "share" : "unshare", id]
+			p.standardOutput = Pipe()
+			p.standardError = Pipe()
+			try? p.run()
+			p.waitUntilExit()
+			await MainActor.run {
+				self.sharing.remove(id)
+				self.refreshPool(force: true)
 			}
 		}
 	}
@@ -279,17 +307,60 @@ final class Model: ObservableObject {
 }
 
 struct PoolMachine: Decodable {
+	let compute_id: String?
 	let name: String
 	let online: Bool
 	let state: String?  // free / busy / offline
 	let running: Int?
 	let max: Int?
 	let mine: Bool?
+	let shared: Bool?
 }
 
-/// Asks Cerver (GET /v2/pool, with your key from ~/.cerver/cerver.env) how it
-/// sees the machine with this name.
-func fetchPoolMachine(named name: String) async -> PoolMachine? {
+struct NetNode: Decodable {
+	let name: String
+	let ip: String
+	let online: Bool
+}
+
+/// One of your computers: its place in the pool and/or on the network.
+struct Computer: Identifiable {
+	let name: String
+	let pool: PoolMachine?
+	let net: NetNode?
+	let isThisMac: Bool
+	var id: String { pool?.compute_id ?? "net:" + (net?.ip ?? name) }
+}
+
+/// Your computers: pool machines that are yours plus network devices, matched
+/// by name (the network uses the lowercase form: MacBook-Air-2026 → macbook-air-2026).
+func fetchComputers(thisMac: String, thisMacNet: String?) async -> [Computer]? {
+	struct Pool: Decodable { let machines: [PoolMachine]? }
+	struct Net: Decodable { let nodes: [NetNode]? }
+	guard let poolData = await gatewayGET("/v2/pool"), let pool = try? JSONDecoder().decode(Pool.self, from: poolData) else { return nil }
+	let nodes = (await gatewayGET("/v2/net")).flatMap { try? JSONDecoder().decode(Net.self, from: $0) }?.nodes ?? []
+	var out: [Computer] = []
+	var used = Set<String>()
+	for m in (pool.machines ?? []) where m.mine ?? true {
+		let me = m.name == thisMac
+		let node = nodes.first { !used.contains($0.ip) && ($0.name == cleanName(m.name) || (me && $0.name == thisMacNet)) }
+		if let n = node { used.insert(n.ip) }
+		out.append(Computer(name: m.name, pool: m, net: node, isThisMac: me))
+	}
+	for n in nodes where !used.contains(n.ip) {
+		out.append(Computer(name: n.name, pool: nil, net: n, isThisMac: n.name == thisMacNet))
+	}
+	// This Mac first, then online ones, then by name.
+	return out.sorted {
+		if $0.isThisMac != $1.isThisMac { return $0.isThisMac }
+		let a = ($0.pool?.online ?? false) || ($0.net?.online ?? false), b = ($1.pool?.online ?? false) || ($1.net?.online ?? false)
+		if a != b { return a }
+		return $0.name.lowercased() < $1.name.lowercased()
+	}
+}
+
+/// GET from the Cerver gateway with your key from ~/.cerver/cerver.env.
+func gatewayGET(_ path: String) async -> Data? {
 	let envPath = NSHomeDirectory() + "/.cerver/cerver.env"
 	guard let text = try? String(contentsOfFile: envPath, encoding: .utf8) else { return nil }
 	var env: [String: String] = [:]
@@ -299,15 +370,11 @@ func fetchPoolMachine(named name: String) async -> PoolMachine? {
 	}
 	guard let key = env["CERVER_API_KEY"], !key.isEmpty else { return nil }
 	let base = env["CERVER_GATEWAY_URL"].flatMap { $0.isEmpty ? nil : $0 } ?? "https://gateway.cerver.ai"
-	guard let url = URL(string: base + "/v2/pool") else { return nil }
+	guard let url = URL(string: base + path) else { return nil }
 	var req = URLRequest(url: url, timeoutInterval: 15)
 	req.setValue("Bearer " + key, forHTTPHeaderField: "Authorization")
-	struct Pool: Decodable { let machines: [PoolMachine]? }
-	guard let (data, resp) = try? await URLSession.shared.data(for: req),
-		(resp as? HTTPURLResponse)?.statusCode == 200,
-		let pool = try? JSONDecoder().decode(Pool.self, from: data)
-	else { return nil }
-	return pool.machines?.first { $0.name == name && ($0.mine ?? true) }
+	guard let (data, resp) = try? await URLSession.shared.data(for: req), (resp as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+	return data
 }
 
 enum RelayState: Equatable {
@@ -413,12 +480,12 @@ func howConnected(_ p: NetPeer) -> String {
 // MARK: - Window (sidebar + page, in the style of the ChatGPT Mac app)
 
 enum Page: Hashable {
-	case thisMac, peer(String), add
+	case all, thisMac, computer(String), add
 }
 
 struct MainWindow: View {
 	@ObservedObject var m: Model
-	@State private var page: Page? = .thisMac
+	@State private var page: Page? = .all
 
 	var body: some View {
 		NavigationSplitView {
@@ -431,9 +498,9 @@ struct MainWindow: View {
 			}
 		}
 		.frame(minWidth: 760, minHeight: 540)
-		.onChange(of: m.status?.peers.map(\.ip) ?? []) { ips in
-			// The computer on screen left: go back to this Mac.
-			if case .peer(let ip) = page, !ips.contains(ip) { page = .thisMac }
+		.onChange(of: m.computers.map(\.id)) { ids in
+			// The computer on screen left: go back to the list.
+			if case .computer(let id) = page, !ids.contains(id) { page = .all }
 		}
 	}
 
@@ -452,14 +519,16 @@ struct MainWindow: View {
 			.padding(.bottom, 10)
 
 			List(selection: $page) {
+				Label("All computers", systemImage: "square.grid.2x2")
+					.tag(Page.all)
 				Section("This Mac") {
 					sidebarRow(name: m.relayName, dot: thisMacDot, icon: "laptopcomputer")
 						.tag(Page.thisMac)
 				}
 				Section("Your computers") {
-					ForEach(m.status?.peers ?? []) { p in
-						sidebarRow(name: p.name, dot: dotColor(p), icon: "desktopcomputer")
-							.tag(Page.peer(p.ip))
+					ForEach(m.computers.filter { !$0.isThisMac }) { c in
+						sidebarRow(name: c.name, dot: computerDot(c), icon: "desktopcomputer")
+							.tag(Page.computer(c.id))
 					}
 					Label("Add a computer", systemImage: "plus")
 						.foregroundStyle(.secondary)
@@ -487,8 +556,9 @@ struct MainWindow: View {
 		}
 	}
 
-	func dotColor(_ p: NetPeer) -> Color {
-		p.connected ? (p.via == "relay" ? .orange : .green) : Color.secondary.opacity(0.4)
+	func computerDot(_ c: Computer) -> Color {
+		if c.pool?.online == true || c.net?.online == true { return c.pool?.state == "busy" ? .orange : .green }
+		return Color.secondary.opacity(0.4)
 	}
 
 	// MARK: Pages
@@ -505,10 +575,11 @@ struct MainWindow: View {
 			.padding(40)
 			.frame(maxWidth: .infinity, maxHeight: .infinity)
 		} else {
-			switch page ?? .thisMac {
+			switch page ?? .all {
+			case .all: AllComputersPage(m: m, open: { page = $0 })
 			case .thisMac: ThisMacPage(m: m)
-			case .peer(let ip):
-				if let p = m.status?.peers.first(where: { $0.ip == ip }) { PeerPage(m: m, p: p) } else { ThisMacPage(m: m) }
+			case .computer(let id):
+				if let c = m.computers.first(where: { $0.id == id }) { ComputerPage(m: m, c: c) } else { AllComputersPage(m: m, open: { page = $0 }) }
 			case .add: AddPage(m: m)
 			}
 		}
@@ -618,6 +689,15 @@ struct ThisMacPage: View {
 						Text(pm.max.map { "\(pm.running ?? 0) of \($0)" } ?? "\(pm.running ?? 0)").foregroundStyle(.secondary)
 					}
 				}
+				if let me = m.computers.first(where: { $0.isThisMac }), let p = me.pool {
+					Divider().padding(.leading, 16)
+					Row(label: "Others in your pool can use it") {
+						if let id = p.compute_id, m.sharing.contains(id) { ProgressView().controlSize(.small) }
+						Toggle("", isOn: Binding(get: { p.shared == true }, set: { m.setShared(me, $0) }))
+							.toggleStyle(.switch).labelsHidden()
+							.disabled(p.compute_id.map { m.sharing.contains($0) } ?? true)
+					}
+				}
 				Divider().padding(.leading, 16)
 				Row(label: "Log") {
 					Button("Show") {
@@ -714,40 +794,167 @@ struct ThisMacPage: View {
 	}
 }
 
-struct PeerPage: View {
+// MARK: Computer status words (shared by the list and each computer's page)
+
+func agentsStatus(_ c: Computer) -> (String, Color) {
+	guard let p = c.pool else { return ("Not in pool", .gray) }
+	if !p.online { return ("Offline", .gray) }
+	if p.state == "busy" { return ("Busy", .orange) }
+	return ("Ready", .green)
+}
+
+func networkStatus(_ c: Computer, peer: NetPeer?) -> (String, Color) {
+	guard let n = c.net else { return ("Off", .gray) }
+	if c.isThisMac { return n.online ? ("On", .green) : ("Off", .gray) }
+	if let p = peer, p.connected { return p.via == "relay" ? ("On, via relay", .orange) : ("On, direct", .green) }
+	return n.online ? ("On", .green) : ("Off", .gray)
+}
+
+func sharedStatus(_ c: Computer) -> (String, Color) {
+	guard let p = c.pool else { return ("—", .gray) }
+	return p.shared == true ? ("Yes", .blue) : ("Only you", .gray)
+}
+
+/// Every computer in one table: can agents run on it, is it on the network,
+/// can people in your pool use it.
+struct AllComputersPage: View {
 	@ObservedObject var m: Model
-	let p: NetPeer
+	let open: (Page) -> Void
 
 	var body: some View {
-		PageLayout(title: p.name, subtitle: p.connected ? "Reach it from this Mac by its name." : "Cerver is trying to reach it. It may be off or asleep.") {
-			HStack {
-				StatusPill(text: howConnected(p), color: p.connected ? (p.via == "relay" ? .orange : .green) : .gray)
-				Spacer()
-			}
-			HStack(spacing: 10) {
-				Button {
-					openSSH(p.name)
-				} label: {
-					Label("Open SSH in Terminal", systemImage: "terminal").padding(.horizontal, 6).padding(.vertical, 3)
+		PageLayout(title: "Your computers", subtitle: "Where your agents can run, which ones reach each other directly, and which ones others can use.") {
+			if m.computers.isEmpty {
+				Text(m.poolChecked ? "No computers yet." : "Loading…").foregroundStyle(.secondary)
+			} else {
+				Card {
+					Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 0) {
+						GridRow {
+							header("Computer")
+							header("Agents")
+							header("Network")
+							header("Others can use it")
+						}
+						.padding(.horizontal, 16).padding(.vertical, 10)
+						ForEach(m.computers) { c in
+							Divider().gridCellColumns(4)
+							GridRow {
+								HStack(spacing: 8) {
+									Image(systemName: c.isThisMac ? "laptopcomputer" : "desktopcomputer").foregroundStyle(.secondary)
+									Text(c.name).font(.system(size: 14, weight: .medium)).lineLimit(1)
+									if c.isThisMac {
+										Text("This Mac").font(.system(size: 11)).foregroundStyle(.secondary)
+											.padding(.horizontal, 6).padding(.vertical, 1)
+											.background(Capsule().fill(Color.primary.opacity(0.06)))
+									}
+								}
+								StatusPill(text: agentsStatus(c).0, color: agentsStatus(c).1)
+								StatusPill(text: networkStatus(c, peer: peer(c)).0, color: networkStatus(c, peer: peer(c)).1)
+								StatusPill(text: sharedStatus(c).0, color: sharedStatus(c).1)
+							}
+							.padding(.horizontal, 16).padding(.vertical, 9)
+							.contentShape(Rectangle())
+							.onTapGesture { open(c.isThisMac ? .thisMac : .computer(c.id)) }
+						}
+					}
 				}
-				.buttonStyle(.borderedProminent).controlSize(.large).clipShape(Capsule())
-				.disabled(!p.connected)
-				Button(m.copied == p.name ? "Copied" : "Copy Name") { m.copy(p.name) }
-					.buttonStyle(.bordered).controlSize(.large).clipShape(Capsule())
-			}
-			Card {
-				Row(label: "Name") { Text(p.name).foregroundStyle(.secondary) }
-				Divider().padding(.leading, 16)
-				Row(label: "Address") {
-					Text(p.ip).font(.system(size: 13, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
-					Button(m.copied == p.ip ? "Copied" : "Copy") { m.copy(p.ip) }.buttonStyle(.link)
+				VStack(alignment: .leading, spacing: 4) {
+					legend("Agents", "Ready: agents can run on it now. Busy: running as many as it takes. Offline: its relay isn't running.")
+					legend("Network", "On: your computers reach it by name. Direct means computer to computer; via relay means through Cerver's backup relay.")
+					legend("Others can use it", "People you invited to your pool can run agents on it.")
 				}
-				Divider().padding(.leading, 16)
-				Row(label: "Connection") { Text(howConnected(p)).foregroundStyle(.secondary) }
 			}
-			Text("Use the name anywhere you'd use an address: ssh \(p.name), http://\(p.name):3000, and so on.")
-				.font(.callout).foregroundStyle(.secondary)
 		}
+	}
+
+	func peer(_ c: Computer) -> NetPeer? { m.status?.peers.first { $0.ip == c.net?.ip } }
+
+	func header(_ t: String) -> some View {
+		Text(t).font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
+	}
+
+	func legend(_ title: String, _ text: String) -> some View {
+		(Text(title + ": ").fontWeight(.semibold) + Text(text)).font(.callout).foregroundStyle(.secondary)
+	}
+}
+
+/// One of your other computers.
+struct ComputerPage: View {
+	@ObservedObject var m: Model
+	let c: Computer
+
+	var peer: NetPeer? { m.status?.peers.first { $0.ip == c.net?.ip } }
+
+	var body: some View {
+		PageLayout(title: c.name, subtitle: subtitle) {
+			if let n = c.net, let p = peer, p.connected {
+				HStack(spacing: 10) {
+					Button {
+						openSSH(n.name)
+					} label: {
+						Label("Open SSH in Terminal", systemImage: "terminal").padding(.horizontal, 6).padding(.vertical, 3)
+					}
+					.buttonStyle(.borderedProminent).controlSize(.large).clipShape(Capsule())
+					Button(m.copied == n.name ? "Copied" : "Copy Name") { m.copy(n.name) }
+						.buttonStyle(.bordered).controlSize(.large).clipShape(Capsule())
+				}
+			}
+
+			section("Agents")
+			Card {
+				Row(label: "Status") { StatusPill(text: agentsStatus(c).0, color: agentsStatus(c).1) }
+				if let p = c.pool, p.online {
+					Divider().padding(.leading, 16)
+					Row(label: "Agents running now") {
+						Text(p.max.map { "\(p.running ?? 0) of \($0)" } ?? "\(p.running ?? 0)").foregroundStyle(.secondary)
+					}
+				}
+				if let p = c.pool {
+					Divider().padding(.leading, 16)
+					Row(label: "Others in your pool can use it") {
+						if let id = p.compute_id, m.sharing.contains(id) { ProgressView().controlSize(.small) }
+						Toggle("", isOn: Binding(get: { p.shared == true }, set: { m.setShared(c, $0) }))
+							.toggleStyle(.switch).labelsHidden()
+							.disabled(p.compute_id.map { m.sharing.contains($0) } ?? true)
+					}
+				}
+			}
+			if c.pool == nil {
+				Text("Agents can't run on it: it's on your network but not in your pool. On that computer, run: cerver relay install")
+					.font(.callout).foregroundStyle(.secondary)
+			} else if c.pool?.online == false {
+				Text("To bring it back, on that computer run: cerver relay install")
+					.font(.callout).foregroundStyle(.secondary)
+			}
+
+			section("Network")
+			Card {
+				Row(label: "Status") {
+					StatusPill(text: networkStatus(c, peer: peer).0, color: networkStatus(c, peer: peer).1)
+				}
+				if let n = c.net {
+					Divider().padding(.leading, 16)
+					Row(label: "Name") { Text(n.name).font(.system(size: 13, design: .monospaced)).foregroundStyle(.secondary) }
+					Divider().padding(.leading, 16)
+					Row(label: "Address") {
+						Text(n.ip).font(.system(size: 13, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
+						Button(m.copied == n.ip ? "Copied" : "Copy") { m.copy(n.ip) }.buttonStyle(.link)
+					}
+				}
+			}
+			if c.net == nil {
+				Text("Not on your network. On that computer, run: sudo cerver net install")
+					.font(.callout).foregroundStyle(.secondary)
+			}
+		}
+	}
+
+	var subtitle: String {
+		if c.pool?.online == true || c.net?.online == true { return "Online" }
+		return "Offline. It may be off or asleep."
+	}
+
+	func section(_ t: String) -> some View {
+		Text(t).font(.system(size: 15, weight: .semibold)).padding(.top, 6)
 	}
 }
 
