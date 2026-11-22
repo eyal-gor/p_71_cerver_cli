@@ -8,6 +8,9 @@ APP="build/Cerver Net.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp Info.plist "$APP/Contents/Info.plist"
+swift make-icon.swift build/AppIcon.iconset
+iconutil -c icns build/AppIcon.iconset -o "$APP/Contents/Resources/AppIcon.icns"
+rm -rf build/AppIcon.iconset
 
 for arch in arm64 x86_64; do
 	swiftc -parse-as-library -O -target "$arch-apple-macos13.0" CerverNet.swift -o "build/CerverNet-$arch"
