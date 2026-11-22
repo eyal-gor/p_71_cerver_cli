@@ -1293,7 +1293,7 @@ struct NetworkMap: View {
 						for c in ordered {
 							guard let p = pos[c.id], c.pool != nil else { continue }
 							var path = Path()
-							path.move(to: CGPoint(x: p.x, y: p.y - 38))
+							path.move(to: CGPoint(x: p.x, y: p.y - 44))
 							path.addQuadCurve(to: agentsPort, control: CGPoint(x: p.x, y: agentsPort.y + 40))
 							let on = c.pool?.online == true
 							ctx.stroke(path, with: .color(on ? Color.secondary.opacity(0.55) : Color.secondary.opacity(0.25)),
@@ -1303,7 +1303,7 @@ struct NetworkMap: View {
 						// This Mac's line to the backup relay (standing by, or carrying traffic).
 						if m.status?.relay_connected == true {
 							var path = Path()
-							path.move(to: CGPoint(x: mp.x + 20, y: mp.y - 38))
+							path.move(to: CGPoint(x: mp.x + 20, y: mp.y - 44))
 							path.addQuadCurve(to: relayPort, control: CGPoint(x: mp.x + 20, y: relayPort.y + 40))
 							ctx.stroke(path, with: .color(.orange.opacity(0.5)), style: StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
 						}
@@ -1312,12 +1312,12 @@ struct NetworkMap: View {
 							guard let p = pos[c.id], let pr = peer(c), pr.connected else { continue }
 							if pr.via == "relay" {
 								var path = Path()
-								path.move(to: CGPoint(x: p.x, y: p.y - 38))
+								path.move(to: CGPoint(x: p.x, y: p.y - 44))
 								path.addQuadCurve(to: relayPort, control: CGPoint(x: p.x, y: relayPort.y + 40))
 								ctx.stroke(path, with: .color(.orange), style: StrokeStyle(lineWidth: 2.5, dash: [6, 4]))
 							} else {
 								var path = Path()
-								let a = CGPoint(x: mp.x, y: mp.y + 38), b = CGPoint(x: p.x, y: p.y + 38)
+								let a = CGPoint(x: mp.x, y: mp.y + 44), b = CGPoint(x: p.x, y: p.y + 44)
 								path.move(to: a)
 								path.addQuadCurve(to: b, control: CGPoint(x: (a.x + b.x) / 2, y: a.y + 70))
 								ctx.stroke(path, with: .color(.green), style: StrokeStyle(lineWidth: 3, lineCap: .round))
@@ -1341,7 +1341,7 @@ struct NetworkMap: View {
 								Text("direct").font(.system(size: 11, weight: .semibold)).foregroundStyle(.green)
 									.padding(.horizontal, 6).padding(.vertical, 1)
 									.background(Capsule().fill(Color(nsColor: .windowBackgroundColor)))
-									.position(x: (mp.x + p.x) / 2, y: row + 38 + 35)
+									.position(x: (mp.x + p.x) / 2, y: row + 44 + 35)
 							}
 						}
 					}
@@ -1352,9 +1352,9 @@ struct NetworkMap: View {
 			.overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.08)))
 
 			HStack(spacing: 18) {
-				key(Color.green, solid: true, "Direct, computer to computer")
-				key(Color.orange, solid: false, "Through the backup relay")
-				key(Color.secondary, solid: true, "Agents connection")
+				key(Color.green, solid: true, "Direct")
+				key(Color.orange, solid: false, "Through network backup")
+				key(Color.secondary, solid: true, "Relay ↔ Cerver"
 			}
 			Text("Lines show what this Mac sees. Click a computer to open it.")
 				.font(.callout).foregroundStyle(.secondary)
@@ -1368,8 +1368,8 @@ struct NetworkMap: View {
 				Text("Cerver").font(.system(size: 14, weight: .semibold))
 			}
 			HStack(spacing: 8) {
-				chip("Agents", "bolt.horizontal.fill", .secondary)
-				chip(m.status?.relay_connected == true ? "Backup relay · ready" : "Backup relay", "arrow.triangle.branch", .orange)
+				chip("Agent runs", "bolt.horizontal.fill", .secondary)
+				chip(m.status?.relay_connected == true ? "Network backup · ready" : "Network backup", "arrow.triangle.branch", .orange)
 			}
 		}
 		.padding(.horizontal, 12).padding(.vertical, 9)
@@ -1388,21 +1388,34 @@ struct NetworkMap: View {
 	}
 
 	func node(_ c: Computer) -> some View {
-		let a = agentsStatus(c)
-		return VStack(spacing: 3) {
-			Image(systemName: c.isThisMac ? "laptopcomputer" : "desktopcomputer").font(.system(size: 20))
-				.foregroundStyle(.secondary)
-			Text(c.name).font(.system(size: 12.5, weight: .semibold)).lineLimit(1)
-			Text(c.net?.ip ?? "not on network").font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.secondary)
-			HStack(spacing: 4) {
-				Circle().fill(a.1).frame(width: 6, height: 6)
-				Text("Agents " + a.0.lowercased()).font(.system(size: 10.5)).foregroundStyle(.secondary)
+		let relayOn = c.pool?.online == true
+		let netOn = c.net?.online == true
+		return VStack(spacing: 4) {
+			HStack(spacing: 5) {
+				Image(systemName: c.isThisMac ? "laptopcomputer" : "desktopcomputer").font(.system(size: 13))
+					.foregroundStyle(.secondary)
+				Text(c.name).font(.system(size: 12.5, weight: .semibold)).lineLimit(1)
 			}
+			// The two programs that run on it.
+			program("Relay", c.pool == nil ? "not installed" : (relayOn ? "connected" : "offline"), relayOn ? .green : .gray)
+			program("Network", c.net.map { netOn ? $0.ip : "off" } ?? "not installed", netOn ? .green : .gray)
 		}
-		.frame(width: 140, height: 76)
+		.padding(.horizontal, 8)
+		.frame(width: 170, height: 86)
 		.background(RoundedRectangle(cornerRadius: 12).fill(Color(nsColor: .windowBackgroundColor)))
 		.overlay(RoundedRectangle(cornerRadius: 12).stroke(c.isThisMac ? Color.accentColor.opacity(0.6) : Color.primary.opacity(0.12), lineWidth: c.isThisMac ? 1.5 : 1))
 		.contentShape(Rectangle())
+	}
+
+	func program(_ name: String, _ state: String, _ color: Color) -> some View {
+		HStack(spacing: 5) {
+			Circle().fill(color).frame(width: 6, height: 6)
+			Text(name).font(.system(size: 11, weight: .medium))
+			Spacer(minLength: 4)
+			Text(state).font(.system(size: 10.5, design: state.contains(".") ? .monospaced : .default)).foregroundStyle(.secondary)
+		}
+		.padding(.horizontal, 7).padding(.vertical, 2)
+		.background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.04)))
 	}
 
 	func key(_ color: Color, solid: Bool, _ t: String) -> some View {
