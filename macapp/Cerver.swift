@@ -1215,9 +1215,10 @@ struct PoolPage: View {
 
 	var relayBusy: Bool { if case .working = m.relay { return true }; return false }
 
+	/// Same word for every computer: On or Off. How the others reach this
+	/// Mac (direct or via backup) is in Connections below.
 	func networkNote(_ c: Computer) -> String {
-		let t = networkStatus(c, peer: peer(c)).0
-		return t.hasPrefix("On, ") ? String(t.dropFirst(4)).capitalized : t
+		networkStatus(c, peer: peer(c)).0.hasPrefix("On") ? "On" : "Off"
 	}
 
 	/// A switch with a short word next to it saying what's happening.
