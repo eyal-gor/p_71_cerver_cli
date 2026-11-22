@@ -587,6 +587,14 @@ struct PoolInfo: Decodable {
 	}
 }
 
+/// Opens macOS Screen Sharing to a computer over your private network, with
+/// your user name filled in (Screen Sharing remembers the password once you
+/// tick Remember password).
+func viewScreen(_ ip: String) {
+	let user = NSUserName().addingPercentEncoding(withAllowedCharacters: .urlUserAllowed) ?? ""
+	if let u = URL(string: "vnc://\(user)@\(ip)") { NSWorkspace.shared.open(u) }
+}
+
 func openWeb(_ path: String) {
 	if let u = URL(string: "https://cerver.ai" + path) { NSWorkspace.shared.open(u) }
 }
@@ -1525,8 +1533,7 @@ struct ComputerPage: View {
 		if let n = c.net, let p = peer, p.connected {
 			HStack(spacing: 10) {
 				Button {
-					// macOS Screen Sharing, over your private network.
-					if let u = URL(string: "vnc://" + n.ip) { NSWorkspace.shared.open(u) }
+					viewScreen(n.ip)
 				} label: {
 					Label("View screen", systemImage: "display").padding(.horizontal, 6).padding(.vertical, 3)
 				}
@@ -2234,6 +2241,13 @@ struct NetworkMap: View {
 			HStack(spacing: 5) {
 				Image(systemName: c.icon).font(.system(size: 13)).foregroundStyle(.secondary)
 				Text(c.name).font(.system(size: 12.5, weight: .semibold)).lineLimit(1)
+				if !c.isThisMac, !c.isPhone, netOn, let n = c.net {
+					Button { viewScreen(n.ip) } label: {
+						Image(systemName: "display").font(.system(size: 11)).foregroundStyle(.secondary)
+					}
+					.buttonStyle(.borderless)
+					.help("View its screen")
+				}
 			}
 			if c.isPhone {
 				program("Relay", "none (a phone)", .gray)
