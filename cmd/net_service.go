@@ -10,11 +10,24 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/eyal-gor/p_71_cerver_cli/internal/wgnet"
 )
 
 var wgnetWriteHosts = wgnet.WriteHosts
+
+// stopLaunchd stops the service and waits (up to 10 s) until launchd has
+// really let go of it; bootout returns before that.
+func stopLaunchd() {
+	exec.Command("launchctl", "bootout", "system/"+svcLabel).Run()
+	for i := 0; i < 20; i++ {
+		if exec.Command("launchctl", "print", "system/"+svcLabel).Run() != nil {
+			return
+		}
+		time.Sleep(500 * time.Millisecond)
+	}
+}
 
 // `sudo cerver net install` keeps this device on your network all the time:
 // it starts with the computer and restarts itself if it stops.
@@ -59,12 +72,25 @@ func netInstall(args []string) error {
 
 	switch runtime.GOOS {
 	case "darwin":
-		exec.Command("launchctl", "bootout", "system/"+svcLabel).Run()
+		stopLaunchd()
 		if err := os.WriteFile(svcPlist, []byte(launchdPlist(*name, home)), 0644); err != nil {
 			return err
 		}
-		if out, err := exec.Command("launchctl", "bootstrap", "system", svcPlist).CombinedOutput(); err != nil {
-			return fmt.Errorf("launchctl: %v: %s", err, strings.TrimSpace(string(out)))
+		// launchd can still be finishing the old one ("Bootstrap failed: 5");
+		// give it a few tries.
+		var last error
+		for i := 0; i < 5; i++ {
+			out, err := exec.Command("launchctl", "bootstrap", "system", svcPlist).CombinedOutput()
+			if err == nil {
+				last = nil
+				break
+			}
+			last = fmt.Errorf("launchctl: %v: %s", err, strings.TrimSpace(string(out)))
+			stopLaunchd()
+			time.Sleep(time.Second)
+		}
+		if last != nil {
+			return last
 		}
 	case "linux":
 		if err := os.WriteFile(svcUnit, []byte(systemdUnit(*name, home)), 0644); err != nil {
