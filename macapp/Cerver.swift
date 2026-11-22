@@ -756,7 +756,7 @@ struct MainWindow: View {
 	@StateObject private var session = SessionModel()
 	@StateObject private var apps = AppsModel()
 	// `-startPage thisMac` on launch opens that page (for screenshots).
-	@State private var page: Page? = ["thisMac": Page.thisMac, "add": Page.add, "settings": Page.settings, "session": Page.session, "pool": Page.pool, "permissions": Page.permissions, "profile": Page.profile, "connectors": Page.connectors, "people": Page.people][UserDefaults.standard.string(forKey: "startPage") ?? ""] ?? .map
+	@State private var page: Page? = ["thisMac": Page.thisMac, "add": Page.add, "settings": Page.settings, "session": Page.session, "pool": Page.pool, "permissions": Page.permissions, "profile": Page.profile, "connectors": Page.connectors, "people": Page.people, "map": Page.map][UserDefaults.standard.string(forKey: "startPage") ?? ""] ?? .pool
 
 	var body: some View {
 		NavigationSplitView {
@@ -780,8 +780,8 @@ struct MainWindow: View {
 
 	var sidebar: some View {
 		VStack(spacing: 0) {
-			// The logo takes you to the map: the first page.
-			Button { page = .map } label: {
+			// The logo takes you to the compute pool: the first page.
+			Button { page = .pool } label: {
 				HStack(spacing: 9) {
 					Image(nsImage: logoImage(size: 22))
 						.clipShape(RoundedRectangle(cornerRadius: 5))
@@ -791,18 +791,12 @@ struct MainWindow: View {
 				.contentShape(Rectangle())
 			}
 			.buttonStyle(.plain)
-			.help("Map")
+			.help("Compute pool")
 			.padding(.horizontal, 16)
 			.padding(.top, 6)
 			.padding(.bottom, 10)
 
 			List(selection: $page) {
-				Label("Map", systemImage: "map")
-					.tag(Page.map)
-				Label("Connectors", systemImage: "app.connected.to.app.below.fill")
-					.tag(Page.connectors)
-				Label("People", systemImage: "person.2")
-					.tag(Page.people)
 				Section("Cerver Compute") {
 					Label("Ask Compute Pool", systemImage: "bubble.left.and.text.bubble.right")
 						.tag(Page.session)
@@ -822,6 +816,14 @@ struct MainWindow: View {
 						.foregroundStyle(.secondary)
 						.padding(.leading, 14)
 						.tag(Page.add)
+				}
+				Section {
+					Label("Map", systemImage: "map")
+						.tag(Page.map)
+					Label("Connectors", systemImage: "app.connected.to.app.below.fill")
+						.tag(Page.connectors)
+					Label("People", systemImage: "person.2")
+						.tag(Page.people)
 				}
 			}
 			.listStyle(.sidebar)
@@ -934,7 +936,7 @@ struct MainWindow: View {
 			.padding(40)
 			.frame(maxWidth: .infinity, maxHeight: .infinity)
 		} else {
-			switch page ?? .map {
+			switch page ?? .pool {
 			case .map: MapPage(m: m, apps: apps, open: { page = $0 })
 			case .connectors: ConnectorsPage(a: apps)
 			case .people: PeoplePage(m: m)
