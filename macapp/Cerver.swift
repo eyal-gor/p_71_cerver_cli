@@ -626,7 +626,7 @@ func openWeb(_ path: String) {
 /// GET from the Cerver gateway with your key from ~/.cerver/cerver.env.
 func gatewayGET(_ path: String) async -> Data? { await gatewayRequest("GET", path) }
 
-func gatewayRequest(_ method: String, _ path: String) async -> Data? {
+func gatewayRequest(_ method: String, _ path: String, body: Data? = nil) async -> Data? {
 	let envPath = NSHomeDirectory() + "/.cerver/cerver.env"
 	guard let text = try? String(contentsOfFile: envPath, encoding: .utf8) else { return nil }
 	var env: [String: String] = [:]
@@ -640,7 +640,8 @@ func gatewayRequest(_ method: String, _ path: String) async -> Data? {
 	var req = URLRequest(url: url, timeoutInterval: 15)
 	req.httpMethod = method
 	req.setValue("Bearer " + key, forHTTPHeaderField: "Authorization")
-	guard let (data, resp) = try? await URLSession.shared.data(for: req), (resp as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+	if let b = body { req.httpBody = b; req.setValue("application/json", forHTTPHeaderField: "Content-Type") }
+	guard let (data, resp) = try? await URLSession.shared.data(for: req), let code = (resp as? HTTPURLResponse)?.statusCode, (200..<300).contains(code) else { return nil }
 	return data
 }
 
@@ -747,14 +748,15 @@ func howConnected(_ p: NetPeer) -> String {
 // MARK: - Window (sidebar + page, in the style of the ChatGPT Mac app)
 
 enum Page: Hashable {
-	case map, pool, permissions, thisMac, computer(String), add, settings, session, profile
+	case map, pool, permissions, thisMac, computer(String), add, settings, session, profile, connectors
 }
 
 struct MainWindow: View {
 	@ObservedObject var m: Model
 	@StateObject private var session = SessionModel()
+	@StateObject private var apps = AppsModel()
 	// `-startPage thisMac` on launch opens that page (for screenshots).
-	@State private var page: Page? = ["thisMac": Page.thisMac, "add": Page.add, "settings": Page.settings, "session": Page.session, "pool": Page.pool, "permissions": Page.permissions, "profile": Page.profile][UserDefaults.standard.string(forKey: "startPage") ?? ""] ?? .map
+	@State private var page: Page? = ["thisMac": Page.thisMac, "add": Page.add, "settings": Page.settings, "session": Page.session, "pool": Page.pool, "permissions": Page.permissions, "profile": Page.profile, "connectors": Page.connectors][UserDefaults.standard.string(forKey: "startPage") ?? ""] ?? .map
 
 	var body: some View {
 		NavigationSplitView {
@@ -797,6 +799,8 @@ struct MainWindow: View {
 			List(selection: $page) {
 				Label("Map", systemImage: "map")
 					.tag(Page.map)
+				Label("Connectors", systemImage: "app.connected.to.app.below.fill")
+					.tag(Page.connectors)
 				Section("Cerver Compute") {
 					Label("Ask Compute Pool", systemImage: "bubble.left.and.text.bubble.right")
 						.tag(Page.session)
@@ -929,7 +933,8 @@ struct MainWindow: View {
 			.frame(maxWidth: .infinity, maxHeight: .infinity)
 		} else {
 			switch page ?? .map {
-			case .map: MapPage(m: m, open: { page = $0 })
+			case .map: MapPage(m: m, apps: apps, open: { page = $0 })
+			case .connectors: ConnectorsPage(a: apps)
 			case .pool: PoolPage(m: m, open: { page = $0 })
 			case .permissions: PermissionsPage(m: m)
 			case .thisMac: ThisMacPage(m: m)
@@ -1136,16 +1141,18 @@ struct SoftwareSection: View {
 /// The first page: agents on top, your pool in the middle, the network under it.
 struct MapPage: View {
 	@ObservedObject var m: Model
+	@ObservedObject var apps: AppsModel
 	let open: (Page) -> Void
 
 	var body: some View {
-		PageLayout(title: "Map", subtitle: "Your agents, the pool they run in, and the network under it. Click anything to open it.") {
+		PageLayout(title: "Map", subtitle: "The apps that ask for work, the agents doing it, the pool they run in, and the network under it. Click anything to open it.") {
 			if m.computers.isEmpty {
 				Text(m.poolChecked ? "No computers yet." : "Loading…").foregroundStyle(.secondary)
 			} else {
-				NetworkMap(m: m, open: open)
+				NetworkMap(m: m, apps: apps.apps, open: open)
 			}
 		}
+		.task { await apps.refresh() }
 	}
 }
 
@@ -2225,11 +2232,12 @@ struct CerverApp: App {
 ///   Your network    your computers and phones, and how they reach each other
 struct NetworkMap: View {
 	@ObservedObject var m: Model
+	let apps: [ConnectedApp]
 	let open: (Page) -> Void
 
-	let height: CGFloat = 590
-	let agentsY: CGFloat = 62, computeY: CGFloat = 188, nodesY: CGFloat = 420
-	let band1: CGFloat = 120, band2: CGFloat = 255  // where each layer ends
+	let height: CGFloat = 700
+	let appsY: CGFloat = 62, agentsY: CGFloat = 172, computeY: CGFloat = 298, nodesY: CGFloat = 530
+	let band0: CGFloat = 110, band1: CGFloat = 230, band2: CGFloat = 365  // where each layer ends
 
 	var me: Computer? { m.computers.first { $0.isThisMac } }
 	var others: [Computer] { m.computers.filter { !$0.isThisMac } }
@@ -2250,6 +2258,10 @@ struct NetworkMap: View {
 			GeometryReader { g in
 				let w = g.size.width
 				let agents = CGPoint(x: w / 2, y: agentsY)
+				let appSlots = max(apps.count, 1)
+				let appPos: [CGPoint] = (0..<appSlots).map { i in
+					CGPoint(x: w / 2 + (CGFloat(i) - CGFloat(appSlots - 1) / 2) * min(190, (w - 40) / CGFloat(appSlots)), y: appsY)
+				}
 				let compute = CGPoint(x: w / 2, y: computeY)
 				let backup = CGPoint(x: w - 92, y: band2 + 44)
 				let pos: [String: CGPoint] = Dictionary(uniqueKeysWithValues: ordered.enumerated().map { i, c in
@@ -2258,12 +2270,22 @@ struct NetworkMap: View {
 				ZStack {
 					// The three layers.
 					VStack(spacing: 0) {
-						band("CERVER AGENTS", "Agents running for you", height: band1, tint: .secondary)
+						band("CONNECTED APPS", "Apps that ask your pool for work", height: band0, tint: .secondary)
+						band("CERVER AGENTS", "Agents running for you", height: band1 - band0, tint: .secondary)
 						band("CERVER COMPUTE", "Compute pool: where each agent run goes", height: band2 - band1, tint: .secondary)
 						band("YOUR NETWORK", "Your computers and how they reach each other", height: height - band2, tint: .secondary)
 					}
 
 					Canvas { ctx, _ in
+						// Each app → Agents
+						for (i, p) in appPos.enumerated() {
+							var l = Path()
+							l.move(to: CGPoint(x: p.x, y: p.y + 24))
+							l.addCurve(to: CGPoint(x: agents.x, y: agents.y - 26),
+								control1: CGPoint(x: p.x, y: p.y + 60), control2: CGPoint(x: agents.x, y: agents.y - 60))
+							let recent = i < apps.count && Date().timeIntervalSince(apps[i].lastUsed ?? .distantPast) < 86400
+							ctx.stroke(l, with: .color(Color.secondary.opacity(apps.isEmpty ? 0.3 : 0.6)), style: StrokeStyle(lineWidth: 1.5, dash: recent ? [] : [4, 4]))
+						}
 						// Agents → Compute
 						var a = Path()
 						a.move(to: CGPoint(x: agents.x, y: agents.y + 26))
@@ -2304,6 +2326,17 @@ struct NetworkMap: View {
 						}
 					}
 
+					if apps.isEmpty {
+						box(icon: "plus", title: "Connect an app", tint: .secondary, line: "Claude, Cursor, Hermes…")
+							.position(appPos[0])
+							.onTapGesture { open(.connectors) }
+					} else {
+						ForEach(Array(apps.enumerated()), id: \.element.id) { i, app in
+							box(icon: app.icon, title: app.name, tint: .secondary, line: agoText(app.lastUsed))
+								.position(appPos[i])
+								.onTapGesture { open(.connectors) }
+						}
+					}
 					box(icon: "sparkles", title: "Agents", tint: .secondary,
 						line: running == 0 ? "none running now" : "\(running) running now")
 						.position(agents)
@@ -2440,5 +2473,294 @@ struct NetworkMap: View {
 				.frame(width: 22, height: 10)
 			Text(t).font(.system(size: 12)).foregroundStyle(.secondary)
 		}
+	}
+}
+
+// MARK: - Connectors: other apps that use your compute pool
+
+/// An app that can use your compute pool through Cerver's MCP server
+/// (npx @cerver/mcp), with its own key.
+struct AppKind: Identifiable {
+	let id: String      // also the key's label: "connector:<id>"
+	let name: String
+	let icon: String
+	let note: String
+	let auto: Bool      // the app writes its settings for you; otherwise you paste a line
+}
+
+let appKinds: [AppKind] = [
+	AppKind(id: "claude-code", name: "Claude Code", icon: "terminal", note: "Claude Code hands work to your computers and asks Codex.", auto: true),
+	AppKind(id: "claude-desktop", name: "Claude Desktop", icon: "bubble.left", note: "Claude's chat app gets your computers as tools.", auto: true),
+	AppKind(id: "cursor", name: "Cursor", icon: "cursorarrow.rays", note: "Cursor's agent runs tasks on your computers.", auto: true),
+	AppKind(id: "hermes", name: "Hermes", icon: "message", note: "Your personal agent on WhatsApp or Telegram does real work on your computers.", auto: false),
+	AppKind(id: "openclaw", name: "OpenClaw", icon: "message.badge", note: "Your personal agent on WhatsApp or Telegram does real work on your computers.", auto: false),
+	AppKind(id: "other", name: "Other app", icon: "app.connected.to.app.below.fill", note: "Anything that can use MCP tools.", auto: false),
+]
+
+/// One app connected to your pool, as the map and the Connectors page show it.
+struct ConnectedApp: Identifiable {
+	let id: String
+	let name: String
+	let icon: String
+	let lastUsed: Date?
+	let removable: Bool   // Kompany manages its own keys
+}
+
+/// What this Mac remembers about the keys it made: the key's start and end, never
+/// the key (the gateway shows only 6 characters, too few to revoke by safely).
+struct SavedConnector: Codable { let prefix: String; let last4: String }
+
+let connectorsFile = NSHomeDirectory() + "/.cerver/connectors.json"
+func savedConnectors() -> [String: SavedConnector] {
+	guard let d = FileManager.default.contents(atPath: connectorsFile) else { return [:] }
+	return (try? JSONDecoder().decode([String: SavedConnector].self, from: d)) ?? [:]
+}
+func saveConnectors(_ s: [String: SavedConnector]) {
+	if let d = try? JSONEncoder().encode(s) { try? d.write(to: URL(fileURLWithPath: connectorsFile), options: .atomic) }
+}
+
+struct KeyRow: Decodable { let key_masked: String; let label: String?; let last_used_at: String?; let project_slug: String? }
+
+func parseISO(_ s: String?) -> Date? {
+	guard let s = s else { return nil }
+	let f = ISO8601DateFormatter()
+	f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+	return f.date(from: s) ?? ISO8601DateFormatter().date(from: s)
+}
+
+func agoText(_ d: Date?) -> String {
+	guard let d = d else { return "not used yet" }
+	if Date().timeIntervalSince(d) < 60 { return "used just now" }
+	let f = RelativeDateTimeFormatter()
+	f.unitsStyle = .full
+	return "used " + f.localizedString(for: d, relativeTo: Date())
+}
+
+@MainActor
+final class AppsModel: ObservableObject {
+	@Published var apps: [ConnectedApp] = []
+	@Published var loaded = false
+	@Published var busy: String?
+	@Published var error: String?
+	/// A key and the line to paste, shown once, for apps the Mac can't set up itself.
+	@Published var paste: (name: String, text: String)?
+
+	func refresh() async {
+		guard let d = await gatewayGET("/v2/auth/keys"),
+			let rows = (try? JSONDecoder().decode([String: [KeyRow]].self, from: d))?["keys"] else { loaded = true; return }
+		var out: [ConnectedApp] = []
+		let saved = savedConnectors()
+		for k in appKinds {
+			guard let s = saved[k.id], let row = rows.first(where: { r in
+				r.label == "connector:" + k.id && r.key_masked.hasPrefix(String(s.prefix.prefix(6))) && r.key_masked.hasSuffix(s.last4)
+			}) else { continue }
+			out.append(ConnectedApp(id: k.id, name: k.name, icon: k.icon, lastUsed: parseISO(row.last_used_at), removable: true))
+		}
+		// Kompany calls Cerver with keys it makes itself.
+		let kompany = rows.filter { ($0.label ?? "").hasPrefix("cron:kompany") || ($0.project_slug ?? "").hasPrefix("kompany") }
+		if !kompany.isEmpty {
+			out.append(ConnectedApp(id: "kompany", name: "Kompany", icon: "building.2",
+				lastUsed: kompany.compactMap { parseISO($0.last_used_at) }.max(), removable: false))
+		}
+		apps = out.sorted { ($0.lastUsed ?? .distantPast) > ($1.lastUsed ?? .distantPast) }
+		loaded = true
+	}
+
+	func connect(_ k: AppKind) async {
+		busy = k.id; error = nil
+		defer { busy = nil }
+		// One key per app: replace this app's old key, if this Mac made one.
+		if let old = savedConnectors()[k.id] { _ = await gatewayRequest("DELETE", "/v2/auth/keys/" + old.prefix) }
+		let body = try? JSONSerialization.data(withJSONObject: ["label": "connector:" + k.id])
+		guard let d = await gatewayRequest("POST", "/v2/auth/keys", body: body),
+			let key = (try? JSONSerialization.jsonObject(with: d) as? [String: Any])?["key"] as? String, key.count > 20 else {
+			error = "Couldn't make a key for \(k.name). Check that you're signed in."
+			return
+		}
+		var s = savedConnectors()
+		s[k.id] = SavedConnector(prefix: String(key.prefix(16)), last4: String(key.suffix(4)))
+		saveConnectors(s)
+		let problem = await Task.detached { setUpApp(k.id, key: key) }.value
+		if let p = problem {
+			if p.isEmpty { paste = (k.name, pasteText(k.id, key: key)) } else { error = p }
+		}
+		await refresh()
+	}
+
+	func remove(_ a: ConnectedApp) async {
+		busy = a.id; error = nil
+		defer { busy = nil }
+		var s = savedConnectors()
+		if let old = s[a.id] { _ = await gatewayRequest("DELETE", "/v2/auth/keys/" + old.prefix) }
+		s[a.id] = nil
+		saveConnectors(s)
+		await Task.detached { tearDownApp(a.id) }.value
+		await refresh()
+	}
+}
+
+/// Where npx is, so apps opened from the Dock (with a short PATH) can start the server.
+func npxPath() -> String {
+	let p = shell("command -v npx")
+	return p.isEmpty ? "npx" : p
+}
+
+/// The MCP server entry for an app's settings file.
+func mcpEntry(_ key: String) -> [String: Any] {
+	["command": npxPath(), "args": ["-y", "@cerver/mcp"], "env": ["CERVER_KEY": key]]
+}
+
+/// Adds (or removes, with key nil) the "cerver" server in a JSON settings file
+/// shaped { "mcpServers": { … } }, keeping everything else in it.
+func editMCPFile(_ path: String, key: String?) -> Bool {
+	var root: [String: Any] = [:]
+	if let d = FileManager.default.contents(atPath: path) {
+		guard let j = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return false }  // don't overwrite a file we can't read
+		root = j
+	} else if key == nil { return true }
+	var servers = root["mcpServers"] as? [String: Any] ?? [:]
+	servers["cerver"] = key.map { mcpEntry($0) }
+	root["mcpServers"] = servers
+	try? FileManager.default.createDirectory(atPath: (path as NSString).deletingLastPathComponent, withIntermediateDirectories: true)
+	guard let out = try? JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys]) else { return false }
+	return (try? out.write(to: URL(fileURLWithPath: path), options: .atomic)) != nil
+}
+
+let claudeDesktopConfig = NSHomeDirectory() + "/Library/Application Support/Claude/claude_desktop_config.json"
+let cursorConfig = NSHomeDirectory() + "/.cursor/mcp.json"
+
+/// Sets the app up with its key. nil = done; "" = the person pastes a line; other = what went wrong.
+func setUpApp(_ id: String, key: String) -> String? {
+	switch id {
+	case "claude-code":
+		if shell("command -v claude").isEmpty { return "Claude Code isn't installed on this Mac." }
+		_ = shell("claude mcp remove cerver -s user")
+		let p = Process()
+		p.executableURL = URL(fileURLWithPath: "/bin/zsh")
+		p.arguments = ["-lc", "claude mcp add cerver -s user -e CERVER_KEY=\"$CERVER_CONNECT_KEY\" -- \"$CERVER_NPX\" -y @cerver/mcp"]
+		var env = ProcessInfo.processInfo.environment
+		env["CERVER_CONNECT_KEY"] = key
+		env["CERVER_NPX"] = npxPath()
+		p.environment = env
+		p.standardOutput = Pipe(); p.standardError = Pipe()
+		guard (try? p.run()) != nil else { return "Couldn't run Claude Code." }
+		p.waitUntilExit()
+		return p.terminationStatus == 0 ? nil : "Claude Code didn't accept the server."
+	case "claude-desktop":
+		return editMCPFile(claudeDesktopConfig, key: key) ? nil : "Couldn't update Claude Desktop's settings file."
+	case "cursor":
+		return editMCPFile(cursorConfig, key: key) ? nil : "Couldn't update Cursor's settings file."
+	default:
+		return ""
+	}
+}
+
+func tearDownApp(_ id: String) {
+	switch id {
+	case "claude-code": _ = shell("claude mcp remove cerver -s user")
+	case "claude-desktop": _ = editMCPFile(claudeDesktopConfig, key: nil)
+	case "cursor": _ = editMCPFile(cursorConfig, key: nil)
+	default: break
+	}
+}
+
+func pasteText(_ id: String, key: String) -> String {
+	switch id {
+	case "hermes":
+		return "Add to ~/.hermes/config.yaml:\n\nmcp_servers:\n  cerver:\n    command: npx\n    args: [\"-y\", \"@cerver/mcp\"]\n    env:\n      CERVER_KEY: \(key)"
+	case "openclaw":
+		return "Add to mcp.servers in ~/.openclaw/openclaw.json:\n\n\"cerver\": { \"command\": \"npx\", \"args\": [\"-y\", \"@cerver/mcp\"], \"env\": { \"CERVER_KEY\": \"\(key)\" } }"
+	default:
+		return "{ \"mcpServers\": { \"cerver\": { \"command\": \"npx\", \"args\": [\"-y\", \"@cerver/mcp\"], \"env\": { \"CERVER_KEY\": \"\(key)\" } } } }"
+	}
+}
+
+struct ConnectorsPage: View {
+	@ObservedObject var a: AppsModel
+	@State private var copied = false
+
+	var body: some View {
+		PageLayout(title: "Connectors", subtitle: "Apps that use your compute pool. Each one asks Cerver for work; it runs on your computers, with your own Claude and Codex logins.") {
+			Text("Connected").font(.system(size: 17, weight: .semibold))
+			Card {
+				if a.apps.isEmpty {
+					Text(a.loaded ? "No apps connected yet. Connect one below." : "Loading…")
+						.foregroundStyle(.secondary).padding(16)
+				}
+				ForEach(Array(a.apps.enumerated()), id: \.element.id) { i, app in
+					if i > 0 { Divider().padding(.leading, 16) }
+					HStack(spacing: 12) {
+						Image(systemName: app.icon).frame(width: 22).foregroundStyle(.secondary)
+						VStack(alignment: .leading, spacing: 2) {
+							Text(app.name).font(.system(size: 14))
+							Text(app.removable ? agoText(app.lastUsed) : agoText(app.lastUsed) + " · managed in Kompany")
+								.font(.system(size: 11.5)).foregroundStyle(.secondary)
+						}
+						Spacer()
+						if app.removable {
+							if a.busy == app.id { ProgressView().controlSize(.small) }
+							Button("Remove") { Task { await a.remove(app) } }.disabled(a.busy != nil)
+						}
+					}
+					.padding(.horizontal, 16).padding(.vertical, 12)
+				}
+			}
+
+			if let e = a.error { Text(e).font(.callout).foregroundStyle(.red) }
+
+			if let p = a.paste {
+				Card {
+					VStack(alignment: .leading, spacing: 10) {
+						Text("Finish connecting \(p.name)").font(.system(size: 14, weight: .semibold))
+						Text("Paste this into \(p.name). It holds the app's own key, shown only now.")
+							.font(.system(size: 12)).foregroundStyle(.secondary)
+						Text(p.text).font(.system(size: 11.5, design: .monospaced)).textSelection(.enabled)
+							.padding(10).frame(maxWidth: .infinity, alignment: .leading)
+							.background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.05)))
+						HStack {
+							Button(copied ? "Copied" : "Copy") {
+								NSPasteboard.general.clearContents()
+								NSPasteboard.general.setString(p.text, forType: .string)
+								copied = true
+							}
+							Button("Done") { a.paste = nil; copied = false }
+						}
+					}
+					.padding(16)
+				}
+			}
+
+			Text("Connect an app").font(.system(size: 17, weight: .semibold)).padding(.top, 10)
+			Text("The app gets its own key. Remove it here any time and the app loses access.")
+				.font(.callout).foregroundStyle(.secondary)
+			LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
+				ForEach(appKinds) { k in tile(k) }
+			}
+		}
+		.task { await a.refresh() }
+	}
+
+	func tile(_ k: AppKind) -> some View {
+		let on = a.apps.contains { $0.id == k.id }
+		return VStack(alignment: .leading, spacing: 8) {
+			HStack(spacing: 8) {
+				Image(systemName: k.icon).foregroundStyle(.secondary)
+				Text(k.name).font(.system(size: 15, weight: .semibold))
+				Spacer()
+				if on { Text("Connected").font(.system(size: 11, weight: .medium)).foregroundStyle(.green) }
+			}
+			Text(k.note).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+			HStack {
+				Button(on ? "Reconnect" : "Connect") { Task { await a.connect(k) } }
+					.buttonStyle(.bordered).disabled(a.busy != nil)
+				if a.busy == k.id { ProgressView().controlSize(.small) }
+				Spacer()
+				Text(k.auto ? "Sets it up for you" : "You paste one line").font(.system(size: 11)).foregroundStyle(.tertiary)
+			}
+		}
+		.padding(14)
+		.frame(maxWidth: .infinity, minHeight: 128, alignment: .topLeading)
+		.background(RoundedRectangle(cornerRadius: 12).fill(Color(nsColor: .controlBackgroundColor)))
+		.overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.08)))
 	}
 }
