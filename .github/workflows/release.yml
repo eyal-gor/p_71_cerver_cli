@@ -1,0 +1,53 @@
+# Every push to main that changes the program or the Mac app publishes a
+# release: v1.0.<commit count>, with the cerver program for macOS and Linux,
+# the Mac app (Cerver.zip) and SHA256SUMS. Computers running Cerver pick it up
+# on their own (cerver update --auto, every 6 hours; the network service hourly).
+name: release
+on:
+  push:
+    branches: [main]
+    paths: ["cmd/**", "internal/**", "macapp/**", "go.mod", ".github/workflows/release.yml"]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency:
+  group: release
+  cancel-in-progress: false
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - name: Version
+        run: echo "VERSION=1.0.$(git rev-list --count HEAD)" >> "$GITHUB_ENV"
+      - name: Build cerver
+        env:
+          GOFLAGS: -mod=mod
+        run: |
+          mkdir -p dist
+          LD="-s -w -X github.com/eyal-gor/p_71_cerver_cli/internal/version.Version=$VERSION"
+          for t in darwin/arm64 darwin/amd64 linux/amd64 linux/arm64; do
+            os=${t%/*}; arch=${t#*/}
+            cgo=0; [ "$os" = darwin ] && cgo=1
+            CGO_ENABLED=$cgo GOOS=$os GOARCH=$arch go build -ldflags "$LD" -o "dist/cerver-$os-$arch" ./cmd/cerver
+          done
+      - name: Build the Mac app
+        env:
+          GOFLAGS: -mod=mod
+        run: |
+          ./macapp/build.sh
+          ditto -c -k --keepParent macapp/build/Cerver.app dist/Cerver.zip
+      - name: Checksums
+        run: cd dist && shasum -a 256 * > SHA256SUMS && cat SHA256SUMS
+      - name: Publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "v$VERSION" dist/* --title "Cerver $VERSION" \
+            --notes "$(git log -1 --pretty=%s)" --latest

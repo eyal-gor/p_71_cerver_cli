@@ -226,7 +226,10 @@ func relayInstall(args []string) error {
 	default:
 		return fmt.Errorf("the relay service runs on macOS and Linux for now")
 	}
-	fmt.Printf("%s now stays in your Cerver pool, also after restarts.\n", *name)
+	if err := updaterInstall(); err != nil {
+		fmt.Printf("Couldn't set up automatic updates (%v); update by hand with: cerver update\n", err)
+	}
+	fmt.Printf("%s now stays in your Cerver pool, also after restarts, and updates itself.\n", *name)
 	fmt.Printf("Log: %s   ·   Stop: cerver relay uninstall\n", relayLog())
 	return nil
 }

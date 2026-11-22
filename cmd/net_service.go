@@ -123,6 +123,9 @@ func netUninstall() error {
 		exec.Command("systemctl", "daemon-reload").Run()
 	}
 	os.Remove(svcBinary)
+	os.Remove(filepath.Dir(svcBinary)) // only if empty
+	os.Remove(netStatusFile)
+	os.Remove("/var/log/cerver-net.log")
 	// The service clears its names on a clean stop; make sure.
 	updateNamesOff()
 	fmt.Println("This device left your Cerver network and won't rejoin on restart.")

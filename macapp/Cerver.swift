@@ -69,6 +69,36 @@ struct NetStatus: Decodable {
 	let peers: [NetPeer]
 }
 
+/// `cerver update --check --json`
+struct UpdateInfo: Decodable {
+	struct Part: Decodable { let current: String; let latest: String?; let update: Bool }
+	let latest: String
+	let problem: String?
+	let cli: Part
+	let app: Part?
+	let relay: Part?
+	let net: Part?
+	var any: Bool { cli.update || app?.update == true || relay?.update == true || net?.update == true }
+}
+
+/// Runs the app's own cerver as you (with your login PATH). Returns (ok, output).
+func runCerver(_ args: [String]) -> (Bool, String) {
+	guard let bin = Bundle.main.path(forResource: "cerver", ofType: nil) else { return (false, "The app is missing its cerver program.") }
+	let p = Process()
+	p.executableURL = URL(fileURLWithPath: bin)
+	p.arguments = args
+	var env = ProcessInfo.processInfo.environment
+	env["PATH"] = loginShellPath()
+	p.environment = env
+	let out = Pipe()
+	p.standardOutput = out
+	p.standardError = out
+	do { try p.run() } catch { return (false, error.localizedDescription) }
+	let data = out.fileHandleForReading.readDataToEndOfFile()
+	p.waitUntilExit()
+	return (p.terminationStatus == 0, String(data: data, encoding: .utf8) ?? "")
+}
+
 enum Phase: Equatable {
 	case notSignedIn, off, starting, on, working(String), failed(String)
 }
@@ -99,11 +129,13 @@ final class Model: ObservableObject {
 	init() {
 		refresh()
 		refreshRelay()
+		checkUpdates()
 		timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { _ in
 			Task { @MainActor in
 				self.refresh()
 				self.refreshRelay()
 				self.refreshPool()
+				self.checkUpdates()
 			}
 		}
 	}
@@ -282,6 +314,70 @@ final class Model: ObservableObject {
 				self.relay = ok ? .off : .failed(msg.replacingOccurrences(of: "error: ", with: "").trimmingCharacters(in: .whitespacesAndNewlines))
 				self.refreshRelay()
 				self.refreshPool(force: true)
+			}
+		}
+	}
+
+	// MARK: Versions, updates, uninstall
+
+	@Published var updates: UpdateInfo?
+	@Published var updating = false
+	@Published var updateProblem: String?
+	@Published var uninstalling = false
+	private var lastUpdateCheck = Date.distantPast
+
+	var updateAvailable: Bool { updates?.any ?? false }
+
+	/// Asks `cerver update --check --json` what's installed and what's new.
+	/// On launch and every 6 hours (GitHub is asked at most that often).
+	func checkUpdates(force: Bool = false) {
+		if !force && Date().timeIntervalSince(lastUpdateCheck) < 6 * 3600 { return }
+		lastUpdateCheck = Date()
+		Task.detached {
+			let (ok, out) = runCerver(["update", "--check", "--json"])
+			let info = ok ? try? JSONDecoder().decode(UpdateInfo.self, from: Data(out.utf8)) : nil
+			await MainActor.run { if let i = info { self.updates = i } }
+		}
+	}
+
+	/// Updates everything, then reopens the (new) app.
+	func updateNow() {
+		updating = true
+		updateProblem = nil
+		Task.detached {
+			let (ok, out) = runCerver(["update", "--app"])
+			await MainActor.run {
+				self.updating = false
+				if !ok || out.contains("couldn't") {
+					self.updateProblem = out.trimmingCharacters(in: .whitespacesAndNewlines)
+					self.checkUpdates(force: true)
+					return
+				}
+				if self.updates?.app?.update == true {
+					let p = Process()
+					p.executableURL = URL(fileURLWithPath: "/bin/sh")
+					p.arguments = ["-c", "sleep 1; open /Applications/Cerver.app"]
+					try? p.run()
+					NSApp.terminate(nil)
+				} else {
+					self.checkUpdates(force: true)
+				}
+			}
+		}
+	}
+
+	/// Takes Cerver off this Mac (asks for the admin password once), then quits.
+	func uninstall() {
+		uninstalling = true
+		Task.detached {
+			let (ok, out) = runCerver(["uninstall", "--yes"])
+			await MainActor.run {
+				self.uninstalling = false
+				if ok {
+					NSApp.terminate(nil)
+				} else {
+					self.updateProblem = out.trimmingCharacters(in: .whitespacesAndNewlines)
+				}
 			}
 		}
 	}
@@ -549,6 +645,20 @@ struct MainWindow: View {
 					.clipShape(RoundedRectangle(cornerRadius: 5))
 				Text("Cerver").font(.system(size: 15, weight: .semibold))
 				Spacer()
+				if m.updateAvailable {
+					Button {
+						m.updateNow()
+					} label: {
+						if m.updating {
+							ProgressView().controlSize(.mini)
+						} else {
+							Text("Update").font(.system(size: 11, weight: .semibold))
+						}
+					}
+					.buttonStyle(.borderedProminent).controlSize(.small).clipShape(Capsule())
+					.disabled(m.updating)
+					.help("A new version of Cerver is out")
+				}
 			}
 			.padding(.horizontal, 16)
 			.padding(.top, 6)
@@ -916,7 +1026,8 @@ func logRow(_ label: String, _ path: String) -> some View {
 /// This Mac: the two switches up front; details in tabs.
 struct ThisMacPage: View {
 	@ObservedObject var m: Model
-	@State private var tab: Tab = .overview
+	// `-startTab Settings` opens that tab (for screenshots).
+	@State private var tab: Tab = Tab(rawValue: UserDefaults.standard.string(forKey: "startTab") ?? "") ?? .overview
 	@State private var editing = false
 	@State private var newName = ""
 
@@ -1016,7 +1127,52 @@ struct ThisMacPage: View {
 		}
 	}
 
-	var settings: some View {
+	@State private var confirmUninstall = false
+
+	func versionRow(_ label: String, _ p: UpdateInfo.Part?, prefix: String = "") -> some View {
+		Row(label: label) {
+			if let p = p {
+				Text(p.current.isEmpty ? "?" : prefix + p.current).font(.system(size: 13, design: .monospaced)).foregroundStyle(.secondary)
+				if p.update, let l = p.latest {
+					StatusPill(text: "New: " + prefix + l, color: .blue)
+				}
+			} else {
+				Text("not installed").foregroundStyle(.secondary)
+			}
+		}
+	}
+
+	@ViewBuilder var settings: some View {
+		Text("Version").font(.system(size: 15, weight: .semibold))
+		Card {
+			if let u = m.updates {
+				versionRow("Cerver app", u.app)
+				Divider().padding(.leading, 16)
+				versionRow("cerver program", u.cli)
+				Divider().padding(.leading, 16)
+				versionRow("Relay", u.relay, prefix: "v")
+				Divider().padding(.leading, 16)
+				versionRow("Network service", u.net)
+				Divider().padding(.leading, 16)
+				Row(label: u.any ? "An update is available" : (u.latest.isEmpty ? "Couldn't check for updates" : "Up to date")) {
+					if m.updating { ProgressView().controlSize(.small) }
+					if u.any {
+						Button("Update now") { m.updateNow() }.buttonStyle(.borderedProminent).disabled(m.updating)
+					} else {
+						Button("Check again") { m.checkUpdates(force: true) }.buttonStyle(.link)
+					}
+				}
+			} else {
+				Row(label: "Checking…") { ProgressView().controlSize(.small) }
+			}
+		}
+		Text("Cerver updates itself every few hours, and never while an agent is running.")
+			.font(.callout).foregroundStyle(.secondary)
+		if let p = m.updateProblem {
+			problem(p)
+		}
+
+		Text("This Mac").font(.system(size: 15, weight: .semibold)).padding(.top, 6)
 		Card {
 			Row(label: "Open Cerver at login") {
 				Toggle("", isOn: Binding(get: { m.openAtLogin }, set: { m.setOpenAtLogin($0) }))
@@ -1026,6 +1182,17 @@ struct ThisMacPage: View {
 			logRow("Agents log", NSHomeDirectory() + "/.cerver/relay.log")
 			Divider().padding(.leading, 16)
 			logRow("Network log", logFile)
+			Divider().padding(.leading, 16)
+			Row(label: "Remove Cerver from this Mac") {
+				if m.uninstalling { ProgressView().controlSize(.small) }
+				Button("Uninstall…", role: .destructive) { confirmUninstall = true }
+					.disabled(m.uninstalling)
+			}
+		}
+		.confirmationDialog("Remove Cerver from this Mac?", isPresented: $confirmUninstall) {
+			Button("Uninstall", role: .destructive) { m.uninstall() }
+		} message: {
+			Text("This Mac leaves your pool and network. Its sign-in, services, files and this app are deleted. You'll be asked for your password once.")
 		}
 	}
 

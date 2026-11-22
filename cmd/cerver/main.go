@@ -14,6 +14,8 @@
 package main
 
 import (
+	"github.com/eyal-gor/p_71_cerver_cli/internal/version"
+
 	"fmt"
 	"os"
 
@@ -131,12 +133,16 @@ commands:
                  cerver test diagnose <provider>
                                            # probe provider readiness
                                            # (e.g. vercel)
-  update     Reinstall cerver from the latest commit on main. Uses
-               'go install' and lands the new binary in the same
-               directory the current one runs from.
-                 cerver update             # upgrade in place
-                 cerver update --verbose   # stream go output
-                 cerver update --dry-run   # show what'd happen
+  update     Bring cerver, the Mac app, the relay and the network service
+             to the latest release. Runs by itself every 6 hours too.
+                 cerver update             # update now
+                 cerver update --check     # what's installed, what's new
+                 cerver update --source    # build the latest commit with Go
+  uninstall  Take Cerver off this computer completely (account entries,
+             services, sign-in, files), so a fresh install starts clean.
+                 cerver uninstall
+                 cerver uninstall --keep-account   # keep it in your pool/network list
+  version    Print this program's version.
   help       Show this message.
 
 examples:
@@ -258,6 +264,10 @@ func main() {
 		err = cmd.Daemon(args)
 	case "update", "self-update":
 		err = cmd.Update(args)
+	case "uninstall":
+		err = cmd.Uninstall(args)
+	case "version", "--version", "-v":
+		fmt.Println("cerver " + version.Version)
 	case "help", "-h", "--help":
 		fmt.Print(helpText)
 		return

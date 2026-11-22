@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"github.com/eyal-gor/p_71_cerver_cli/internal/version"
+
 	"context"
 	"encoding/json"
 	"flag"
@@ -206,6 +208,11 @@ func netUp(args []string) error {
 	defer report.Stop()
 	retry := time.NewTicker(3 * time.Second) // move a silent peer on to its next address
 	defer retry.Stop()
+	// The installed service keeps itself current: it runs as admin, so nothing
+	// else can replace it. After an update it exits and the service manager
+	// starts the new one (a few seconds offline).
+	selfUpdate := time.NewTicker(time.Hour)
+	defer selfUpdate.Stop()
 	shown := map[string]bool{}
 	for {
 		select {
@@ -230,6 +237,11 @@ func netUp(args []string) error {
 		case <-retry.C:
 			node.Retry()
 			writeNetStatus(*name, ip, relay.Connected(), node.Status())
+		case <-selfUpdate.C:
+			if netSelfUpdate(ctx) {
+				fmt.Println("Updated; restarting with the new version.")
+				return nil
+			}
 		case <-report.C:
 			for _, s := range node.Status() {
 				if !s.Connected {
@@ -254,14 +266,42 @@ type netStatusPeer struct {
 	Via       string `json:"via"` // "direct", "relay" or ""
 }
 
+// netSelfUpdate replaces the installed service's own program with the newest
+// release (checksum-checked). Only the installed service does this, never a
+// `sudo cerver net up` in a terminal.
+func netSelfUpdate(ctx context.Context) bool {
+	exe, _ := os.Executable()
+	if exe != svcBinary || os.Geteuid() != 0 {
+		return false
+	}
+	c, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	latest, err := latestRelease(c)
+	// A build from before releases ("dev") moves onto the release line.
+	if err != nil || (version.Version != "dev" && !version.Newer(latest, version.Version)) {
+		return false
+	}
+	data, err := releaseAsset(c, latest, cliAssetName())
+	if err == nil {
+		err = replaceFile(svcBinary, data)
+	}
+	if err != nil {
+		fmt.Printf("Couldn't update to %s: %v\n", latest, err)
+		return false
+	}
+	fmt.Printf("Updated %s → %s\n", version.Version, latest)
+	return true
+}
+
 func writeNetStatus(name, ip string, relayUp bool, peers []wgnet.PeerStatus) {
 	st := struct {
 		Name    string          `json:"name"`
 		IP      string          `json:"ip"`
 		Relay   bool            `json:"relay_connected"`
 		Updated int64           `json:"updated"`
+		Version string          `json:"version"`
 		Peers   []netStatusPeer `json:"peers"`
-	}{Name: name, IP: ip, Relay: relayUp, Updated: time.Now().Unix(), Peers: []netStatusPeer{}}
+	}{Name: name, IP: ip, Relay: relayUp, Updated: time.Now().Unix(), Version: version.Version, Peers: []netStatusPeer{}}
 	for _, p := range peers {
 		via := ""
 		if p.Connected {

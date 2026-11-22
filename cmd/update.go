@@ -10,18 +10,9 @@ import (
 	"strings"
 )
 
-// Update reinstalls the cerver CLI from the latest commit on `main`.
-//
-// Goes through `go install github.com/eyal-gor/p_71_cerver_cli/cmd/cerver@latest`
-// so the binary lands on the same directory the running cerver lives in.
-// That avoids a common gotcha — `go install` with the user's default
-// GOBIN would land in ~/go/bin, but the running binary might be at
-// ~/.cerver/bin or /opt/homebrew/bin, leaving the user wondering why
-// `cerver --help` still shows the old commands.
-//
-// Falls back with a clear remediation when Go isn't on PATH — direct
-// binary download is the manual alternative.
-func Update(args []string) error {
+// updateFromSource reinstalls the cerver CLI from the latest commit on `main`
+// with `go install` (for developers, or when no release is published).
+func updateFromSource(args []string) error {
 	fs := flag.NewFlagSet("update", flag.ContinueOnError)
 	verbose := fs.Bool("verbose", false, "Stream go install output (default: only on failure)")
 	dryRun := fs.Bool("dry-run", false, "Print what would happen, don't install")
@@ -116,10 +107,10 @@ func findGo() (string, error) {
 		return p, nil
 	}
 	candidates := []string{
-		"/opt/homebrew/bin/go",   // Homebrew on Apple Silicon
-		"/usr/local/bin/go",      // Homebrew on Intel Macs / generic
-		"/usr/local/go/bin/go",   // Official go.dev installer
-		"/usr/lib/go/bin/go",     // Some Linux distros
+		"/opt/homebrew/bin/go", // Homebrew on Apple Silicon
+		"/usr/local/bin/go",    // Homebrew on Intel Macs / generic
+		"/usr/local/go/bin/go", // Official go.dev installer
+		"/usr/lib/go/bin/go",   // Some Linux distros
 		os.ExpandEnv("$HOME/go/bin/go"),
 		os.ExpandEnv("$HOME/.asdf/shims/go"),
 		os.ExpandEnv("$HOME/.local/bin/go"),
