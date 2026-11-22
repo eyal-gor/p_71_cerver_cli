@@ -1826,8 +1826,92 @@ struct SettingsPage: View {
 
 	var body: some View {
 		PageLayout(title: "Settings", subtitle: m.email.map { "Signed in as " + $0 } ?? "Not signed in") {
-			rest
+			Picker("", selection: $tab) {
+				ForEach(["General", "Updates", "Terminal", "Your agent"], id: \.self) { Text($0).tag($0) }
+			}
+			.pickerStyle(.segmented).labelsHidden().fixedSize()
+			switch tab {
+			case "Updates": updates
+			case "Terminal": terminal
+			case "Your agent": agent
+			default: general
+			}
 		}
+		.onAppear { skillInstalled = FileManager.default.fileExists(atPath: skillFile) }
+	}
+
+	@State private var tab = "General"
+	@State private var skillInstalled = false
+	@State private var installingSkill = false
+	let skillFile = NSHomeDirectory() + "/.claude/skills/cerver/SKILL.md"
+	let onboardPrompt = "Read https://cerver.ai/llms.txt and https://cerver.ai/skills/cerver/SKILL.md. Then explain to me in plain words what Cerver is, and how it could help with the work I do on this computer. Look at my projects and give me three concrete examples, each with the exact cerver command to try."
+
+	func heading(_ t: String) -> some View {
+		Text(t).font(.system(size: 15, weight: .semibold)).padding(.top, 6)
+	}
+	func note(_ t: String) -> some View {
+		Text(t).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+	}
+
+	@ViewBuilder var terminal: some View {
+		heading("Use Cerver from the terminal")
+		note("The cerver command came with this app. Open Terminal and try:")
+		VStack(alignment: .leading, spacing: 8) {
+			cmd("cerver help", "Every command, with examples")
+			cmd("cerver pool", "Your computers: free, busy or offline")
+			cmd("cerver run \"what's using my disk?\"", "Ask an agent; it runs on a free computer")
+			cmd("cerver run --on \(m.computers.first { !$0.isThisMac && !$0.isPhone }?.name ?? m.relayName) --cli codex \"run the tests\"", "Pick the computer and the agent")
+			cmd("cerver compare \"explain this repo\"", "Claude and Codex answer side by side")
+			cmd("cerver net", "Your private network: who's connected, and how")
+		}
+		note("If Terminal says \"command not found\", open a new Terminal window, or use ~/.cerver/bin/cerver.")
+		heading("Docs")
+		Card {
+			Row(label: "Documentation", note: "Guides and the full API.") {
+				Button("Open") { openWeb("/docs") }.buttonStyle(.link)
+			}
+			Divider().padding(.leading, 16)
+			Row(label: "Quick reference for agents", note: "One page an AI agent can read to learn Cerver.") {
+				Button("Open") { openWeb("/llms.txt") }.buttonStyle(.link)
+			}
+		}
+	}
+
+	func cmd(_ c: String, _ what: String) -> some View {
+		VStack(alignment: .leading, spacing: 4) {
+			Text(what).font(.system(size: 12)).foregroundStyle(.secondary)
+			CommandBox(cmd: c, m: m)
+		}
+	}
+
+	@ViewBuilder var agent: some View {
+		heading("Let your own agent explain Cerver")
+		note("Paste this into Claude Code, Codex or ChatGPT. It reads about Cerver, looks at your work and tells you how Cerver can help you.")
+		CommandBox(cmd: onboardPrompt, m: m)
+		heading("Cerver skill for Claude Code")
+		Card {
+			Row(label: skillInstalled ? "Installed" : "Not installed",
+				note: "Teaches Claude Code to run agents on your computers, ask Codex, and compare answers. Lives in ~/.claude/skills/cerver.") {
+				if installingSkill { ProgressView().controlSize(.small) }
+				Button(skillInstalled ? "Update" : "Install") {
+					installingSkill = true
+					Task.detached {
+						installClaudeSkill()
+						await MainActor.run {
+							installingSkill = false
+							skillInstalled = FileManager.default.fileExists(atPath: skillFile)
+						}
+					}
+				}
+				.disabled(installingSkill)
+			}
+			Divider().padding(.leading, 16)
+			Row(label: "Read the skill", note: "The same file, on the web.") {
+				Button("Open") { openWeb("/skills/cerver/SKILL.md") }.buttonStyle(.link)
+			}
+		}
+		heading("Tools for any app")
+		note("To give Claude Desktop, Cursor, Hermes or OpenClaw your compute pool as tools, connect them in Connectors.")
 	}
 
 	var networkSummary: String {
@@ -1855,7 +1939,7 @@ struct SettingsPage: View {
 		}
 	}
 
-	@ViewBuilder var rest: some View {
+	@ViewBuilder var updates: some View {
 		Text("Version").font(.system(size: 15, weight: .semibold))
 		Card {
 			if let u = m.updates {
@@ -1884,8 +1968,9 @@ struct SettingsPage: View {
 		if let p = m.updateProblem {
 			problem(p)
 		}
+	}
 
-		Text("General").font(.system(size: 15, weight: .semibold)).padding(.top, 6)
+	@ViewBuilder var general: some View {
 		Card {
 			Row(label: "Open Cerver at login") {
 				Toggle("", isOn: Binding(get: { m.openAtLogin }, set: { m.setOpenAtLogin($0) }))
