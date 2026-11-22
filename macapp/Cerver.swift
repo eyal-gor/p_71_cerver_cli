@@ -940,6 +940,7 @@ struct AllComputersPage: View {
 						}
 					}
 				}
+				harnessTable
 				VStack(alignment: .leading, spacing: 4) {
 					legend("Agents", "Ready: agents can run on it now. Busy: running as many as it takes. Offline: its relay isn't running.")
 					legend("Network", "On: your computers reach it by name. Direct means computer to computer; via relay means through Cerver's backup relay.")
@@ -950,6 +951,46 @@ struct AllComputersPage: View {
 	}
 
 	func peer(_ c: Computer) -> NetPeer? { m.status?.peers.first { $0.ip == c.net?.ip } }
+
+	/// Which coding agents (harnesses) each computer has, as its relay reported.
+	@ViewBuilder var harnessTable: some View {
+		let all = Array(Set(m.computers.flatMap { $0.spec?.coding_agents ?? [] })).sorted { harnessOrder($0) < harnessOrder($1) }
+		Text("Coding agents").font(.system(size: 15, weight: .semibold)).padding(.top, 8)
+		if all.isEmpty {
+			Text("No computer has reported its coding agents yet.").font(.callout).foregroundStyle(.secondary)
+		} else {
+			Card {
+				Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 0) {
+					GridRow {
+						header("Computer")
+						ForEach(all, id: \.self) { h in header(h).gridColumnAlignment(.center) }
+					}
+					.padding(.horizontal, 16).padding(.vertical, 10)
+					ForEach(m.computers) { c in
+						Divider().gridCellColumns(all.count + 1)
+						GridRow {
+							Text(c.name).font(.system(size: 14, weight: .medium)).lineLimit(1).fixedSize()
+							if let have = c.spec?.coding_agents {
+								ForEach(all, id: \.self) { h in
+									Image(systemName: have.contains(h) ? "checkmark.circle.fill" : "minus")
+										.foregroundStyle(have.contains(h) ? Color.green : Color.secondary.opacity(0.5))
+								}
+							} else {
+								Text("Not reported yet").font(.system(size: 12)).foregroundStyle(.secondary)
+									.gridCellColumns(all.count)
+							}
+						}
+						.padding(.horizontal, 16).padding(.vertical, 9)
+					}
+				}
+			}
+		}
+	}
+
+	func harnessOrder(_ h: String) -> String {
+		let known = ["claude", "codex", "grok", "gemini", "gemma", "opencode"]
+		return known.firstIndex(of: h).map { String(format: "%02d", $0) } ?? "99" + h
+	}
 
 	func header(_ t: String) -> some View {
 		Text(t).font(.system(size: 12, weight: .semibold)).foregroundStyle(.secondary)
