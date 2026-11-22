@@ -944,10 +944,14 @@ struct Card<Content: View>: View {
 
 struct Row<Trailing: View>: View {
 	let label: String
+	var note: String? = nil
 	@ViewBuilder let trailing: Trailing
 	var body: some View {
 		HStack {
-			Text(label).font(.system(size: 14))
+			VStack(alignment: .leading, spacing: 2) {
+				Text(label).font(.system(size: 14))
+				if let n = note { Text(n).font(.system(size: 11.5)).foregroundStyle(.secondary) }
+			}
 			Spacer()
 			trailing
 		}
@@ -1333,14 +1337,14 @@ struct ThisMacPage: View {
 
 	var overview: some View {
 		Card {
-			Row(label: "Agents can run here") {
+			Row(label: "Agents can run here", note: "Your agents may run on it, as you.") {
 				StatusPill(text: relayText.0, color: relayText.1)
 				if relayWorking { ProgressView().controlSize(.small) }
 				Toggle("", isOn: Binding(get: { relayOn }, set: { $0 ? m.relayOn() : m.relayOff() }))
 					.toggleStyle(.switch).labelsHidden().disabled(relayWorking)
 			}
 			Divider().padding(.leading, 16)
-			Row(label: "Your computers can reach it") {
+			Row(label: "Your computers can reach it", note: "Your other computers can connect to it privately.") {
 				StatusPill(text: m.isOn ? "On" : (m.busy ? "…" : "Off"), color: m.isOn ? .green : .gray)
 				if m.busy { ProgressView().controlSize(.small) }
 				Toggle("", isOn: Binding(get: { m.isOn || m.phase == .starting }, set: { $0 ? m.turnOn() : m.turnOff() }))
@@ -1348,7 +1352,7 @@ struct ThisMacPage: View {
 			}
 			if let me = me, let p = me.pool {
 				Divider().padding(.leading, 16)
-				Row(label: "Others can use it") {
+				Row(label: "People you invite can use it", note: "Invited people's agents may run on it, fenced off from your files.") {
 					StatusPill(text: sharedStatus(me).0, color: sharedStatus(me).1)
 					if let id = p.compute_id, m.sharing.contains(id) { ProgressView().controlSize(.small) }
 					Toggle("", isOn: Binding(get: { p.shared == true }, set: { m.setShared(me, $0) }))
@@ -1470,7 +1474,7 @@ struct ComputerPage: View {
 			Divider().padding(.leading, 16)
 			Row(label: "Network") { StatusPill(text: networkStatus(c, peer: peer).0, color: networkStatus(c, peer: peer).1) }
 			Divider().padding(.leading, 16)
-			Row(label: "Others can use it") { StatusPill(text: sharedStatus(c).0, color: sharedStatus(c).1) }
+			Row(label: "People you invite can use it", note: "Invited people's agents may run on it, fenced off from your files.") { StatusPill(text: sharedStatus(c).0, color: sharedStatus(c).1) }
 		}
 		if let n = c.net, let p = peer, p.connected {
 			HStack(spacing: 10) {
@@ -1620,13 +1624,12 @@ struct SettingsPage: View {
 		PageLayout(title: "Settings", subtitle: m.email.map { "Signed in as " + $0 } ?? "Not signed in") {
 			Text("This computer").font(.system(size: 15, weight: .semibold))
 			Card {
-				Row(label: "Agents can run here") {
-					Text("Cerver sends agent runs to this Mac").font(.callout).foregroundStyle(.secondary)
+				Row(label: "Agents can run here", note: "Your agents may run on it, as you.") {
 					Toggle("", isOn: Binding(get: { m.relay == .running || m.relay == .starting }, set: { $0 ? m.relayOn() : m.relayOff() }))
 						.toggleStyle(.switch).labelsHidden()
 				}
 				Divider().padding(.leading, 16)
-				Row(label: "My computers can reach it") {
+				Row(label: "Your computers can reach it", note: "Your other computers can connect to it privately.") {
 					Text(m.isOn ? networkSummary : "Off").font(.callout).foregroundStyle(.secondary)
 					Toggle("", isOn: Binding(get: { m.isOn || m.phase == .starting }, set: { $0 ? m.turnOn() : m.turnOff() }))
 						.toggleStyle(.switch).labelsHidden().disabled(m.busy)
