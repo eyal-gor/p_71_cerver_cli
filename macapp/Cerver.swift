@@ -317,6 +317,39 @@ struct PoolMachine: Decodable {
 	let shared: Bool?
 }
 
+/// What a computer has, as its relay reported it to Cerver.
+struct Spec: Decodable {
+	struct GPU: Decodable { let name: String?; let memory_gb: Double? }
+	let ref: String
+	let os: String?
+	let arch: String?
+	let cpu_cores: Int?
+	let ram_gb: Double?
+	let disk_free_gb: Double?
+	let gpus: [GPU]?
+	let tools: [String]?
+	let coding_agents: [String]?
+	let desktop: Bool?
+	let reported: Bool?
+
+	var system: String? {
+		guard let os = os else { return nil }
+		let name = ["macos": "macOS", "linux": "Linux", "windows": "Windows"][os] ?? os
+		guard let a = arch else { return name }
+		return name + (a == "arm64" ? (os == "macos" ? " · Apple silicon" : " · ARM") : " · Intel/AMD")
+	}
+
+	/// "10 cores · 24 GB" for the table.
+	var short: String? {
+		var parts: [String] = []
+		if let c = cpu_cores { parts.append("\(c) cores") }
+		if let r = ram_gb { parts.append(gb(r)) }
+		return parts.isEmpty ? nil : parts.joined(separator: " · ")
+	}
+}
+
+func gb(_ v: Double) -> String { v >= 10 ? "\(Int(v.rounded())) GB" : String(format: "%.1f GB", v) }
+
 struct NetNode: Decodable {
 	let name: String
 	let ip: String
@@ -329,13 +362,14 @@ struct Computer: Identifiable {
 	let pool: PoolMachine?
 	let net: NetNode?
 	let isThisMac: Bool
+	var spec: Spec? = nil
 	var id: String { pool?.compute_id ?? "net:" + (net?.ip ?? name) }
 }
 
 /// Your computers: pool machines that are yours plus network devices, matched
 /// by name (the network uses the lowercase form: MacBook-Air-2026 → macbook-air-2026).
 func fetchComputers(thisMac: String, thisMacNet: String?) async -> [Computer]? {
-	struct Pool: Decodable { let machines: [PoolMachine]? }
+	struct Pool: Decodable { let machines: [PoolMachine]?; let computers: [Spec]? }
 	struct Net: Decodable { let nodes: [NetNode]? }
 	guard let poolData = await gatewayGET("/v2/pool"), let pool = try? JSONDecoder().decode(Pool.self, from: poolData) else { return nil }
 	let nodes = (await gatewayGET("/v2/net")).flatMap { try? JSONDecoder().decode(Net.self, from: $0) }?.nodes ?? []
@@ -345,7 +379,8 @@ func fetchComputers(thisMac: String, thisMacNet: String?) async -> [Computer]? {
 		let me = m.name == thisMac
 		let node = nodes.first { !used.contains($0.ip) && ($0.name == cleanName(m.name) || (me && $0.name == thisMacNet)) }
 		if let n = node { used.insert(n.ip) }
-		out.append(Computer(name: m.name, pool: m, net: node, isThisMac: me))
+		let spec = pool.computers?.first { $0.ref == m.compute_id && $0.reported == true }
+		out.append(Computer(name: m.name, pool: m, net: node, isThisMac: me, spec: spec))
 	}
 	for n in nodes where !used.contains(n.ip) {
 		out.append(Computer(name: n.name, pool: nil, net: n, isThisMac: n.name == thisMacNet))
@@ -485,7 +520,8 @@ enum Page: Hashable {
 
 struct MainWindow: View {
 	@ObservedObject var m: Model
-	@State private var page: Page? = .all
+	// `-startPage thisMac` on launch opens that page (for screenshots).
+	@State private var page: Page? = UserDefaults.standard.string(forKey: "startPage") == "thisMac" ? .thisMac : .all
 
 	var body: some View {
 		NavigationSplitView {
@@ -741,6 +777,8 @@ struct ThisMacPage: View {
 				}
 			}
 
+			SpecSection(spec: m.computers.first(where: { $0.isThisMac })?.spec)
+
 			Card {
 				Row(label: "Open Cerver at login") {
 					Toggle("", isOn: Binding(get: { m.openAtLogin }, set: { m.setOpenAtLogin($0) }))
@@ -815,6 +853,49 @@ func sharedStatus(_ c: Computer) -> (String, Color) {
 	return p.shared == true ? ("Yes", .blue) : ("Only you", .gray)
 }
 
+/// What's on a computer: hardware, coding agents, tools.
+struct SpecSection: View {
+	let spec: Spec?
+
+	var body: some View {
+		Text("What's on it").font(.system(size: 15, weight: .semibold)).padding(.top, 6)
+		if let s = spec {
+			Card {
+				rows(s)
+			}
+		} else {
+			Text("Not reported yet. A computer tells Cerver what it has when its relay starts.")
+				.font(.callout).foregroundStyle(.secondary)
+		}
+	}
+
+	@ViewBuilder func rows(_ s: Spec) -> some View {
+		let items: [(String, String)] = [
+			("System", s.system),
+			("Processor", s.cpu_cores.map { "\($0) cores" }),
+			("Memory", s.ram_gb.map(gb)),
+			("Free disk", s.disk_free_gb.map(gb)),
+			("Graphics", (s.gpus ?? []).compactMap { g in g.name.map { n in g.memory_gb.map { "\(n), \(gb($0))" } ?? n } }.joined(separator: ", ").nilIfEmpty),
+			("Screen", s.desktop.map { $0 ? "Yes, agents can use the desktop" : "No, terminal only" }),
+			("Coding agents", (s.coding_agents ?? []).joined(separator: ", ").nilIfEmpty),
+			("Tools", (s.tools ?? []).joined(separator: ", ").nilIfEmpty),
+		].compactMap { k, v in v.map { (k, $0) } }
+		ForEach(Array(items.enumerated()), id: \.offset) { i, kv in
+			if i > 0 { Divider().padding(.leading, 16) }
+			HStack(alignment: .firstTextBaseline) {
+				Text(kv.0).font(.system(size: 14))
+				Spacer(minLength: 24)
+				Text(kv.1).foregroundStyle(.secondary).multilineTextAlignment(.trailing).textSelection(.enabled)
+			}
+			.padding(.horizontal, 16).padding(.vertical, 11)
+		}
+	}
+}
+
+extension String {
+	var nilIfEmpty: String? { isEmpty ? nil : self }
+}
+
 /// Every computer in one table: can agents run on it, is it on the network,
 /// can people in your pool use it.
 struct AllComputersPage: View {
@@ -840,12 +921,14 @@ struct AllComputersPage: View {
 							GridRow {
 								HStack(spacing: 8) {
 									Image(systemName: c.isThisMac ? "laptopcomputer" : "desktopcomputer").foregroundStyle(.secondary)
-									Text(c.name).font(.system(size: 14, weight: .medium)).lineLimit(1)
-									if c.isThisMac {
-										Text("This Mac").font(.system(size: 11)).foregroundStyle(.secondary)
-											.padding(.horizontal, 6).padding(.vertical, 1)
-											.background(Capsule().fill(Color.primary.opacity(0.06)))
+									VStack(alignment: .leading, spacing: 1) {
+										Text(c.name).font(.system(size: 14, weight: .medium)).lineLimit(1)
+										let sub = ([c.isThisMac ? "This Mac" : nil, c.spec?.short].compactMap { $0 }).joined(separator: " · ")
+										if !sub.isEmpty {
+											Text(sub).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+										}
 									}
+									.layoutPriority(1)
 								}
 								StatusPill(text: agentsStatus(c).0, color: agentsStatus(c).1)
 								StatusPill(text: networkStatus(c, peer: peer(c)).0, color: networkStatus(c, peer: peer(c)).1)
@@ -945,6 +1028,8 @@ struct ComputerPage: View {
 				Text("Not on your network. On that computer, run: sudo cerver net install")
 					.font(.callout).foregroundStyle(.secondary)
 			}
+
+			SpecSection(spec: c.spec)
 		}
 	}
 
