@@ -748,7 +748,7 @@ func howConnected(_ p: NetPeer) -> String {
 // MARK: - Window (sidebar + page, in the style of the ChatGPT Mac app)
 
 enum Page: Hashable {
-	case map, pool, permissions, thisMac, computer(String), add, settings, session, profile, connectors
+	case map, pool, permissions, thisMac, computer(String), add, settings, session, profile, connectors, people
 }
 
 struct MainWindow: View {
@@ -756,7 +756,7 @@ struct MainWindow: View {
 	@StateObject private var session = SessionModel()
 	@StateObject private var apps = AppsModel()
 	// `-startPage thisMac` on launch opens that page (for screenshots).
-	@State private var page: Page? = ["thisMac": Page.thisMac, "add": Page.add, "settings": Page.settings, "session": Page.session, "pool": Page.pool, "permissions": Page.permissions, "profile": Page.profile, "connectors": Page.connectors][UserDefaults.standard.string(forKey: "startPage") ?? ""] ?? .map
+	@State private var page: Page? = ["thisMac": Page.thisMac, "add": Page.add, "settings": Page.settings, "session": Page.session, "pool": Page.pool, "permissions": Page.permissions, "profile": Page.profile, "connectors": Page.connectors, "people": Page.people][UserDefaults.standard.string(forKey: "startPage") ?? ""] ?? .map
 
 	var body: some View {
 		NavigationSplitView {
@@ -801,6 +801,8 @@ struct MainWindow: View {
 					.tag(Page.map)
 				Label("Connectors", systemImage: "app.connected.to.app.below.fill")
 					.tag(Page.connectors)
+				Label("People", systemImage: "person.2")
+					.tag(Page.people)
 				Section("Cerver Compute") {
 					Label("Ask Compute Pool", systemImage: "bubble.left.and.text.bubble.right")
 						.tag(Page.session)
@@ -935,6 +937,7 @@ struct MainWindow: View {
 			switch page ?? .map {
 			case .map: MapPage(m: m, apps: apps, open: { page = $0 })
 			case .connectors: ConnectorsPage(a: apps)
+			case .people: PeoplePage(m: m)
 			case .pool: PoolPage(m: m, open: { page = $0 })
 			case .permissions: PermissionsPage(m: m)
 			case .thisMac: ThisMacPage(m: m)
@@ -1166,7 +1169,7 @@ struct PoolPage: View {
 	@State private var copied = false
 
 	var body: some View {
-		PageLayout(title: "Compute pool", subtitle: "Every computer your agents can run on, and who can use them.") {
+		PageLayout(title: "Compute pool", subtitle: "Every computer your agents can run on, and how they connect.") {
 			HStack {
 				Picker("", selection: $view) {
 					Text("Computers").tag("Computers")
@@ -1240,37 +1243,6 @@ struct PoolPage: View {
 			Text("Your computers connect directly, computer to computer, and use Cerver's backup route only when a direct connection can't be made.")
 				.font(.callout).foregroundStyle(.secondary)
 
-			section("People")
-			Card {
-				if let i = info {
-					ForEach(Array(i.people.enumerated()), id: \.offset) { n, x in
-						if n > 0 { Divider().padding(.leading, 16) }
-						Row(label: x.email ?? x.name ?? "Someone") {
-							if x.status == "active" {
-								Text(n == 0 ? "Owner" : "Can run agents").foregroundStyle(.secondary)
-							} else {
-								Text("Asked to join").foregroundStyle(.orange)
-								Button("Approve") { act("POST", "/v2/pool/members/\(x.account_id)/approve") }
-							}
-						}
-					}
-					if let url = i.invite_url {
-						Divider().padding(.leading, 16)
-						Row(label: "Invite someone") {
-							Text(url).font(.system(size: 12, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
-							Button(copied ? "Copied" : "Copy link") {
-								NSPasteboard.general.clearContents()
-								NSPasteboard.general.setString(url, forType: .string)
-								copied = true
-							}
-						}
-					}
-				} else {
-					Row(label: "Loading…") { ProgressView().controlSize(.small) }
-				}
-			}
-			Text("People you invite can run agents only on computers you allow, in Permissions → Advanced.")
-				.font(.callout).foregroundStyle(.secondary)
 		}
 		.task { await load() }
 	}
@@ -2762,5 +2734,60 @@ struct ConnectorsPage: View {
 		.frame(maxWidth: .infinity, minHeight: 128, alignment: .topLeading)
 		.background(RoundedRectangle(cornerRadius: 12).fill(Color(nsColor: .controlBackgroundColor)))
 		.overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.primary.opacity(0.08)))
+	}
+}
+
+/// The people in your pool: who's in, who asked to join, and the invite link.
+struct PeoplePage: View {
+	@ObservedObject var m: Model
+	@State private var info: PoolInfo?
+	@State private var copied = false
+
+	var body: some View {
+		PageLayout(title: "People", subtitle: "Who is in your pool, and how to invite someone.") {
+			Card {
+				if let i = info {
+					ForEach(Array(i.people.enumerated()), id: \.offset) { n, x in
+						if n > 0 { Divider().padding(.leading, 16) }
+						Row(label: x.email ?? x.name ?? "Someone") {
+							if x.status == "active" {
+								Text(n == 0 ? "Owner" : "Can run agents").foregroundStyle(.secondary)
+							} else {
+								Text("Asked to join").foregroundStyle(.orange)
+								Button("Approve") { act("POST", "/v2/pool/members/\(x.account_id)/approve") }
+							}
+						}
+					}
+					if let url = i.invite_url {
+						Divider().padding(.leading, 16)
+						Row(label: "Invite someone") {
+							Text(url).font(.system(size: 12, design: .monospaced)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.middle)
+							Button(copied ? "Copied" : "Copy link") {
+								NSPasteboard.general.clearContents()
+								NSPasteboard.general.setString(url, forType: .string)
+								copied = true
+							}
+						}
+					}
+				} else {
+					Row(label: "Loading…") { ProgressView().controlSize(.small) }
+				}
+			}
+			Text("People you invite can run agents only on computers you allow, in Permissions → Advanced.")
+				.font(.callout).foregroundStyle(.secondary)
+		}
+		.task { await load() }
+	}
+
+	func load() async {
+		if let d = await gatewayGET("/v2/pool"), let i = try? JSONDecoder().decode(PoolInfo.self, from: d) { info = i }
+	}
+
+	func act(_ method: String, _ path: String) {
+		Task {
+			_ = await gatewayRequest(method, path)
+			await load()
+			m.refreshPool(force: true)
+		}
 	}
 }
