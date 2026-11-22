@@ -234,177 +234,359 @@ func howConnected(_ p: NetPeer) -> String {
 	return p.via == "relay" ? "Through Cerver relay" : "Direct"
 }
 
-// MARK: - Window
+// MARK: - Window (sidebar + page, in the style of the ChatGPT Mac app)
+
+enum Page: Hashable {
+	case thisMac, peer(String), add
+}
 
 struct MainWindow: View {
 	@ObservedObject var m: Model
-	@State private var editingName = false
-	@State private var newName = ""
+	@State private var page: Page? = .thisMac
 
 	var body: some View {
-		VStack(alignment: .leading, spacing: 0) {
-			header
-			Divider()
-			ScrollView {
-				VStack(alignment: .leading, spacing: 18) {
-					content
+		NavigationSplitView {
+			sidebar
+				.navigationSplitViewColumnWidth(min: 210, ideal: 240, max: 300)
+		} detail: {
+			ZStack {
+				Color(nsColor: .textBackgroundColor).ignoresSafeArea()
+				detail
+			}
+		}
+		.frame(minWidth: 760, minHeight: 500)
+		.onChange(of: m.status?.peers.map(\.ip) ?? []) { ips in
+			// The computer on screen left: go back to this Mac.
+			if case .peer(let ip) = page, !ips.contains(ip) { page = .thisMac }
+		}
+	}
+
+	// MARK: Sidebar
+
+	var sidebar: some View {
+		VStack(spacing: 0) {
+			HStack(spacing: 9) {
+				Image(nsImage: logoImage(size: 22))
+					.clipShape(RoundedRectangle(cornerRadius: 5))
+				Text("Cerver").font(.system(size: 15, weight: .semibold))
+				Spacer()
+			}
+			.padding(.horizontal, 16)
+			.padding(.top, 6)
+			.padding(.bottom, 10)
+
+			List(selection: $page) {
+				Section("This Mac") {
+					sidebarRow(name: m.status?.name ?? m.deviceName, dot: m.isOn ? .green : Color.secondary.opacity(0.4), icon: "laptopcomputer")
+						.tag(Page.thisMac)
 				}
-				.padding(20)
-				.frame(maxWidth: .infinity, alignment: .leading)
+				Section("Your computers") {
+					ForEach(m.status?.peers ?? []) { p in
+						sidebarRow(name: p.name, dot: dotColor(p), icon: "desktopcomputer")
+							.tag(Page.peer(p.ip))
+					}
+					Label("Add a computer", systemImage: "plus")
+						.foregroundStyle(.secondary)
+						.tag(Page.add)
+				}
 			}
+			.listStyle(.sidebar)
+
+			Divider()
+			HStack(spacing: 10) {
+				Circle().fill(m.isOn ? Color.green : Color.secondary.opacity(0.4)).frame(width: 8, height: 8)
+				VStack(alignment: .leading, spacing: 1) {
+					Text(m.isOn ? "Connected" : "Not connected").font(.system(size: 13, weight: .medium))
+					Text(m.status?.ip ?? "This Mac").font(.system(size: 11)).foregroundStyle(.secondary)
+				}
+				Spacer()
+				if m.busy { ProgressView().controlSize(.small) }
+				if m.phase != .notSignedIn {
+					Toggle("", isOn: Binding(get: { m.isOn || m.phase == .starting }, set: { $0 ? m.turnOn() : m.turnOff() }))
+						.toggleStyle(.switch).controlSize(.small).labelsHidden()
+						.disabled(m.busy)
+				}
+			}
+			.padding(.horizontal, 16)
+			.padding(.vertical, 12)
 		}
-		.frame(minWidth: 460, idealWidth: 500, minHeight: 420, idealHeight: 480)
 	}
 
-	var header: some View {
-		HStack(spacing: 12) {
-			Image(nsImage: logoImage(size: 28, gray: !m.isOn))
-				.clipShape(RoundedRectangle(cornerRadius: 6))
-			VStack(alignment: .leading, spacing: 2) {
-				Text("Cerver").font(.title2.weight(.semibold))
-				Text(subtitle).font(.callout).foregroundStyle(.secondary)
-			}
+	func sidebarRow(name: String, dot: Color, icon: String) -> some View {
+		HStack(spacing: 8) {
+			Image(systemName: icon).foregroundStyle(.secondary).frame(width: 18)
+			Text(name).lineLimit(1)
 			Spacer()
-			if m.busy {
-				ProgressView().controlSize(.small)
-			}
-			if m.phase != .notSignedIn {
-				Toggle("", isOn: Binding(get: { m.isOn || m.phase == .starting }, set: { $0 ? m.turnOn() : m.turnOff() }))
-					.toggleStyle(.switch)
-					.labelsHidden()
-					.disabled(m.busy)
-			}
-		}
-		.padding(20)
-	}
-
-	var subtitle: String {
-		switch m.phase {
-		case .notSignedIn: return "Sign in to Cerver first"
-		case .off: return "Not connected. Your other computers can't reach this Mac."
-		case .starting: return "Starting…"
-		case .working(let w): return w
-		case .failed: return "Something went wrong"
-		case .on: return "Connected. Your other computers can reach this Mac."
+			Circle().fill(dot).frame(width: 7, height: 7)
 		}
 	}
 
-	@ViewBuilder var content: some View {
+	func dotColor(_ p: NetPeer) -> Color {
+		p.connected ? (p.via == "relay" ? .orange : .green) : Color.secondary.opacity(0.4)
+	}
+
+	// MARK: Pages
+
+	@ViewBuilder var detail: some View {
 		if case .failed(let why) = m.phase {
-			Label(why, systemImage: "exclamationmark.triangle.fill")
-				.foregroundStyle(.orange)
+			VStack {
+				banner(why)
+				Spacer()
+			}
 		}
 		switch m.phase {
 		case .notSignedIn:
-			Text("Cerver connects your computers into one private network, so you can reach any of them by name from anywhere.")
-			Text("To start, install Cerver on this Mac and sign in:")
-			commandBox("curl -fsSL https://cerver.ai/install.sh | sh")
-			Text("Then come back here and turn it on.").foregroundStyle(.secondary)
-		case .on:
+			welcome(title: "Sign in to Cerver",
+				text: "Cerver connects your computers into one private network, so you can reach any of them by name from anywhere.") {
+				VStack(spacing: 10) {
+					Text("Install Cerver on this Mac and sign in, then come back here.")
+						.foregroundStyle(.secondary)
+					CommandBox(cmd: "curl -fsSL https://cerver.ai/install.sh | sh", m: m)
+				}
+			}
+		case .on, .working, .starting:
 			if let s = m.status {
-				thisMac(s)
-				devices(s)
+				switch page ?? .thisMac {
+				case .thisMac: ThisMacPage(m: m, s: s)
+				case .peer(let ip):
+					if let p = s.peers.first(where: { $0.ip == ip }) { PeerPage(m: m, p: p) } else { ThisMacPage(m: m, s: s) }
+				case .add: AddPage(m: m)
+				}
+			} else {
+				welcome(title: m.phase == .starting ? "Connecting…" : (m.busy ? "One moment…" : "Connecting…"), text: "This takes a few seconds.") {
+					ProgressView()
+				}
 			}
 		default:
-			Text("Cerver connects your computers into one private network, so you can reach any of them by name from anywhere, at home or away.")
-			Text("Connect this Mac to start. macOS will ask for your password once.")
-				.foregroundStyle(.secondary)
-			Button("Connect This Mac") { m.turnOn() }
-				.buttonStyle(.borderedProminent)
-				.disabled(m.busy)
-		}
-	}
-
-	func thisMac(_ s: NetStatus) -> some View {
-		GroupBox {
-			VStack(alignment: .leading, spacing: 8) {
-				HStack {
-					if editingName {
-						TextField("Name", text: $newName)
-							.textFieldStyle(.roundedBorder)
-							.frame(maxWidth: 220)
-							.onSubmit(saveName)
-						Button("Save", action: saveName).disabled(cleanName(newName).isEmpty)
-						Button("Cancel") { editingName = false }
-					} else {
-						Text(s.name).font(.headline)
-						Button("Rename") {
-							newName = s.name
-							editingName = true
+			if page == .add {
+				AddPage(m: m)
+			} else {
+				welcome(title: "Reach all your computers from here",
+					text: "Cerver connects your computers into one private network, so you can reach any of them by name, at home or away.") {
+					VStack(spacing: 10) {
+						Button {
+							m.turnOn()
+						} label: {
+							Text("Connect This Mac").font(.system(size: 14, weight: .semibold))
+								.padding(.horizontal, 18).padding(.vertical, 8)
 						}
-						.buttonStyle(.link)
+						.buttonStyle(.borderedProminent)
+						.controlSize(.large)
+						.clipShape(Capsule())
+						.disabled(m.busy)
+						Text("macOS asks for your password once.").font(.callout).foregroundStyle(.secondary)
 					}
-					Spacer()
-				}
-				HStack(spacing: 16) {
-					Text(s.ip).font(.system(.body, design: .monospaced)).textSelection(.enabled)
-					Text(s.relay_connected ? "Backup relay ready" : "Backup relay connecting…")
-						.font(.caption).foregroundStyle(.secondary)
 				}
 			}
-			.padding(6)
-			.frame(maxWidth: .infinity, alignment: .leading)
-		} label: {
-			Text("This Mac")
 		}
 	}
 
-	func saveName() {
-		let n = cleanName(newName)
-		guard !n.isEmpty else { return }
-		editingName = false
-		if n != m.status?.name { m.turnOn(name: n) }
-	}
-
-	@ViewBuilder func devices(_ s: NetStatus) -> some View {
-		Text("Your other computers").font(.headline)
-		if s.peers.isEmpty {
-			VStack(alignment: .leading, spacing: 8) {
-				Text("No other computers yet. To add one (Mac or Linux), run this on it:")
-					.foregroundStyle(.secondary)
-				commandBox(addDeviceCommand)
-			}
-		} else {
-			VStack(spacing: 0) {
-				ForEach(s.peers) { p in
-					peerRow(p)
-					if p.id != s.peers.last?.id { Divider() }
-				}
-			}
-			.background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .controlBackgroundColor)))
-			.overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.2)))
-			Text("Reach them by name from this Mac, for example: ssh \(s.peers[0].name)")
-				.font(.caption).foregroundStyle(.secondary)
+	func welcome<Extra: View>(title: String, text: String, @ViewBuilder extra: () -> Extra) -> some View {
+		VStack(spacing: 18) {
+			Image(nsImage: logoImage(size: 56))
+				.clipShape(RoundedRectangle(cornerRadius: 13))
+			Text(title).font(.system(size: 26, weight: .semibold))
+			Text(text)
+				.font(.system(size: 15))
+				.foregroundStyle(.secondary)
+				.multilineTextAlignment(.center)
+				.frame(maxWidth: 440)
+			extra().padding(.top, 6)
 		}
+		.padding(40)
+		.frame(maxWidth: .infinity, maxHeight: .infinity)
 	}
 
-	func peerRow(_ p: NetPeer) -> some View {
-		HStack(spacing: 10) {
-			Circle().fill(p.connected ? (p.via == "relay" ? Color.orange : Color.green) : Color.secondary.opacity(0.4))
-				.frame(width: 9, height: 9)
-			VStack(alignment: .leading, spacing: 2) {
-				Text(p.name).font(.body.weight(.medium))
-				Text("\(p.ip) · \(howConnected(p))").font(.caption).foregroundStyle(.secondary)
-			}
+	func banner(_ why: String) -> some View {
+		HStack(spacing: 8) {
+			Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(.orange)
+			Text(why).font(.callout)
 			Spacer()
-			Button(m.copied == p.name ? "Copied" : "Copy Name") { m.copy(p.name) }
-			Button("SSH") { openSSH(p.name) }
 		}
-		.padding(.horizontal, 12)
-		.padding(.vertical, 9)
+		.padding(12)
+		.background(RoundedRectangle(cornerRadius: 10).fill(Color.orange.opacity(0.1)))
+		.padding(.horizontal, 24).padding(.top, 16)
 	}
+}
 
-	func commandBox(_ cmd: String) -> some View {
-		HStack(alignment: .top) {
+/// One page: big title, a line under it, then cards. Centered, readable width.
+struct PageLayout<Content: View>: View {
+	let title: String
+	let subtitle: String
+	@ViewBuilder let content: Content
+
+	var body: some View {
+		ScrollView {
+			VStack(alignment: .leading, spacing: 22) {
+				VStack(alignment: .leading, spacing: 6) {
+					Text(title).font(.system(size: 28, weight: .semibold))
+					Text(subtitle).font(.system(size: 15)).foregroundStyle(.secondary)
+				}
+				content
+			}
+			.frame(maxWidth: 620, alignment: .leading)
+			.padding(.horizontal, 40)
+			.padding(.vertical, 36)
+			.frame(maxWidth: .infinity)
+		}
+	}
+}
+
+struct Card<Content: View>: View {
+	@ViewBuilder let content: Content
+	var body: some View {
+		VStack(alignment: .leading, spacing: 0) { content }
+			.background(RoundedRectangle(cornerRadius: 14).fill(Color(nsColor: .controlBackgroundColor)))
+			.overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.08)))
+	}
+}
+
+struct Row<Trailing: View>: View {
+	let label: String
+	@ViewBuilder let trailing: Trailing
+	var body: some View {
+		HStack {
+			Text(label).font(.system(size: 14))
+			Spacer()
+			trailing
+		}
+		.padding(.horizontal, 16).padding(.vertical, 12)
+	}
+}
+
+struct StatusPill: View {
+	let text: String
+	let color: Color
+	var body: some View {
+		HStack(spacing: 6) {
+			Circle().fill(color).frame(width: 7, height: 7)
+			Text(text).font(.system(size: 12, weight: .medium))
+		}
+		.padding(.horizontal, 10).padding(.vertical, 4)
+		.background(Capsule().fill(color.opacity(0.12)))
+	}
+}
+
+struct CommandBox: View {
+	let cmd: String
+	@ObservedObject var m: Model
+	var body: some View {
+		HStack(alignment: .center, spacing: 10) {
 			Text(cmd)
-				.font(.system(.callout, design: .monospaced))
+				.font(.system(size: 12.5, design: .monospaced))
 				.textSelection(.enabled)
 				.frame(maxWidth: .infinity, alignment: .leading)
 			Button(m.copied == cmd ? "Copied" : "Copy") { m.copy(cmd) }
+				.buttonStyle(.bordered).clipShape(Capsule())
 		}
-		.padding(10)
-		.background(RoundedRectangle(cornerRadius: 8).fill(Color(nsColor: .textBackgroundColor)))
-		.overlay(RoundedRectangle(cornerRadius: 8).stroke(Color.secondary.opacity(0.2)))
+		.padding(14)
+		.background(RoundedRectangle(cornerRadius: 12).fill(Color.primary.opacity(0.05)))
+	}
+}
+
+struct ThisMacPage: View {
+	@ObservedObject var m: Model
+	let s: NetStatus
+	@State private var editing = false
+	@State private var newName = ""
+
+	var body: some View {
+		PageLayout(title: s.name, subtitle: "This Mac. Your other computers reach it at this name.") {
+			HStack { StatusPill(text: "Connected", color: .green); Spacer() }
+			Card {
+				Row(label: "Name") {
+					if editing {
+						TextField("Name", text: $newName).textFieldStyle(.roundedBorder).frame(width: 180).onSubmit(save)
+						Button("Save", action: save).disabled(cleanName(newName).isEmpty)
+						Button("Cancel") { editing = false }
+					} else {
+						Text(s.name).foregroundStyle(.secondary)
+						Button("Rename") { newName = s.name; editing = true }.buttonStyle(.link)
+					}
+				}
+				Divider().padding(.leading, 16)
+				Row(label: "Address") {
+					Text(s.ip).font(.system(size: 13, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
+					Button(m.copied == s.ip ? "Copied" : "Copy") { m.copy(s.ip) }.buttonStyle(.link)
+				}
+				Divider().padding(.leading, 16)
+				Row(label: "Backup relay") {
+					Text(s.relay_connected ? "Ready" : "Connecting…").foregroundStyle(.secondary)
+				}
+			}
+			Text("When a network blocks a direct connection, traffic goes through the backup relay. It stays encrypted end to end.")
+				.font(.callout).foregroundStyle(.secondary)
+			Card {
+				Row(label: "Open at login") {
+					Toggle("", isOn: Binding(get: { m.openAtLogin }, set: { m.setOpenAtLogin($0) }))
+						.toggleStyle(.switch).labelsHidden()
+				}
+				Divider().padding(.leading, 16)
+				Row(label: "Log") {
+					Button("Show") { NSWorkspace.shared.open(URL(fileURLWithPath: logFile)) }.buttonStyle(.link)
+				}
+			}
+		}
+	}
+
+	func save() {
+		let n = cleanName(newName)
+		guard !n.isEmpty else { return }
+		editing = false
+		if n != s.name { m.turnOn(name: n) }
+	}
+}
+
+struct PeerPage: View {
+	@ObservedObject var m: Model
+	let p: NetPeer
+
+	var body: some View {
+		PageLayout(title: p.name, subtitle: p.connected ? "Reach it from this Mac by its name." : "Cerver is trying to reach it. It may be off or asleep.") {
+			HStack {
+				StatusPill(text: howConnected(p), color: p.connected ? (p.via == "relay" ? .orange : .green) : .gray)
+				Spacer()
+			}
+			HStack(spacing: 10) {
+				Button {
+					openSSH(p.name)
+				} label: {
+					Label("Open SSH in Terminal", systemImage: "terminal").padding(.horizontal, 6).padding(.vertical, 3)
+				}
+				.buttonStyle(.borderedProminent).controlSize(.large).clipShape(Capsule())
+				.disabled(!p.connected)
+				Button(m.copied == p.name ? "Copied" : "Copy Name") { m.copy(p.name) }
+					.buttonStyle(.bordered).controlSize(.large).clipShape(Capsule())
+			}
+			Card {
+				Row(label: "Name") { Text(p.name).foregroundStyle(.secondary) }
+				Divider().padding(.leading, 16)
+				Row(label: "Address") {
+					Text(p.ip).font(.system(size: 13, design: .monospaced)).foregroundStyle(.secondary).textSelection(.enabled)
+					Button(m.copied == p.ip ? "Copied" : "Copy") { m.copy(p.ip) }.buttonStyle(.link)
+				}
+				Divider().padding(.leading, 16)
+				Row(label: "Connection") { Text(howConnected(p)).foregroundStyle(.secondary) }
+			}
+			Text("Use the name anywhere you'd use an address: ssh \(p.name), http://\(p.name):3000, and so on.")
+				.font(.callout).foregroundStyle(.secondary)
+		}
+	}
+}
+
+struct AddPage: View {
+	@ObservedObject var m: Model
+	var body: some View {
+		PageLayout(title: "Add a computer", subtitle: "Any Mac or Linux computer, at home, at work or in the cloud.") {
+			VStack(alignment: .leading, spacing: 10) {
+				Text("1.  Open a terminal on that computer and run:").font(.system(size: 14))
+				CommandBox(cmd: addDeviceCommand, m: m)
+			}
+			Text("2.  It shows up here within a few seconds, and you can reach it by its name.")
+				.font(.system(size: 14))
+			Text("It signs in with your Cerver account, so only your computers join.")
+				.font(.callout).foregroundStyle(.secondary)
+		}
 	}
 }
 
@@ -464,7 +646,9 @@ struct CerverApp: App {
 			MainWindow(m: m)
 				.onAppear { NSApp.activate(ignoringOtherApps: true) }
 		}
-		.windowResizability(.contentSize)
+		.windowStyle(.hiddenTitleBar)
+		.windowToolbarStyle(.unified(showsTitle: false))
+		.defaultSize(width: 920, height: 620)
 		.defaultPosition(.center)
 
 		MenuBarExtra {
