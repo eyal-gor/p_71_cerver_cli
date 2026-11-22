@@ -82,6 +82,20 @@ struct UpdateInfo: Decodable {
 	var any: Bool { cli.update || app?.update == true || relay?.update == true || net?.update == true }
 }
 
+/// Runs a line in your login shell and returns what it printed.
+func shell(_ line: String) -> String {
+	let p = Process()
+	p.executableURL = URL(fileURLWithPath: "/bin/zsh")
+	p.arguments = ["-lc", line]
+	let out = Pipe()
+	p.standardOutput = out
+	p.standardError = Pipe()
+	do { try p.run() } catch { return "" }
+	let data = out.fileHandleForReading.readDataToEndOfFile()
+	p.waitUntilExit()
+	return (String(data: data, encoding: .utf8) ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+}
+
 /// Runs the app's own cerver as you (with your login PATH). Returns (ok, output).
 func runCerver(_ args: [String]) -> (Bool, String) {
 	guard let bin = Bundle.main.path(forResource: "cerver", ofType: nil) else { return (false, "The app is missing its cerver program.") }
@@ -315,6 +329,51 @@ final class Model: ObservableObject {
 				self.relay = ok ? .off : .failed(msg.replacingOccurrences(of: "error: ", with: "").trimmingCharacters(in: .whitespacesAndNewlines))
 				self.refreshRelay()
 				self.refreshPool(force: true)
+			}
+		}
+	}
+
+	// MARK: Connect (first run): sign in, then pool, then network
+
+	@Published var connecting: String?
+	@Published var connectProblem: String?
+
+	func connect() {
+		connectProblem = nil
+		connecting = "Waiting for you to sign in in your browser…"
+		Task.detached {
+			let home = NSHomeDirectory()
+			// 1. Sign in (opens the browser; waits for your approval).
+			if !FileManager.default.fileExists(atPath: home + "/.cerver/cerver.env") {
+				let (ok, out) = runCerver(["login"])
+				if !ok {
+					await MainActor.run { self.connecting = nil; self.connectProblem = cleanError(out) }
+					return
+				}
+			}
+			// 2. The cerver program where the services and updates expect it.
+			await MainActor.run { self.connecting = "Setting up…" }
+			let bin = home + "/.cerver/bin/cerver"
+			if !FileManager.default.fileExists(atPath: bin), let bundled = Bundle.main.path(forResource: "cerver", ofType: nil) {
+				try? FileManager.default.createDirectory(atPath: home + "/.cerver/bin", withIntermediateDirectories: true)
+				try? FileManager.default.copyItem(atPath: bundled, toPath: bin)
+			}
+			// 3. uv, which runs the relay.
+			if shell("command -v uvx || ls ~/.local/bin/uvx").isEmpty {
+				await MainActor.run { self.connecting = "Installing uv (runs the relay)…" }
+				_ = shell("curl -LsSf https://astral.sh/uv/install.sh | sh")
+			}
+			// 4. The pool.
+			await MainActor.run { self.connecting = "Joining your pool…" }
+			let (ok, out) = runCerver(["relay", "install"])
+			await MainActor.run {
+				self.connecting = nil
+				if !ok { self.connectProblem = cleanError(out) }
+				self.refresh()
+				self.refreshRelay()
+				self.refreshPool(force: true)
+				// 5. The network (asks for this Mac's password).
+				self.turnOn()
 			}
 		}
 	}
@@ -773,10 +832,19 @@ struct MainWindow: View {
 		if m.phase == .notSignedIn {
 			VStack(spacing: 18) {
 				Image(nsImage: logoImage(size: 56)).clipShape(RoundedRectangle(cornerRadius: 13))
-				Text("Sign in to Cerver").font(.system(size: 26, weight: .semibold))
-				Text("Install Cerver on this Mac and sign in, then come back here.")
-					.font(.system(size: 15)).foregroundStyle(.secondary)
-				CommandBox(cmd: "curl -fsSL https://cerver.ai/install.sh | sh", m: m).frame(maxWidth: 460)
+				Text("Connect this Mac to Cerver").font(.system(size: 26, weight: .semibold))
+				Text("Sign in in your browser. Then this Mac joins your pool, so agents can run on it, and your network, so your computers reach it.")
+					.font(.system(size: 15)).foregroundStyle(.secondary).multilineTextAlignment(.center).frame(maxWidth: 460)
+				Button {
+					m.connect()
+				} label: {
+					Text(m.connecting ?? "Connect").font(.system(size: 15, weight: .semibold)).padding(.horizontal, 18).padding(.vertical, 6)
+				}
+				.buttonStyle(.borderedProminent).controlSize(.large).clipShape(Capsule())
+				.disabled(m.connecting != nil)
+				if let p = m.connectProblem {
+					Text(p).font(.callout).foregroundStyle(.red).textSelection(.enabled).frame(maxWidth: 460)
+				}
 			}
 			.padding(40)
 			.frame(maxWidth: .infinity, maxHeight: .infinity)
