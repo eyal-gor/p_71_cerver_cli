@@ -757,6 +757,8 @@ struct MainWindow: View {
 	@ObservedObject var m: Model
 	@StateObject private var session = SessionModel()
 	@StateObject private var apps = AppsModel()
+	@AppStorage("poolFolded") private var poolFolded = false
+	@State private var hoverPool = false
 	// `-startPage thisMac` on launch opens that page (for screenshots).
 	@State private var page: Page? = ["thisMac": Page.thisMac, "add": Page.add, "settings": Page.settings, "session": Page.session, "pool": Page.pool, "permissions": Page.permissions, "profile": Page.profile, "connectors": Page.connectors, "people": Page.people, "map": Page.map][UserDefaults.standard.string(forKey: "startPage") ?? ""] ?? .pool
 
@@ -800,8 +802,24 @@ struct MainWindow: View {
 
 			List(selection: $page) {
 				Section("Cerver Compute") {
-					Label("Compute pool", systemImage: "server.rack")
-						.tag(Page.pool)
+					HStack(spacing: 4) {
+						Label("Compute pool", systemImage: "server.rack")
+						Spacer()
+						// Fold the computers away; the button shows when the pointer is on the row.
+						Button { withAnimation(.easeInOut(duration: 0.15)) { poolFolded.toggle() } } label: {
+							Image(systemName: poolFolded ? "chevron.right" : "chevron.down")
+								.font(.system(size: 11, weight: .semibold))
+								.frame(width: 22, height: 18)
+								.background(RoundedRectangle(cornerRadius: 5).fill(Color.primary.opacity(hoverPool ? 0.08 : 0)))
+						}
+						.buttonStyle(.plain)
+						.foregroundStyle(.secondary)
+						.opacity(hoverPool ? 1 : 0)
+						.help(poolFolded ? "Show your computers" : "Hide your computers")
+					}
+					.onHover { hoverPool = $0 }
+					.tag(Page.pool)
+					if !poolFolded {
 					Label("Ask Compute Pool", systemImage: "bubble.left.and.text.bubble.right")
 						.padding(.leading, 14)
 						.tag(Page.session)
@@ -815,10 +833,11 @@ struct MainWindow: View {
 							.padding(.leading, 14)
 							.tag(Page.thisMac)
 					}
-					Label("Add a computer", systemImage: "plus")
+					Label("Add Compute", systemImage: "plus")
 						.foregroundStyle(.secondary)
 						.padding(.leading, 14)
 						.tag(Page.add)
+					}
 				}
 				Section {
 					Label("Map", systemImage: "map")
@@ -1242,7 +1261,7 @@ struct PoolPage: View {
 			}
 			HStack(spacing: 18) {
 				Button { open(.permissions) } label: { Label("Permissions", systemImage: "lock.shield") }.buttonStyle(.link)
-				Button { open(.add) } label: { Label("Add a computer", systemImage: "plus") }.buttonStyle(.link)
+				Button { open(.add) } label: { Label("Add Compute", systemImage: "plus") }.buttonStyle(.link)
 			}
 
 			section("Network between your computers")
@@ -1631,7 +1650,7 @@ struct AddPage: View {
 	@State private var info: PoolInfo?
 
 	var body: some View {
-		PageLayout(title: "Add a computer", subtitle: "Your own computer, or computers from a cloud provider.") {
+		PageLayout(title: "Add Compute", subtitle: "Your own computer, or computers from a cloud provider.") {
 			Text("Your own computer").font(.system(size: 17, weight: .semibold))
 			Text("Private. A Mac or Linux computer you own, at home, at work or a server you rent.")
 				.font(.callout).foregroundStyle(.secondary)
