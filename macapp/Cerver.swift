@@ -1124,9 +1124,19 @@ struct PoolPage: View {
 									}
 									.layoutPriority(1)
 								}
-								StatusPill(text: agentsStatus(c).0, color: agentsStatus(c).1)
-								StatusPill(text: networkStatus(c, peer: peer(c)).0, color: networkStatus(c, peer: peer(c)).1)
-								StatusPill(text: sharedStatus(c).0, color: sharedStatus(c).1)
+								// This Mac switches here; another computer's agents and network
+								// switch on that computer (turning them off from afar would cut
+								// the line used to turn them back on).
+								switchCell(on: c.isThisMac ? (m.relay == .running || m.relay == .starting) : c.pool?.online == true,
+									note: agentsStatus(c).0, enabled: c.isThisMac && !relayBusy,
+									why: c.isThisMac ? nil : "Switch this on \(c.name) itself") { $0 ? m.relayOn() : m.relayOff() }
+								switchCell(on: c.isThisMac ? (m.isOn || m.phase == .starting) : c.net?.online == true,
+									note: networkNote(c), enabled: c.isThisMac && !m.busy,
+									why: c.isThisMac ? nil : "Switch this on \(c.name) itself") { $0 ? m.turnOn() : m.turnOff() }
+								switchCell(on: c.pool?.shared == true,
+									note: c.pool?.shared == true ? "Shared" : "Only you",
+									enabled: c.pool?.compute_id.map { !m.sharing.contains($0) } ?? false,
+									why: c.pool == nil ? "Not in your pool" : nil) { m.setShared(c, $0) }
 							}
 							.padding(.horizontal, 16).padding(.vertical, 9)
 							.contentShape(Rectangle())
@@ -1206,6 +1216,24 @@ struct PoolPage: View {
 				.font(.callout).foregroundStyle(.secondary)
 		}
 		.task { await load() }
+	}
+
+	var relayBusy: Bool { if case .working = m.relay { return true }; return false }
+
+	func networkNote(_ c: Computer) -> String {
+		let t = networkStatus(c, peer: peer(c)).0
+		return t.hasPrefix("On, ") ? String(t.dropFirst(4)).capitalized : t
+	}
+
+	/// A switch with a short word next to it saying what's happening.
+	func switchCell(on: Bool, note: String, enabled: Bool, why: String?, set: @escaping (Bool) -> Void) -> some View {
+		HStack(spacing: 8) {
+			Toggle("", isOn: Binding(get: { on }, set: set))
+				.toggleStyle(.switch).labelsHidden().controlSize(.small)
+				.disabled(!enabled)
+			Text(note).font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(1)
+		}
+		.help(why ?? "")
 	}
 
 	var connections: String {
