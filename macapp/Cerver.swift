@@ -382,6 +382,8 @@ final class Model: ObservableObject {
 	// MARK: Versions, updates, uninstall
 
 	@Published var updates: UpdateInfo?
+	/// Bumped by ⌘, to open the Settings page.
+	@Published var openSettings = 0
 	/// The account this Mac is signed in to, as Cerver knows it.
 	@Published var email: String?
 	func refreshAccount() {
@@ -703,6 +705,7 @@ struct MainWindow: View {
 			}
 		}
 		.frame(minWidth: 760, minHeight: 540)
+		.onChange(of: m.openSettings) { _ in page = .settings }
 		.onChange(of: m.computers.map(\.id)) { ids in
 			// The computer on screen left: go back to the list.
 			if case .computer(let id) = page, !ids.contains(id) { page = .all }
@@ -764,6 +767,11 @@ struct MainWindow: View {
 			.buttonStyle(.plain)
 			.help("Settings")
 			Spacer(minLength: 0)
+			Button { page = .settings } label: {
+				Image(systemName: "gearshape").font(.system(size: 14)).foregroundStyle(page == .settings ? Color.accentColor : .secondary)
+			}
+			.buttonStyle(.borderless)
+			.help("Settings (⌘,)")
 			if m.updateAvailable {
 				Button {
 					m.updateNow()
@@ -1632,6 +1640,11 @@ struct CerverApp: App {
 		.windowToolbarStyle(.unified(showsTitle: false))
 		.defaultSize(width: 920, height: 620)
 		.defaultPosition(.center)
+		.commands {
+			CommandGroup(replacing: .appSettings) {
+				Button("Settings…") { m.openSettings += 1 }.keyboardShortcut(",")
+			}
+		}
 
 		MenuBarExtra {
 			MenuView(m: m)
