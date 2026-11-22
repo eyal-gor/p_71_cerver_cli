@@ -56,8 +56,6 @@ func TestBackToDirect(t *testing.T) {
 		st.current, st.setAt = RelayAddr(other.Key.Public), time.Now()
 		n.mu.Unlock()
 	}
-	onRelay(a, b)
-	onRelay(b, a)
 
 	l, err := a.net.ListenTCPAddrPort(netip.MustParseAddrPort(a.Answer.IP + ":80"))
 	if err != nil {
@@ -76,8 +74,17 @@ func TestBackToDirect(t *testing.T) {
 			t.Fatalf("got %q", body)
 		}
 	}
-	get()
 	via := func(n *testNode) string { return n.Status()[0].Endpoint }
+	// Packets already in flight can move a side back (WireGuard roaming), so
+	// set it until both stay put.
+	for i := 0; i < 10; i++ {
+		onRelay(a, b)
+		onRelay(b, a)
+		get()
+		if via(a) == "Cerver relay" && via(b) == "Cerver relay" {
+			break
+		}
+	}
 	if via(a) != "Cerver relay" || via(b) != "Cerver relay" {
 		t.Fatalf("setup: expected both on the relay, got %s / %s", via(a), via(b))
 	}
@@ -105,4 +112,77 @@ func TestBackToDirect(t *testing.T) {
 	if relay.n-before > 2 {
 		t.Fatalf("traffic still going through the relay (%d frames)", relay.n-before)
 	}
+}
+
+// TestDirectOff: one device turns direct connections off; both end up on the
+// relay with traffic flowing, and back on direct when it's turned on again.
+func TestDirectOff(t *testing.T) {
+	g := &fakeGateway{nodes: map[string]*Peer{}}
+	relay := &fakeRelay{binds: map[[32]byte]*Bind{}}
+	mk := func(name string) *testNode {
+		key, _ := NewKey()
+		ans, _ := g.checkIn(context.Background(), CheckInRequest{PublicKey: key.PublicB64(), Name: name})
+		tunDev, tnet, err := netstack.CreateNetTUN([]netip.Addr{netip.MustParseAddr(ans.IP)}, nil, 1280)
+		if err != nil {
+			t.Fatal(err)
+		}
+		b := NewBind()
+		relay.binds[key.Public] = b
+		b.SetRelay(relayPort{relay, key.Public})
+		dev := device.NewDevice(tunDev, b, device.NewLogger(device.LogLevelSilent, ""))
+		n := &Node{Dev: dev, Bind: b, Key: key, Name: name, CheckIn: g.checkIn, LocalOnly: true, Relay: true, TryFor: 6 * time.Second, ProbeEvery: time.Second, Log: t.Logf}
+		if err := n.Start(); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(dev.Close)
+		return &testNode{n, tnet}
+	}
+	a, b := mk("mini"), mk("air")
+	ctx := context.Background()
+	for i := 0; i < 2; i++ {
+		a.Tick(ctx)
+		b.Tick(ctx)
+	}
+	l, err := a.net.ListenTCPAddrPort(netip.MustParseAddrPort(a.Answer.IP + ":80"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	go http.Serve(l, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.Write([]byte("ok")) }))
+	client := &http.Client{Transport: &http.Transport{DialContext: b.net.DialContext, DisableKeepAlives: true}, Timeout: 20 * time.Second}
+	get := func() {
+		r, err := client.Get("http://" + a.Answer.IP + "/")
+		if err != nil {
+			t.Fatalf("air can't reach mini: %v", err)
+		}
+		io.ReadAll(r.Body)
+		r.Body.Close()
+	}
+	via := func(n *testNode) string { return n.Status()[0].Endpoint }
+	wait := func(want bool) {
+		deadline := time.Now().Add(15 * time.Second)
+		for time.Now().Before(deadline) {
+			a.Tick(ctx)
+			b.Tick(ctx)
+			a.Retry()
+			b.Retry()
+			get()
+			if strings.HasPrefix(via(a), "Cerver") == want && strings.HasPrefix(via(b), "Cerver") == want {
+				return
+			}
+			time.Sleep(300 * time.Millisecond)
+		}
+		t.Fatalf("want relay=%v: mini→%s air→%s", want, via(a), via(b))
+	}
+	wait(false) // start direct (the first address tried may not answer)
+	a.SetDirectOff(true)
+	wait(true)
+	before := relay.n
+	get()
+	if relay.n == before {
+		t.Fatal("direct off, but the relay carried nothing")
+	}
+	t.Logf("direct off: mini→%s air→%s", via(a), via(b))
+	a.SetDirectOff(false)
+	wait(false)
+	t.Logf("direct on again: mini→%s air→%s", via(a), via(b))
 }

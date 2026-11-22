@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.zx2c4.com/wireguard/conn"
@@ -29,7 +30,13 @@ type Bind struct {
 	relay   RelaySender
 	relayIn chan relayPacket
 	done    chan struct{}
+	// directOff: talk only through the relay. Direct WireGuard packets and
+	// probes are ignored, so the other side moves to the relay too.
+	directOff atomic.Bool
 }
+
+// SetDirectOff turns direct connections off (relay only) or back on.
+func (b *Bind) SetDirectOff(off bool) { b.directOff.Store(off) }
 
 func NewBind() *Bind {
 	return &Bind{waiting: map[[12]byte]chan netip.AddrPort{}, probes: map[[12]byte]chan struct{}{}, relayIn: make(chan relayPacket, 256)}
@@ -69,6 +76,9 @@ func (b *Bind) receive(c *net.UDPConn) conn.ReceiveFunc {
 			}
 			if b.handleSTUN(packets[0][:n]) || b.handleProbe(c, packets[0][:n], from) {
 				continue
+			}
+			if b.directOff.Load() {
+				continue // relay only: drop what arrives directly
 			}
 			sizes[0] = n
 			eps[0] = &endpoint{dst: netip.AddrPortFrom(from.Addr().Unmap(), from.Port())}
@@ -253,6 +263,9 @@ const probeLen = 8 + 1 + 12
 func (b *Bind) handleProbe(c *net.UDPConn, p []byte, from netip.AddrPort) bool {
 	if len(p) != probeLen || [8]byte(p[:8]) != probeMagic {
 		return false
+	}
+	if b.directOff.Load() {
+		return true // relay only: don't tell anyone the direct path works
 	}
 	switch p[8] {
 	case 1: // ping: answer from the same socket, so the answer proves the path

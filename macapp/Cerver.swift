@@ -67,6 +67,24 @@ struct NetStatus: Decodable {
 	let relay_connected: Bool
 	let updated: Double
 	let peers: [NetPeer]
+	var direct: Bool? = nil   // nil: an older network service
+}
+
+/// Direct connections on/off, read by the network service every few seconds
+/// (cmd/net.go netDirectOff). Off = everything through the backup route.
+enum NetSettings {
+	static let file = NSHomeDirectory() + "/.cerver/net-settings.json"
+	static var direct: Bool {
+		guard let d = FileManager.default.contents(atPath: file),
+			  let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return true }
+		return (o["direct"] as? Bool) ?? true
+	}
+	static func setDirect(_ on: Bool) {
+		try? FileManager.default.createDirectory(atPath: NSHomeDirectory() + "/.cerver", withIntermediateDirectories: true)
+		if let d = try? JSONSerialization.data(withJSONObject: ["direct": on]) {
+			try? d.write(to: URL(fileURLWithPath: file), options: .atomic)
+		}
+	}
 }
 
 /// `cerver update --check --json`
@@ -1241,6 +1259,7 @@ struct PoolPage: View {
 	@State private var copied = false
 	@State private var pings: [String: Double] = [:]      // net ip → ms; -1 = no reply
 	@State private var cerverMs: Double?
+	@State private var direct = NetSettings.direct
 
 	var body: some View {
 		PageLayout(title: "Compute pool", subtitle: "Every computer your agents can run on, and how they connect.") {
@@ -1318,6 +1337,17 @@ struct PoolPage: View {
 				Divider().padding(.leading, 16)
 				Row(label: "Connections") {
 					Text(connections).foregroundStyle(.secondary)
+				}
+				Divider().padding(.leading, 16)
+				Row(label: "Direct connections", note: direct
+					? "Fastest: this Mac talks to your other computers straight, and uses the backup route only when it must."
+					: "Off: everything goes through Cerver's backup route. Slower, and this Mac's address isn't shared.") {
+					if m.status != nil && m.status?.direct == nil {
+						Text("update the network first").font(.system(size: 11)).foregroundStyle(.tertiary)
+					}
+					Toggle("", isOn: Binding(get: { direct }, set: { direct = $0; NetSettings.setDirect($0) }))
+						.toggleStyle(.switch).labelsHidden()
+						.disabled(m.status != nil && m.status?.direct == nil)
 				}
 				Divider().padding(.leading, 16)
 				Row(label: "Ping to Cerver", note: "From this Mac to Cerver, which starts your agents.") {

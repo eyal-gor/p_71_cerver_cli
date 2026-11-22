@@ -129,6 +129,9 @@ type Node struct {
 	// ProbeEvery is how often a peer on the backup route is checked for a
 	// working direct path again (default 1 min).
 	ProbeEvery time.Duration
+	// DirectOff: relay only (the person turned direct connections off). Set
+	// it with SetDirectOff so the socket follows.
+	DirectOff bool
 	// Port to listen on; 0 picks one. A fixed port lets devices that can't
 	// be told about changes (a phone's WireGuard app) keep reaching this one.
 	Port uint16
@@ -248,7 +251,11 @@ func Order(endpoints []string, myPublic netip.Addr) []string {
 
 // Tick checks in once and applies the answer. Call it every PollSeconds.
 func (n *Node) Tick(ctx context.Context) error {
-	ans, err := n.CheckIn(ctx, CheckInRequest{PublicKey: n.Key.PublicB64(), Name: n.Name, Endpoints: n.Endpoints(), OS: n.OS})
+	eps := n.Endpoints()
+	if n.directOff() {
+		eps = []string{} // don't share this device's addresses
+	}
+	ans, err := n.CheckIn(ctx, CheckInRequest{PublicKey: n.Key.PublicB64(), Name: n.Name, Endpoints: eps, OS: n.OS})
 	if err != nil {
 		return err
 	}
@@ -282,12 +289,24 @@ func (n *Node) apply(peers []Peer) error {
 		}
 		st.peer = p
 		st.candidates = Order(p.Endpoints, n.public)
+		if n.DirectOff {
+			st.candidates = nil
+		}
 		if n.Relay {
 			var k [32]byte
 			copy(k[:], raw)
 			st.candidates = append(st.candidates, RelayAddr(k))
 		}
 		fmt.Fprintf(&cfg, "public_key=%s\nreplace_allowed_ips=true\nallowed_ip=%s/32\npersistent_keepalive_interval=25\n", hexKey, p.IP)
+		if n.DirectOff && n.Relay && !strings.HasPrefix(actual[hexKey], relayPrefix) {
+			// Just turned off (or the peer roamed us): onto the relay now.
+			// Keepalive 0→25 sends a packet at once, so the peer follows.
+			var k [32]byte
+			copy(k[:], raw)
+			st.current, st.setAt, st.idx = RelayAddr(k), time.Now(), 0
+			fmt.Fprintf(&cfg, "endpoint=%s\npersistent_keepalive_interval=0\npersistent_keepalive_interval=25\n", st.current)
+			continue
+		}
 		// Keep the address that works (WireGuard follows a peer that moves).
 		// Only pick another when nothing has answered for a while.
 		connected := time.Since(handshakes[hexKey]) < 3*time.Minute
@@ -310,7 +329,7 @@ func (n *Node) apply(peers []Peer) error {
 	// On the backup route but connected: every minute, check whether the
 	// direct path answers again, and move back to it when it does.
 	for hexKey, st := range n.peers {
-		if !keep[hexKey] || st.probing || !strings.HasPrefix(actual[hexKey], relayPrefix) {
+		if n.DirectOff || !keep[hexKey] || st.probing || !strings.HasPrefix(actual[hexKey], relayPrefix) {
 			continue
 		}
 		if time.Since(handshakes[hexKey]) >= 3*time.Minute || time.Since(st.lastProbe) < n.probeEvery() {
@@ -339,6 +358,34 @@ func (n *Node) apply(peers []Peer) error {
 		return nil
 	}
 	return n.Dev.IpcSet(cfg.String())
+}
+
+// SetDirectOff turns direct connections off (relay only) or back on. Turning
+// them on checks the direct path at the next Retry.
+func (n *Node) SetDirectOff(off bool) {
+	n.mu.Lock()
+	changed := n.DirectOff != off
+	n.DirectOff = off
+	if changed && !off {
+		for _, st := range n.peers {
+			st.lastProbe = time.Time{}
+		}
+	}
+	n.mu.Unlock()
+	n.Bind.SetDirectOff(off)
+	if changed {
+		if off {
+			n.Log("Direct connections off: everything goes through the backup route")
+		} else {
+			n.Log("Direct connections on")
+		}
+	}
+}
+
+func (n *Node) directOff() bool {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return n.DirectOff
 }
 
 func (n *Node) probeEvery() time.Duration {

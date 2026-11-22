@@ -238,6 +238,10 @@ func netUp(args []string) error {
 				}
 			}
 		case <-retry.C:
+			if off := netDirectOff(); off != node.DirectOff {
+				node.SetDirectOff(off)
+				node.Tick(ctx) // tell Cerver at once whether to share our addresses
+			}
 			node.Retry()
 			writeNetStatus(*name, ip, relay.Connected(), node.Status())
 		case <-selfUpdate.C:
@@ -261,6 +265,26 @@ const hostsFile = "/etc/hosts"
 // (which can't ask the root service directly). Readable by everyone; holds
 // names and addresses only, no keys.
 const netStatusFile = "/var/run/cerver-net.json"
+
+// netSettingsFile is what the person chose in the Cerver app (the service runs
+// with HOME set to their home folder): {"direct": false} = relay only.
+func netSettingsFile() string {
+	return filepath.Join(os.Getenv("HOME"), ".cerver", "net-settings.json")
+}
+
+func netDirectOff() bool {
+	b, err := os.ReadFile(netSettingsFile())
+	if err != nil {
+		return false
+	}
+	var s struct {
+		Direct *bool `json:"direct"`
+	}
+	if json.Unmarshal(b, &s) != nil || s.Direct == nil {
+		return false
+	}
+	return !*s.Direct
+}
 
 type netStatusPeer struct {
 	Name      string `json:"name"`
@@ -304,7 +328,8 @@ func writeNetStatus(name, ip string, relayUp bool, peers []wgnet.PeerStatus) {
 		Updated int64           `json:"updated"`
 		Version string          `json:"version"`
 		Peers   []netStatusPeer `json:"peers"`
-	}{Name: name, IP: ip, Relay: relayUp, Updated: time.Now().Unix(), Version: version.Version, Peers: []netStatusPeer{}}
+		Direct  bool            `json:"direct"`
+	}{Name: name, IP: ip, Relay: relayUp, Updated: time.Now().Unix(), Version: version.Version, Peers: []netStatusPeer{}, Direct: !netDirectOff()}
 	for _, p := range peers {
 		via := ""
 		if p.Connected {
