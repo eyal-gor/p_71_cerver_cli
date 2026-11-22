@@ -1992,9 +1992,9 @@ struct NetworkMap: View {
 				ZStack {
 					// The three layers.
 					VStack(spacing: 0) {
-						band("CERVER AGENTS", "Agents running for you", height: band1, tint: .purple)
-						band("CERVER COMPUTE", "Your pool: where each agent run goes", height: band2 - band1, tint: .blue)
-						band("YOUR NETWORK", "Your computers and how they reach each other", height: height - band2, tint: .green)
+						band("CERVER AGENTS", "Agents running for you", height: band1, tint: .secondary)
+						band("CERVER COMPUTE", "Your pool: where each agent run goes", height: band2 - band1, tint: .secondary)
+						band("YOUR NETWORK", "Your computers and how they reach each other", height: height - band2, tint: .secondary)
 					}
 
 					Canvas { ctx, _ in
@@ -2002,7 +2002,7 @@ struct NetworkMap: View {
 						var a = Path()
 						a.move(to: CGPoint(x: agents.x, y: agents.y + 26))
 						a.addLine(to: CGPoint(x: compute.x, y: compute.y - 30))
-						ctx.stroke(a, with: .color(.purple.opacity(0.6)), style: StrokeStyle(lineWidth: 2, dash: running > 0 ? [] : [4, 4]))
+						ctx.stroke(a, with: .color(Color.secondary.opacity(0.6)), style: StrokeStyle(lineWidth: 2, dash: running > 0 ? [] : [4, 4]))
 						// Compute → each computer's relay
 						for c in ordered {
 							guard let p = pos[c.id], let pool = c.pool else { continue }
@@ -2010,7 +2010,7 @@ struct NetworkMap: View {
 							path.move(to: CGPoint(x: compute.x, y: compute.y + 30))
 							path.addCurve(to: CGPoint(x: p.x, y: p.y - 46),
 								control1: CGPoint(x: compute.x, y: compute.y + 110), control2: CGPoint(x: p.x, y: p.y - 140))
-							ctx.stroke(path, with: .color(pool.online ? Color.blue.opacity(0.55) : Color.secondary.opacity(0.3)),
+							ctx.stroke(path, with: .color(pool.online ? Color.secondary.opacity(0.6) : Color.secondary.opacity(0.3)),
 								style: StrokeStyle(lineWidth: 1.5, dash: pool.online ? [] : [3, 4]))
 						}
 						guard let me = me, let mp = pos[me.id] else { return }
@@ -2019,7 +2019,7 @@ struct NetworkMap: View {
 							var path = Path()
 							path.move(to: CGPoint(x: mp.x + 40, y: mp.y - 46))
 							path.addQuadCurve(to: CGPoint(x: backup.x - 60, y: backup.y + 8), control: CGPoint(x: mp.x + 60, y: backup.y + 20))
-							ctx.stroke(path, with: .color(.orange.opacity(0.5)), style: StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
+							ctx.stroke(path, with: .color(Color.secondary.opacity(0.45)), style: StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
 						}
 						for c in others {
 							guard let p = pos[c.id], let pr = peer(c), pr.connected else { continue }
@@ -2027,21 +2027,21 @@ struct NetworkMap: View {
 								var path = Path()
 								path.move(to: CGPoint(x: p.x, y: p.y - 46))
 								path.addQuadCurve(to: CGPoint(x: backup.x, y: backup.y + 16), control: CGPoint(x: p.x, y: backup.y + 40))
-								ctx.stroke(path, with: .color(.orange), style: StrokeStyle(lineWidth: 2.5, dash: [6, 4]))
+								ctx.stroke(path, with: .color(Color.secondary), style: StrokeStyle(lineWidth: 2.5, dash: [6, 4]))
 							} else {
 								var path = Path()
 								let a = CGPoint(x: mp.x, y: mp.y + 46), b = CGPoint(x: p.x, y: p.y + 46)
 								path.move(to: a)
 								path.addQuadCurve(to: b, control: CGPoint(x: (a.x + b.x) / 2, y: a.y + 70))
-								ctx.stroke(path, with: .color(.green), style: StrokeStyle(lineWidth: 3, lineCap: .round))
+								ctx.stroke(path, with: .color(Color.primary.opacity(0.7)), style: StrokeStyle(lineWidth: 3, lineCap: .round))
 							}
 						}
 					}
 
-					box(icon: "sparkles", title: "Agents", tint: .purple,
+					box(icon: "sparkles", title: "Agents", tint: .secondary,
 						line: running == 0 ? "none running now" : "\(running) running now")
 						.position(agents)
-					box(icon: "square.stack.3d.up.fill", title: "Your pool", tint: .blue,
+					box(icon: "square.stack.3d.up.fill", title: "Your pool", tint: .secondary,
 						line: "\(free) free · \(busy) busy · \(pooled.count - free - busy) offline")
 						.position(compute)
 						.onTapGesture { open(.pool) }
@@ -2056,7 +2056,7 @@ struct NetworkMap: View {
 					if let me = me, let mp = pos[me.id] {
 						ForEach(others) { c in
 							if let p = pos[c.id], let pr = peer(c), pr.connected, pr.via != "relay" {
-								Text("direct").font(.system(size: 11, weight: .semibold)).foregroundStyle(.green)
+								Text("direct").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
 									.padding(.horizontal, 6).padding(.vertical, 1)
 									.background(Capsule().fill(Color(nsColor: .windowBackgroundColor)))
 									.position(x: (mp.x + p.x) / 2, y: nodesY + 46 + 35)
@@ -2070,10 +2070,8 @@ struct NetworkMap: View {
 			.overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.08)))
 
 			HStack(spacing: 16) {
-				key(.purple, solid: true, "Agent runs")
-				key(.blue, solid: true, "Relay ↔ pool")
-				key(.green, solid: true, "Direct")
-				key(.orange, solid: false, "Network backup")
+				key(Color.primary.opacity(0.7), solid: true, "Direct")
+				key(.secondary, solid: false, "Network backup")
 			}
 			Text("Network lines show what this computer sees. Click a computer to open it.")
 				.font(.callout).foregroundStyle(.secondary)
@@ -2082,7 +2080,7 @@ struct NetworkMap: View {
 
 	func band(_ title: String, _ sub: String, height: CGFloat, tint: Color) -> some View {
 		ZStack(alignment: .topLeading) {
-			Rectangle().fill(tint.opacity(0.045))
+			Rectangle().fill(Color.primary.opacity(0.025))
 			VStack(alignment: .leading, spacing: 1) {
 				Text(title).font(.system(size: 10.5, weight: .bold)).tracking(0.8).foregroundStyle(tint.opacity(0.85))
 				Text(sub).font(.system(size: 10.5)).foregroundStyle(.secondary)
@@ -2108,7 +2106,7 @@ struct NetworkMap: View {
 
 	var backupNode: some View {
 		HStack(spacing: 5) {
-			Image(systemName: "cloud.fill").font(.system(size: 11)).foregroundStyle(.orange)
+			Image(systemName: "cloud.fill").font(.system(size: 11)).foregroundStyle(.secondary)
 			VStack(alignment: .leading, spacing: 0) {
 				Text("Network backup").font(.system(size: 11, weight: .semibold))
 				Text(m.status?.relay_connected == true ? "ready, on standby" : "not connected").font(.system(size: 10)).foregroundStyle(.secondary)
@@ -2116,7 +2114,7 @@ struct NetworkMap: View {
 		}
 		.padding(.horizontal, 9).padding(.vertical, 5)
 		.background(RoundedRectangle(cornerRadius: 10).fill(Color(nsColor: .windowBackgroundColor)))
-		.overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.orange.opacity(0.4)))
+		.overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.primary.opacity(0.12)))
 	}
 
 	func node(_ c: Computer) -> some View {
@@ -2137,12 +2135,12 @@ struct NetworkMap: View {
 		.padding(.horizontal, 8)
 		.frame(width: 170, height: 86)
 		.background(RoundedRectangle(cornerRadius: 12).fill(Color(nsColor: .windowBackgroundColor)))
-		.overlay(RoundedRectangle(cornerRadius: 12).stroke(c.isThisMac ? Color.accentColor : Color.primary.opacity(0.12), lineWidth: c.isThisMac ? 2 : 1))
+		.overlay(RoundedRectangle(cornerRadius: 12).stroke(c.isThisMac ? Color.primary.opacity(0.75) : Color.primary.opacity(0.12), lineWidth: c.isThisMac ? 2 : 1))
 		.overlay(alignment: .top) {
 			if c.isThisMac {
 				Text("THIS COMPUTER").font(.system(size: 9.5, weight: .bold)).tracking(0.6).foregroundStyle(.white)
 					.padding(.horizontal, 7).padding(.vertical, 2)
-					.background(Capsule().fill(Color.accentColor))
+					.background(Capsule().fill(Color.primary.opacity(0.75)))
 					.offset(y: -9)
 			}
 		}
