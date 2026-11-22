@@ -1561,14 +1561,14 @@ struct PermissionsPage: View {
 	var computers: [Computer] { m.computers.filter { !$0.isPhone } }
 
 	var body: some View {
-		PageLayout(title: "Permissions", subtitle: "What each of your computers allows. Your own computers switch here; another computer's agents and network switch on that computer.") {
+		PageLayout(title: "Permissions", subtitle: "What each of your computers allows.") {
 			permission("Agents can run here",
-				"Cerver may start your agents on this computer, as you, with its files and your logins. Off: it leaves your pool; nothing else changes.") { c in
+				"Your agents may run on it, as you.") { c in
 				cell(on: c.isThisMac ? (m.relay == .running || m.relay == .starting) : c.pool?.online == true,
 					enabled: c.isThisMac && !relayBusy, remote: !c.isThisMac) { $0 ? m.relayOn() : m.relayOff() }
 			}
 			permission("Your computers can reach it",
-				"Your other computers connect to it by name, privately (SSH, files, a page it serves). Off: it leaves your network; agents keep running. Turning it on or off asks for your password.") { c in
+				"Your other computers can connect to it privately.") { c in
 				cell(on: c.isThisMac ? (m.isOn || m.phase == .starting) : c.net?.online == true,
 					enabled: c.isThisMac && !m.busy, remote: !c.isThisMac) { $0 ? m.turnOn() : m.turnOff() }
 			}
@@ -1576,7 +1576,7 @@ struct PermissionsPage: View {
 			DisclosureGroup(isExpanded: $advanced) {
 				VStack(alignment: .leading, spacing: 14) {
 					permission("People you invite can use it",
-						"People you invited to your pool may run their agents on it. They run fenced in, away from your files, and never reach your network or other computers. Off by default.") { c in
+						"Invited people's agents may run on it, fenced off from your files.") { c in
 						cell(on: c.pool?.shared == true,
 							enabled: c.pool?.compute_id.map { !m.sharing.contains($0) } ?? false, remote: false) { m.setShared(c, $0) }
 					}
