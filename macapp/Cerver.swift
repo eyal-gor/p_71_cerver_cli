@@ -1157,11 +1157,6 @@ struct PoolPage: View {
 				Row(label: "Connections") {
 					Text(connections).foregroundStyle(.secondary)
 				}
-				Divider().padding(.leading, 16)
-				Row(label: "This Mac can be reached") {
-					Toggle("", isOn: Binding(get: { m.isOn || m.phase == .starting }, set: { $0 ? m.turnOn() : m.turnOff() }))
-						.toggleStyle(.switch).labelsHidden().disabled(m.busy)
-				}
 			}
 			Text("Your computers connect directly, computer to computer, and use Cerver's backup route only when a direct connection can't be made.")
 				.font(.callout).foregroundStyle(.secondary)
