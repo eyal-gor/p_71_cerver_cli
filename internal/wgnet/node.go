@@ -103,6 +103,8 @@ type peerState struct {
 	idx        int
 	setAt      time.Time
 	current    string
+	lastProbe  time.Time
+	probing    bool
 }
 
 // Node runs the WireGuard device's peer list from the gateway's answers.
@@ -124,6 +126,9 @@ type Node struct {
 	// 12 s). WireGuard retries a handshake every 5 s, so under ~6 s an address
 	// isn't really tried.
 	TryFor time.Duration
+	// ProbeEvery is how often a peer on the backup route is checked for a
+	// working direct path again (default 1 min).
+	ProbeEvery time.Duration
 	// Port to listen on; 0 picks one. A fixed port lets devices that can't
 	// be told about changes (a phone's WireGuard app) keep reaching this one.
 	Port uint16
@@ -259,7 +264,7 @@ func (n *Node) apply(peers []Peer) error {
 	if n.peers == nil {
 		n.peers = map[string]*peerState{}
 	}
-	handshakes := n.handshakes()
+	handshakes, actual := n.deviceState()
 	var cfg strings.Builder
 	keep := map[string]bool{}
 	for _, p := range peers {
@@ -294,10 +299,34 @@ func (n *Node) apply(peers []Peer) error {
 			if next != st.current {
 				st.current, st.setAt = next, time.Now()
 				fmt.Fprintf(&cfg, "endpoint=%s\n", next)
+				if strings.HasPrefix(next, relayPrefix) {
+					n.Log("Using the backup route for %s (%s): no direct answer", p.Name, p.IP)
+				}
 			} else {
 				st.setAt = time.Now()
 			}
 		}
+	}
+	// On the backup route but connected: every minute, check whether the
+	// direct path answers again, and move back to it when it does.
+	for hexKey, st := range n.peers {
+		if !keep[hexKey] || st.probing || !strings.HasPrefix(actual[hexKey], relayPrefix) {
+			continue
+		}
+		if time.Since(handshakes[hexKey]) >= 3*time.Minute || time.Since(st.lastProbe) < n.probeEvery() {
+			continue
+		}
+		var direct []string
+		for _, c := range st.candidates {
+			if !strings.HasPrefix(c, relayPrefix) {
+				direct = append(direct, c)
+			}
+		}
+		if len(direct) == 0 {
+			continue
+		}
+		st.probing, st.lastProbe = true, time.Now()
+		go n.tryDirect(hexKey, st, direct)
 	}
 	for hexKey, st := range n.peers {
 		if !keep[hexKey] {
@@ -310,6 +339,52 @@ func (n *Node) apply(peers []Peer) error {
 		return nil
 	}
 	return n.Dev.IpcSet(cfg.String())
+}
+
+func (n *Node) probeEvery() time.Duration {
+	if n.ProbeEvery > 0 {
+		return n.ProbeEvery
+	}
+	return time.Minute
+}
+
+// tryDirect probes a peer's direct addresses (outside the lock) and, at the
+// first that answers, points WireGuard there. Setting the keepalive from 0
+// sends one packet right away, so the other side sees us arrive from the
+// direct address and follows (WireGuard roaming); its own probe does the same.
+func (n *Node) tryDirect(hexKey string, st *peerState, direct []string) {
+	defer func() { n.mu.Lock(); st.probing = false; n.mu.Unlock() }()
+	for _, c := range direct {
+		ap, err := netip.ParseAddrPort(c)
+		if err != nil {
+			continue
+		}
+		rtt, ok := n.Bind.Probe(ap, 1500*time.Millisecond)
+		if !ok {
+			continue
+		}
+		n.mu.Lock()
+		if _, still := n.peers[hexKey]; !still {
+			n.mu.Unlock()
+			return
+		}
+		cfg := fmt.Sprintf("public_key=%s\nendpoint=%s\npersistent_keepalive_interval=0\npersistent_keepalive_interval=25\n", hexKey, c)
+		err = n.Dev.IpcSet(cfg)
+		if err == nil {
+			st.current, st.setAt = c, time.Now()
+			for j, cand := range st.candidates {
+				if cand == c {
+					st.idx = j
+				}
+			}
+		}
+		name := st.peer.Name
+		n.mu.Unlock()
+		if err == nil {
+			n.Log("Back to a direct connection with %s via %s (%d ms)", name, c, rtt.Milliseconds())
+		}
+		return
+	}
 }
 
 func (n *Node) tryFor() time.Duration {

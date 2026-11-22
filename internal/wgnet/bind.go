@@ -25,13 +25,14 @@ type Bind struct {
 	mu      sync.Mutex
 	conn    *net.UDPConn
 	waiting map[[12]byte]chan netip.AddrPort
+	probes  map[[12]byte]chan struct{}
 	relay   RelaySender
 	relayIn chan relayPacket
 	done    chan struct{}
 }
 
 func NewBind() *Bind {
-	return &Bind{waiting: map[[12]byte]chan netip.AddrPort{}, relayIn: make(chan relayPacket, 256)}
+	return &Bind{waiting: map[[12]byte]chan netip.AddrPort{}, probes: map[[12]byte]chan struct{}{}, relayIn: make(chan relayPacket, 256)}
 }
 
 type endpoint struct{ dst netip.AddrPort }
@@ -66,7 +67,7 @@ func (b *Bind) receive(c *net.UDPConn) conn.ReceiveFunc {
 			if err != nil {
 				return 0, err
 			}
-			if b.handleSTUN(packets[0][:n]) {
+			if b.handleSTUN(packets[0][:n]) || b.handleProbe(c, packets[0][:n], from) {
 				continue
 			}
 			sizes[0] = n
@@ -234,4 +235,77 @@ func (b *Bind) STUN(server string, timeout time.Duration) (netip.AddrPort, error
 		}
 	}
 	return netip.AddrPort{}, fmt.Errorf("no answer from %s", server)
+}
+
+// ── Direct-path probe ──
+//
+// While two devices talk through the backup relay, each checks now and then
+// whether the direct path works again: a tiny ping on the WireGuard socket to
+// the other device's direct address, answered by its Bind. It is not a
+// WireGuard packet (those start with a type byte 1-4) and not STUN (whose
+// first two bits are 0), so neither is confused by it. WireGuard still
+// authenticates everything once traffic moves there.
+
+var probeMagic = [8]byte{'C', 'V', 'R', 'P', 'R', 'O', 'B', 'E'}
+
+const probeLen = 8 + 1 + 12
+
+func (b *Bind) handleProbe(c *net.UDPConn, p []byte, from netip.AddrPort) bool {
+	if len(p) != probeLen || [8]byte(p[:8]) != probeMagic {
+		return false
+	}
+	switch p[8] {
+	case 1: // ping: answer from the same socket, so the answer proves the path
+		reply := make([]byte, probeLen)
+		copy(reply, p)
+		reply[8] = 2
+		c.WriteToUDPAddrPort(reply, from)
+	case 2: // pong
+		var tx [12]byte
+		copy(tx[:], p[9:])
+		b.mu.Lock()
+		ch := b.probes[tx]
+		b.mu.Unlock()
+		if ch != nil {
+			select {
+			case ch <- struct{}{}:
+			default:
+			}
+		}
+	}
+	return true
+}
+
+// Probe reports whether the device at addr answers directly, and how fast.
+func (b *Bind) Probe(addr netip.AddrPort, timeout time.Duration) (time.Duration, bool) {
+	var tx [12]byte
+	rand.Read(tx[:])
+	ping := make([]byte, probeLen)
+	copy(ping, probeMagic[:])
+	ping[8] = 1
+	copy(ping[9:], tx[:])
+	ch := make(chan struct{}, 1)
+	b.mu.Lock()
+	c := b.conn
+	b.probes[tx] = ch
+	b.mu.Unlock()
+	defer func() { b.mu.Lock(); delete(b.probes, tx); b.mu.Unlock() }()
+	if c == nil {
+		return 0, false
+	}
+	start := time.Now()
+	deadline := time.After(timeout)
+	for attempt := 0; attempt < 3; attempt++ {
+		if _, err := c.WriteToUDPAddrPort(ping, addr); err != nil {
+			return 0, false
+		}
+		select {
+		case <-ch:
+			return time.Since(start), true
+		case <-time.After(timeout / 3):
+		case <-deadline:
+			return 0, false
+		}
+	}
+	return 0, false
 }
