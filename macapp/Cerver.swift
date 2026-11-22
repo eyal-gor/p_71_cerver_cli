@@ -774,7 +774,7 @@ struct MainWindow: View {
 				Label("Map", systemImage: "map")
 					.tag(Page.map)
 				Section("Cerver Compute") {
-					Label("Ask your computers", systemImage: "bubble.left.and.text.bubble.right")
+					Label("Ask your compute", systemImage: "bubble.left.and.text.bubble.right")
 						.tag(Page.session)
 					Label("Compute pool", systemImage: "server.rack")
 						.tag(Page.pool)
@@ -2005,7 +2005,7 @@ struct SessionPage: View {
 
 	var header: some View {
 		HStack(spacing: 12) {
-			Text("Ask your computers").font(.system(size: 17, weight: .semibold))
+			Text("Ask your compute").font(.system(size: 17, weight: .semibold))
 			Spacer()
 			// Where it runs and which agent: chosen before the first message.
 			Menu {
