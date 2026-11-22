@@ -141,6 +141,10 @@ final class Model: ObservableObject {
 	}
 
 	init() {
+		// Already-connected Macs get the skill too (once; it's skipped if there).
+		if FileManager.default.fileExists(atPath: NSHomeDirectory() + "/.cerver/cerver.env") {
+			Task.detached { installClaudeSkill(onlyIfMissing: true) }
+		}
 		refresh()
 		refreshRelay()
 		checkUpdates()
@@ -358,6 +362,9 @@ final class Model: ObservableObject {
 				try? FileManager.default.createDirectory(atPath: home + "/.cerver/bin", withIntermediateDirectories: true)
 				try? FileManager.default.copyItem(atPath: bundled, toPath: bin)
 			}
+			// The /cerver skill, so Claude Code knows it can run Codex (and the
+			// rest) through Cerver. Skipped when Claude Code isn't installed.
+			installClaudeSkill()
 			// 3. uv, which runs the relay.
 			if shell("command -v uvx || ls ~/.local/bin/uvx").isEmpty {
 				await MainActor.run { self.connecting = "Installing uv (runs the relay)…" }
@@ -593,6 +600,23 @@ struct PoolInfo: Decodable {
 func viewScreen(_ ip: String) {
 	let user = NSUserName().addingPercentEncoding(withAllowedCharacters: .urlUserAllowed) ?? ""
 	if let u = URL(string: "vnc://\(user)@\(ip)") { NSWorkspace.shared.open(u) }
+}
+
+/// Puts Cerver's skill into Claude Code (~/.claude/skills/cerver/SKILL.md),
+/// as install.sh does, so Claude can ask Codex, compare agents, and use your
+/// compute pool. Does nothing if Claude Code isn't on this Mac.
+func installClaudeSkill(onlyIfMissing: Bool = false) {
+	let claude = NSHomeDirectory() + "/.claude"
+	let dir = claude + "/skills/cerver"
+	let file = dir + "/SKILL.md"
+	var isDir: ObjCBool = false
+	guard FileManager.default.fileExists(atPath: claude, isDirectory: &isDir), isDir.boolValue else { return }
+	if onlyIfMissing && FileManager.default.fileExists(atPath: file) { return }
+	guard let url = URL(string: "https://cerver.ai/skills/cerver/SKILL.md"),
+		let data = try? Data(contentsOf: url), data.count > 200,
+		String(decoding: data.prefix(400), as: UTF8.self).contains("name:") else { return }
+	try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
+	try? data.write(to: URL(fileURLWithPath: file), options: .atomic)
 }
 
 func openWeb(_ path: String) {
