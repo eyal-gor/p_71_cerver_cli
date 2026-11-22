@@ -2101,6 +2101,19 @@ struct SessionPage: View {
 	@ObservedObject var m: Model
 	@ObservedObject var s: SessionModel
 	@State private var draft = ""
+	@State private var tip = 0
+	let tips = [
+		"Why is my computer slow?",
+		"Clean up my Desktop: sort the files into folders by type.",
+		"What's using my disk? Show the 10 biggest folders.",
+		"Organize my Downloads and delete installers I already used.",
+		"Is anything running that I don't need?",
+		"Update Homebrew and everything it installed.",
+		"Which apps start when I log in?",
+		"Find the photos from last week and put them in one folder.",
+		"Is my battery healthy?",
+		"Check that my backups are working.",
+	]
 	@FocusState private var focused: Bool
 
 	/// Your computers agents can run on right now.
@@ -2176,10 +2189,29 @@ struct SessionPage: View {
 	var empty: some View {
 		VStack(alignment: .leading, spacing: 8) {
 			Text("Ask \(target?.name ?? "your computer") anything").font(.system(size: 22, weight: .semibold))
-			Text("An agent (\(s.cli == "codex" ? "Codex" : "Claude"), with your login) answers on that computer, as you, so it can look and act there. Try: what's using the disk? · is Node installed? · update Homebrew.")
+			Text("An agent (\(s.cli == "codex" ? "Codex" : "Claude"), with your login) answers on that computer, as you, so it can look and act there.")
 				.foregroundStyle(.secondary)
+			// Rolling examples: a new one every few seconds; click to use it.
+			Button { draft = tips[tip]; focused = true } label: {
+				HStack(spacing: 8) {
+					Text("Try").font(.callout).foregroundStyle(.secondary)
+					Text(tips[tip]).font(.system(size: 14, weight: .medium))
+						.id(tip)
+						.transition(.asymmetric(insertion: .move(edge: .bottom).combined(with: .opacity), removal: .move(edge: .top).combined(with: .opacity)))
+					Image(systemName: "arrow.up.left").font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary)
+				}
+				.padding(.horizontal, 12).padding(.vertical, 8)
+				.background(RoundedRectangle(cornerRadius: 10).fill(Color.primary.opacity(0.05)))
+				.clipped()
+			}
+			.buttonStyle(.plain)
+			.help("Click to use this example")
+			.padding(.top, 8)
 		}
 		.padding(.top, 30)
+		.onReceive(Timer.publish(every: 3.5, on: .main, in: .common).autoconnect()) { _ in
+			withAnimation(.easeInOut(duration: 0.4)) { tip = (tip + 1) % tips.count }
+		}
 	}
 
 	func bubble(_ msg: SessionModel.Message) -> some View {
@@ -2203,7 +2235,7 @@ struct SessionPage: View {
 
 	var composer: some View {
 		HStack(alignment: .bottom, spacing: 10) {
-			TextField(target == nil ? "No computer is ready" : "Ask \(target?.name ?? "it")…", text: $draft, axis: .vertical)
+			TextField(target == nil ? "No computer is ready" : (s.started ? "Ask \(target?.name ?? "it")…" : tips[tip]), text: $draft, axis: .vertical)
 				.textFieldStyle(.plain)
 				.lineLimit(1...8)
 				.focused($focused)
