@@ -2078,7 +2078,7 @@ struct NetworkMap: View {
 	@ObservedObject var m: Model
 	let open: (Page) -> Void
 
-	let height: CGFloat = 560
+	let height: CGFloat = 590
 	let agentsY: CGFloat = 62, computeY: CGFloat = 188, nodesY: CGFloat = 420
 	let band1: CGFloat = 120, band2: CGFloat = 255  // where each layer ends
 
@@ -2125,7 +2125,7 @@ struct NetworkMap: View {
 							guard let p = pos[c.id], let pool = c.pool else { continue }
 							var path = Path()
 							path.move(to: CGPoint(x: compute.x, y: compute.y + 30))
-							path.addCurve(to: CGPoint(x: p.x, y: p.y - 46),
+							path.addCurve(to: CGPoint(x: p.x, y: p.y - 58),
 								control1: CGPoint(x: compute.x, y: compute.y + 110), control2: CGPoint(x: p.x, y: p.y - 140))
 							ctx.stroke(path, with: .color(pool.online ? Color.secondary.opacity(0.6) : Color.secondary.opacity(0.3)),
 								style: StrokeStyle(lineWidth: 1.5, dash: pool.online ? [] : [3, 4]))
@@ -2134,7 +2134,7 @@ struct NetworkMap: View {
 						// This computer's standby line to the network backup.
 						if m.status?.relay_connected == true {
 							var path = Path()
-							path.move(to: CGPoint(x: mp.x + 40, y: mp.y - 46))
+							path.move(to: CGPoint(x: mp.x + 40, y: mp.y - 58))
 							path.addQuadCurve(to: CGPoint(x: backup.x - 60, y: backup.y + 8), control: CGPoint(x: mp.x + 60, y: backup.y + 20))
 							ctx.stroke(path, with: .color(Color.secondary.opacity(0.45)), style: StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
 						}
@@ -2142,12 +2142,12 @@ struct NetworkMap: View {
 							guard let p = pos[c.id], let pr = peer(c), pr.connected else { continue }
 							if pr.via == "relay" {
 								var path = Path()
-								path.move(to: CGPoint(x: p.x, y: p.y - 46))
+								path.move(to: CGPoint(x: p.x, y: p.y - 58))
 								path.addQuadCurve(to: CGPoint(x: backup.x, y: backup.y + 16), control: CGPoint(x: p.x, y: backup.y + 40))
 								ctx.stroke(path, with: .color(Color.secondary), style: StrokeStyle(lineWidth: 2.5, dash: [6, 4]))
 							} else {
 								var path = Path()
-								let a = CGPoint(x: mp.x, y: mp.y + 46), b = CGPoint(x: p.x, y: p.y + 46)
+								let a = CGPoint(x: mp.x, y: mp.y + 58), b = CGPoint(x: p.x, y: p.y + 58)
 								path.move(to: a)
 								path.addQuadCurve(to: b, control: CGPoint(x: (a.x + b.x) / 2, y: a.y + 70))
 								ctx.stroke(path, with: .color(Color.primary.opacity(0.7)), style: StrokeStyle(lineWidth: 3, lineCap: .round))
@@ -2176,7 +2176,7 @@ struct NetworkMap: View {
 								Text("direct").font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
 									.padding(.horizontal, 6).padding(.vertical, 1)
 									.background(Capsule().fill(Color(nsColor: .windowBackgroundColor)))
-									.position(x: (mp.x + p.x) / 2, y: nodesY + 46 + 35)
+									.position(x: (mp.x + p.x) / 2, y: nodesY + 58 + 35)
 							}
 						}
 					}
@@ -2241,13 +2241,6 @@ struct NetworkMap: View {
 			HStack(spacing: 5) {
 				Image(systemName: c.icon).font(.system(size: 13)).foregroundStyle(.secondary)
 				Text(c.name).font(.system(size: 12.5, weight: .semibold)).lineLimit(1)
-				if !c.isThisMac, !c.isPhone, netOn, let n = c.net {
-					Button { viewScreen(n.ip) } label: {
-						Image(systemName: "display").font(.system(size: 11)).foregroundStyle(.secondary)
-					}
-					.buttonStyle(.borderless)
-					.help("View its screen")
-				}
 			}
 			if c.isPhone {
 				program("Relay", "none (a phone)", .gray)
@@ -2255,9 +2248,18 @@ struct NetworkMap: View {
 				program("Relay", c.pool == nil ? "not installed" : (relayOn ? "connected" : "offline"), relayOn ? .green : .gray)
 			}
 			program("Network", c.net.map { netOn ? $0.ip : "off" } ?? "not installed", netOn ? .green : .gray)
+			if !c.isThisMac, !c.isPhone, netOn, let n = c.net {
+				Button { viewScreen(n.ip) } label: {
+					Label("View screen", systemImage: "display")
+						.font(.system(size: 11.5, weight: .medium))
+						.frame(maxWidth: .infinity)
+				}
+				.buttonStyle(.bordered).controlSize(.small)
+				.padding(.top, 2)
+			}
 		}
 		.padding(.horizontal, 8)
-		.frame(width: 170, height: 86)
+		.frame(width: 170, height: 112)
 		.background(RoundedRectangle(cornerRadius: 12).fill(Color(nsColor: .windowBackgroundColor)))
 		.overlay(RoundedRectangle(cornerRadius: 12).stroke(c.isThisMac ? Color.primary.opacity(0.75) : Color.primary.opacity(0.12), lineWidth: c.isThisMac ? 2 : 1))
 		.overlay(alignment: .top) {
