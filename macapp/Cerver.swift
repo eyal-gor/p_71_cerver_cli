@@ -1374,14 +1374,14 @@ struct ThisMacPage: View {
 
 	var overview: some View {
 		Card {
-			Row(label: "Agents can run here", note: "Your agents may run on it, as you.") {
+			Row(label: "Run agents", note: "Part of your compute pool: Cerver can start your agents here, as you.") {
 				StatusPill(text: relayText.0, color: relayText.1)
 				if relayWorking { ProgressView().controlSize(.small) }
 				Toggle("", isOn: Binding(get: { relayOn }, set: { $0 ? m.relayOn() : m.relayOff() }))
 					.toggleStyle(.switch).labelsHidden().disabled(relayWorking)
 			}
 			Divider().padding(.leading, 16)
-			Row(label: "Your computers can reach it", note: "Your other computers can connect to it privately.") {
+			Row(label: "Private network", note: "Your other computers can reach it: SSH, files, its screen.") {
 				StatusPill(text: m.isOn ? "On" : (m.busy ? "…" : "Off"), color: m.isOn ? .green : .gray)
 				if m.busy { ProgressView().controlSize(.small) }
 				Toggle("", isOn: Binding(get: { m.isOn || m.phase == .starting }, set: { $0 ? m.turnOn() : m.turnOff() }))
@@ -1389,7 +1389,7 @@ struct ThisMacPage: View {
 			}
 			if let me = me, let p = me.pool {
 				Divider().padding(.leading, 16)
-				Row(label: "People you invite can use it", note: "Invited people's agents may run on it, fenced off from your files.") {
+				Row(label: "Share with people you invite", note: "Their agents can run here, fenced off from your files.") {
 					StatusPill(text: sharedStatus(me).0, color: sharedStatus(me).1)
 					if let id = p.compute_id, m.sharing.contains(id) { ProgressView().controlSize(.small) }
 					Toggle("", isOn: Binding(get: { p.shared == true }, set: { m.setShared(me, $0) }))
@@ -1413,7 +1413,7 @@ struct ThisMacPage: View {
 			}
 			if let me = me, let p = me.pool {
 				Divider().padding(.leading, 16)
-				Row(label: "People you invite can use it", note: "Invited people's agents may run on it, fenced off from your files.") {
+				Row(label: "Share with people you invite", note: "Their agents can run here, fenced off from your files.") {
 					if let id = p.compute_id, m.sharing.contains(id) { ProgressView().controlSize(.small) }
 					Toggle("", isOn: Binding(get: { p.shared == true }, set: { m.setShared(me, $0) }))
 						.toggleStyle(.switch).labelsHidden()
@@ -1512,7 +1512,7 @@ struct ComputerPage: View {
 			Divider().padding(.leading, 16)
 			Row(label: "Network") { StatusPill(text: networkStatus(c, peer: peer).0, color: networkStatus(c, peer: peer).1) }
 			Divider().padding(.leading, 16)
-			Row(label: "People you invite can use it", note: "Invited people's agents may run on it, fenced off from your files.") { StatusPill(text: sharedStatus(c).0, color: sharedStatus(c).1) }
+			Row(label: "Share with people you invite", note: "Their agents can run here, fenced off from your files.") { StatusPill(text: sharedStatus(c).0, color: sharedStatus(c).1) }
 		}
 		if let n = c.net, let p = peer, p.connected {
 			HStack(spacing: 10) {
@@ -1546,7 +1546,7 @@ struct ComputerPage: View {
 			}
 			if let p = c.pool {
 				Divider().padding(.leading, 16)
-				Row(label: "People you invite can use it", note: "Invited people's agents may run on it, fenced off from your files.") {
+				Row(label: "Share with people you invite", note: "Their agents can run here, fenced off from your files.") {
 					if let id = p.compute_id, m.sharing.contains(id) { ProgressView().controlSize(.small) }
 					Toggle("", isOn: Binding(get: { p.shared == true }, set: { m.setShared(c, $0) }))
 						.toggleStyle(.switch).labelsHidden()
@@ -1662,21 +1662,21 @@ struct PermissionsPage: View {
 
 	var body: some View {
 		PageLayout(title: "Permissions", subtitle: "What each of your computers allows.") {
-			permission("Agents can run here",
-				"Your agents may run on it, as you.") { c in
+			permission("Run agents",
+				"Part of your compute pool: Cerver can start your agents here, as you.") { c in
 				cell(on: c.isThisMac ? (m.relay == .running || m.relay == .starting) : c.pool?.online == true,
 					enabled: c.isThisMac && !relayBusy, remote: !c.isThisMac) { $0 ? m.relayOn() : m.relayOff() }
 			}
-			permission("Your computers can reach it",
-				"Your other computers can connect to it privately.") { c in
+			permission("Private network",
+				"Your other computers can reach it: SSH, files, its screen.") { c in
 				cell(on: c.isThisMac ? (m.isOn || m.phase == .starting) : c.net?.online == true,
 					enabled: c.isThisMac && !m.busy, remote: !c.isThisMac) { $0 ? m.turnOn() : m.turnOff() }
 			}
 
 			DisclosureGroup(isExpanded: $advanced) {
 				VStack(alignment: .leading, spacing: 14) {
-					permission("People you invite can use it",
-						"Invited people's agents may run on it, fenced off from your files.") { c in
+					permission("Share with people you invite",
+						"Their agents can run here, fenced off from your files.") { c in
 						cell(on: c.pool?.shared == true,
 							enabled: c.pool?.compute_id.map { !m.sharing.contains($0) } ?? false, remote: false) { m.setShared(c, $0) }
 					}
