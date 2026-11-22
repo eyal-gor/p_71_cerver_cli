@@ -781,35 +781,34 @@ struct MainWindow: View {
 		.overlay(alignment: .top) { Divider().padding(.horizontal, 12) }
 	}
 
-	/// What opens from your account row: how this computer is connected, and ways to disconnect.
+	/// What opens from your account row: the two things this computer is part
+	/// of, each with its switch (same words as This Mac → Overview).
 	var accountPanel: some View {
-		VStack(alignment: .leading, spacing: 8) {
+		VStack(alignment: .leading, spacing: 10) {
 			Text(m.email ?? "Not signed in").font(.system(size: 13, weight: .semibold))
-			HStack(spacing: 6) {
-				Circle().fill(m.relay == .running ? Color.green : Color.secondary.opacity(0.4)).frame(width: 6, height: 6)
-				Text(m.relay == .running ? "Agents can run here" : "Agents: off here")
-			}
-			HStack(spacing: 6) {
-				Circle().fill(m.isOn ? Color.green : Color.secondary.opacity(0.4)).frame(width: 6, height: 6)
-				Text(networkLine)
-			}
 			Divider()
-			if m.isOn { Button("Leave the network") { m.turnOff(); accountOpen = false } } else { Button("Join the network") { m.turnOn(); accountOpen = false } }
-			if m.relay == .running || m.relay == .starting {
-				Button("Stop running agents here") { m.relayOff(); accountOpen = false }
-			} else {
-				Button("Let agents run here") { m.relayOn(); accountOpen = false }
-			}
-			if m.isOn && (m.relay == .running || m.relay == .starting) {
-				Button("Disconnect everything") { m.turnOff(); m.relayOff(); accountOpen = false }
-			}
+			panelSwitch("Agents can run here",
+				detail: "Cerver sends agent runs to this Mac.",
+				on: m.relay == .running || m.relay == .starting) { $0 ? m.relayOn() : m.relayOff() }
+			panelSwitch("My computers can reach it",
+				detail: m.isOn ? networkLine : "Your other computers reach it by name.",
+				on: m.isOn || m.phase == .starting) { $0 ? m.turnOn() : m.turnOff() }
 			Divider()
-			Text("Cerver " + appVersion).foregroundStyle(.secondary)
+			Text("Cerver " + appVersion).font(.system(size: 11)).foregroundStyle(.secondary)
 		}
-		.font(.system(size: 12.5))
-		.buttonStyle(.link)
 		.padding(14)
-		.frame(width: 240, alignment: .leading)
+		.frame(width: 270, alignment: .leading)
+	}
+
+	func panelSwitch(_ title: String, detail: String, on: Bool, set: @escaping (Bool) -> Void) -> some View {
+		HStack(alignment: .top) {
+			VStack(alignment: .leading, spacing: 2) {
+				Text(title).font(.system(size: 12.5, weight: .medium))
+				Text(detail).font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+			}
+			Spacer()
+			Toggle("", isOn: Binding(get: { on }, set: set)).toggleStyle(.switch).labelsHidden().controlSize(.small)
+		}
 	}
 
 	var appVersion: String { Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "" }
