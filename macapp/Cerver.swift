@@ -723,14 +723,14 @@ func howConnected(_ p: NetPeer) -> String {
 // MARK: - Window (sidebar + page, in the style of the ChatGPT Mac app)
 
 enum Page: Hashable {
-	case map, pool, permissions, thisMac, computer(String), add, settings, session
+	case map, pool, permissions, thisMac, computer(String), add, settings, session, profile
 }
 
 struct MainWindow: View {
 	@ObservedObject var m: Model
 	@StateObject private var session = SessionModel()
 	// `-startPage thisMac` on launch opens that page (for screenshots).
-	@State private var page: Page? = ["thisMac": Page.thisMac, "add": Page.add, "settings": Page.settings, "session": Page.session, "pool": Page.pool, "permissions": Page.permissions][UserDefaults.standard.string(forKey: "startPage") ?? ""] ?? .map
+	@State private var page: Page? = ["thisMac": Page.thisMac, "add": Page.add, "settings": Page.settings, "session": Page.session, "pool": Page.pool, "permissions": Page.permissions, "profile": Page.profile][UserDefaults.standard.string(forKey: "startPage") ?? ""] ?? .map
 
 	var body: some View {
 		NavigationSplitView {
@@ -813,7 +813,7 @@ struct MainWindow: View {
 	/// connected (with ways to disconnect), and the version (with Update).
 	var footer: some View {
 		HStack(spacing: 8) {
-			Button { page = .settings } label: {
+			Button { page = .profile } label: {
 				HStack(spacing: 8) {
 					ZStack(alignment: .bottomTrailing) {
 						Circle().fill(Color.accentColor.opacity(0.85)).frame(width: 24, height: 24)
@@ -826,7 +826,7 @@ struct MainWindow: View {
 				.contentShape(Rectangle())
 			}
 			.buttonStyle(.plain)
-			.help("Settings")
+			.help("Your profile and plan")
 			Spacer(minLength: 0)
 
 			if m.updateAvailable {
@@ -913,6 +913,7 @@ struct MainWindow: View {
 				if let c = m.computers.first(where: { $0.id == id }) { ComputerPage(m: m, c: c) } else { PoolPage(m: m, open: { page = $0 }) }
 			case .add: AddPage(m: m)
 			case .settings: SettingsPage(m: m)
+			case .profile: ProfilePage(m: m)
 			case .session: SessionPage(m: m, s: session)
 			}
 		}
@@ -1709,6 +1710,91 @@ struct PermissionsPage: View {
 				.toggleStyle(.switch).labelsHidden().disabled(!enabled)
 		}
 	}
+}
+
+/// Your profile: who you are on Cerver and your plan, with a way to upgrade.
+struct ProfilePage: View {
+	@ObservedObject var m: Model
+	@State private var account: Account?
+	@State private var plans: [Plan]?
+
+	struct Account: Decodable { let name: String?; let email: String?; let created_at: String? }
+	struct Plan: Decodable { let plan: String; let status: String; let renews_at: String?; let cancel_at_period_end: Bool? }
+	struct PlansResp: Decodable { let plans: [Plan] }
+
+	/// Same catalogue as the gateway's (billing/plan_requests.ts).
+	static let catalogue: [String: (String, Int)] = [
+		"compute-small": ("Cerver Compute Small", 20), "compute-builder": ("Cerver Compute Builder", 49),
+		"compute-team": ("Cerver Compute Team", 99), "compute-scale": ("Cerver Compute Scale", 199),
+		"agents-starter": ("Cerver Agents Starter", 29), "agents-team": ("Cerver Agents Team", 99),
+		"agents-scale": ("Cerver Agents Scale", 399),
+	]
+
+	var body: some View {
+		PageLayout(title: "Profile", subtitle: "Your Cerver account and plan.") {
+			HStack(spacing: 16) {
+				Circle().fill(Color.accentColor.opacity(0.85)).frame(width: 56, height: 56)
+					.overlay(Text(String((account?.name ?? m.email ?? "?").prefix(1)).uppercased())
+						.font(.system(size: 24, weight: .semibold)).foregroundStyle(.white))
+				VStack(alignment: .leading, spacing: 3) {
+					Text(account?.name ?? "—").font(.system(size: 18, weight: .semibold))
+					Text(account?.email ?? m.email ?? "").foregroundStyle(.secondary)
+					if let since = since { Text("On Cerver since " + since).font(.callout).foregroundStyle(.tertiary) }
+				}
+			}
+
+			Text("Plan").font(.system(size: 15, weight: .semibold)).padding(.top, 6)
+			Card {
+				if let ps = plans {
+					if ps.isEmpty {
+						Row(label: "Free", note: "Your own computers, plus free first cloud computers.") {
+							Button("Upgrade") { openWeb("/pricing") }.buttonStyle(.borderedProminent)
+						}
+					} else {
+						ForEach(Array(ps.enumerated()), id: \.offset) { n, p in
+							if n > 0 { Divider().padding(.leading, 16) }
+							Row(label: Self.catalogue[p.plan].map { "\($0.0) · $\($0.1)/month" } ?? p.plan, note: planNote(p)) {
+								Button("Change plan") { openWeb("/pricing") }.buttonStyle(.bordered)
+							}
+						}
+					}
+				} else {
+					Row(label: "Loading…") { ProgressView().controlSize(.small) }
+				}
+			}
+			Button { openWeb("/pricing") } label: {
+				Label("See all plans on cerver.ai/pricing", systemImage: "arrow.up.right.square")
+			}
+			.buttonStyle(.link)
+		}
+		.task {
+			if let d = await gatewayGET("/v2/auth/account") { account = try? JSONDecoder().decode(Account.self, from: d) }
+			if let d = await gatewayGET("/v2/billing/plans") { plans = (try? JSONDecoder().decode(PlansResp.self, from: d))?.plans }
+		}
+	}
+
+	var since: String? {
+		guard let c = account?.created_at, let d = ISO8601DateFormatter.withFraction.date(from: c) ?? ISO8601DateFormatter().date(from: c) else { return nil }
+		return d.formatted(.dateTime.month(.wide).year())
+	}
+
+	func planNote(_ p: Plan) -> String {
+		var parts: [String] = []
+		if p.status == "trialing" { parts.append("Trial") }
+		if p.status == "past_due" { parts.append("Payment due") }
+		if let r = p.renews_at, let d = ISO8601DateFormatter.withFraction.date(from: r) ?? ISO8601DateFormatter().date(from: r) {
+			parts.append((p.cancel_at_period_end == true ? "Ends " : "Renews ") + d.formatted(date: .abbreviated, time: .omitted))
+		}
+		return parts.isEmpty ? "Active" : parts.joined(separator: " · ")
+	}
+}
+
+extension ISO8601DateFormatter {
+	static let withFraction: ISO8601DateFormatter = {
+		let f = ISO8601DateFormatter()
+		f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+		return f
+	}()
 }
 
 /// Settings: your account, what this computer is part of, updates, and the rest.
