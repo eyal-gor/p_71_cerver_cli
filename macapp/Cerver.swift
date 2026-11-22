@@ -767,7 +767,7 @@ extension String {
 struct AllComputersPage: View {
 	@ObservedObject var m: Model
 	let open: (Page) -> Void
-	@State private var view = "Computers"
+	@State private var view = UserDefaults.standard.string(forKey: "startView") ?? "Computers"
 	@State private var help = false
 
 	var body: some View {
@@ -776,6 +776,7 @@ struct AllComputersPage: View {
 				Picker("", selection: $view) {
 					Text("Computers").tag("Computers")
 					Text("Coding agents").tag("Coding agents")
+					Text("Map").tag("Map")
 				}
 				.pickerStyle(.segmented).labelsHidden().fixedSize()
 				Spacer()
@@ -792,6 +793,8 @@ struct AllComputersPage: View {
 			}
 			if m.computers.isEmpty {
 				Text(m.poolChecked ? "No computers yet." : "Loading…").foregroundStyle(.secondary)
+			} else if view == "Map" {
+				NetworkMap(m: m, open: open)
 			} else if view == "Coding agents" {
 				harnessTable
 			} else {
@@ -1246,5 +1249,168 @@ struct CerverApp: App {
 			Image(nsImage: logoImage(size: 16, gray: !m.isOn, gap: 1))
 		}
 		.menuBarExtraStyle(.menu)
+	}
+}
+
+
+// MARK: Network map
+
+/// A picture of your network: your computers along the bottom, Cerver above.
+/// Green between two computers: they talk directly. Orange dashed through
+/// the backup relay: they talk through Cerver. Grey from a computer up to
+/// Cerver: its agents connection (where agent runs arrive).
+struct NetworkMap: View {
+	@ObservedObject var m: Model
+	let open: (Page) -> Void
+
+	let height: CGFloat = 400
+
+	var me: Computer? { m.computers.first { $0.isThisMac } }
+	var others: [Computer] { m.computers.filter { !$0.isThisMac } }
+	/// This Mac in the middle, the others around it.
+	var ordered: [Computer] {
+		var o = others
+		if let me = me { o.insert(me, at: o.count / 2) }
+		return o
+	}
+
+	func peer(_ c: Computer) -> NetPeer? { m.status?.peers.first { $0.ip == c.net?.ip } }
+
+	var body: some View {
+		VStack(alignment: .leading, spacing: 12) {
+			GeometryReader { g in
+				let w = g.size.width
+				let cloud = CGPoint(x: w / 2, y: 62)
+				let agentsPort = CGPoint(x: cloud.x - 70, y: cloud.y + 34)
+				let relayPort = CGPoint(x: cloud.x + 70, y: cloud.y + 34)
+				let row: CGFloat = 270
+				let pos: [String: CGPoint] = Dictionary(uniqueKeysWithValues: ordered.enumerated().map { i, c in
+					(c.id, CGPoint(x: w * CGFloat(i + 1) / CGFloat(ordered.count + 1), y: row))
+				})
+				ZStack {
+					Canvas { ctx, _ in
+						// Agents connection: every computer up to Cerver.
+						for c in ordered {
+							guard let p = pos[c.id], c.pool != nil else { continue }
+							var path = Path()
+							path.move(to: CGPoint(x: p.x, y: p.y - 38))
+							path.addQuadCurve(to: agentsPort, control: CGPoint(x: p.x, y: agentsPort.y + 40))
+							let on = c.pool?.online == true
+							ctx.stroke(path, with: .color(on ? Color.secondary.opacity(0.55) : Color.secondary.opacity(0.25)),
+								style: StrokeStyle(lineWidth: 1.5, dash: on ? [] : [3, 4]))
+						}
+						guard let me = me, let mp = pos[me.id] else { return }
+						// This Mac's line to the backup relay (standing by, or carrying traffic).
+						if m.status?.relay_connected == true {
+							var path = Path()
+							path.move(to: CGPoint(x: mp.x + 20, y: mp.y - 38))
+							path.addQuadCurve(to: relayPort, control: CGPoint(x: mp.x + 20, y: relayPort.y + 40))
+							ctx.stroke(path, with: .color(.orange.opacity(0.5)), style: StrokeStyle(lineWidth: 1.5, dash: [5, 4]))
+						}
+						// Each computer this Mac talks to on the network.
+						for c in others {
+							guard let p = pos[c.id], let pr = peer(c), pr.connected else { continue }
+							if pr.via == "relay" {
+								var path = Path()
+								path.move(to: CGPoint(x: p.x, y: p.y - 38))
+								path.addQuadCurve(to: relayPort, control: CGPoint(x: p.x, y: relayPort.y + 40))
+								ctx.stroke(path, with: .color(.orange), style: StrokeStyle(lineWidth: 2.5, dash: [6, 4]))
+							} else {
+								var path = Path()
+								let a = CGPoint(x: mp.x, y: mp.y + 38), b = CGPoint(x: p.x, y: p.y + 38)
+								path.move(to: a)
+								path.addQuadCurve(to: b, control: CGPoint(x: (a.x + b.x) / 2, y: a.y + 70))
+								ctx.stroke(path, with: .color(.green), style: StrokeStyle(lineWidth: 3, lineCap: .round))
+							}
+						}
+					}
+
+					cloudNode.position(cloud)
+
+					ForEach(ordered) { c in
+						if let p = pos[c.id] {
+							node(c).position(p)
+								.onTapGesture { open(c.isThisMac ? .thisMac : .computer(c.id)) }
+						}
+					}
+
+					// Labels on the direct links.
+					if let me = me, let mp = pos[me.id] {
+						ForEach(others) { c in
+							if let p = pos[c.id], let pr = peer(c), pr.connected, pr.via != "relay" {
+								Text("direct").font(.system(size: 11, weight: .semibold)).foregroundStyle(.green)
+									.padding(.horizontal, 6).padding(.vertical, 1)
+									.background(Capsule().fill(Color(nsColor: .windowBackgroundColor)))
+									.position(x: (mp.x + p.x) / 2, y: row + 38 + 35)
+							}
+						}
+					}
+				}
+			}
+			.frame(height: height)
+			.background(RoundedRectangle(cornerRadius: 14).fill(Color(nsColor: .controlBackgroundColor)))
+			.overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.08)))
+
+			HStack(spacing: 18) {
+				key(Color.green, solid: true, "Direct, computer to computer")
+				key(Color.orange, solid: false, "Through the backup relay")
+				key(Color.secondary, solid: true, "Agents connection")
+			}
+			Text("Lines show what this Mac sees. Click a computer to open it.")
+				.font(.callout).foregroundStyle(.secondary)
+		}
+	}
+
+	var cloudNode: some View {
+		VStack(spacing: 6) {
+			HStack(spacing: 6) {
+				Image(systemName: "cloud.fill").foregroundStyle(.blue)
+				Text("Cerver").font(.system(size: 14, weight: .semibold))
+			}
+			HStack(spacing: 8) {
+				chip("Agents", "bolt.horizontal.fill", .secondary)
+				chip(m.status?.relay_connected == true ? "Backup relay · ready" : "Backup relay", "arrow.triangle.branch", .orange)
+			}
+		}
+		.padding(.horizontal, 12).padding(.vertical, 9)
+		.background(RoundedRectangle(cornerRadius: 12).fill(Color(nsColor: .windowBackgroundColor)))
+		.overlay(RoundedRectangle(cornerRadius: 12).stroke(Color.blue.opacity(0.35)))
+	}
+
+	func chip(_ t: String, _ icon: String, _ color: Color) -> some View {
+		HStack(spacing: 4) {
+			Image(systemName: icon).font(.system(size: 10))
+			Text(t).font(.system(size: 11))
+		}
+		.foregroundStyle(color)
+		.padding(.horizontal, 7).padding(.vertical, 2)
+		.background(Capsule().fill(color.opacity(0.1)))
+	}
+
+	func node(_ c: Computer) -> some View {
+		let a = agentsStatus(c)
+		return VStack(spacing: 3) {
+			Image(systemName: c.isThisMac ? "laptopcomputer" : "desktopcomputer").font(.system(size: 20))
+				.foregroundStyle(.secondary)
+			Text(c.name).font(.system(size: 12.5, weight: .semibold)).lineLimit(1)
+			Text(c.net?.ip ?? "not on network").font(.system(size: 10.5, design: .monospaced)).foregroundStyle(.secondary)
+			HStack(spacing: 4) {
+				Circle().fill(a.1).frame(width: 6, height: 6)
+				Text("Agents " + a.0.lowercased()).font(.system(size: 10.5)).foregroundStyle(.secondary)
+			}
+		}
+		.frame(width: 140, height: 76)
+		.background(RoundedRectangle(cornerRadius: 12).fill(Color(nsColor: .windowBackgroundColor)))
+		.overlay(RoundedRectangle(cornerRadius: 12).stroke(c.isThisMac ? Color.accentColor.opacity(0.6) : Color.primary.opacity(0.12), lineWidth: c.isThisMac ? 1.5 : 1))
+		.contentShape(Rectangle())
+	}
+
+	func key(_ color: Color, solid: Bool, _ t: String) -> some View {
+		HStack(spacing: 6) {
+			Path { p in p.move(to: .init(x: 0, y: 5)); p.addLine(to: .init(x: 22, y: 5)) }
+				.stroke(color, style: StrokeStyle(lineWidth: 2.5, dash: solid ? [] : [5, 3]))
+				.frame(width: 22, height: 10)
+			Text(t).font(.system(size: 12)).foregroundStyle(.secondary)
+		}
 	}
 }
