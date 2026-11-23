@@ -814,6 +814,7 @@ func howConnected(_ p: NetPeer) -> String {
 // MARK: - Window (sidebar + page, in the style of the ChatGPT Mac app)
 
 enum Page: Hashable {
+	case updates
 	case map, pool, permissions, addons, safety, focus, cleanup, exitNode, thisMac, computer(String), add, settings, session, profile, connectors, people
 }
 
@@ -828,7 +829,7 @@ struct MainWindow: View {
 	@AppStorage("addonsFolded") private var addonsFolded = true
 	@State private var hoverAddons = false
 	// `-startPage thisMac` on launch opens that page (for screenshots).
-	@State private var page: Page? = ["thisMac": Page.thisMac, "add": Page.add, "settings": Page.settings, "session": Page.session, "pool": Page.pool, "permissions": Page.permissions, "security": Page.permissions, "addons": Page.addons, "safety": Page.safety, "focus": Page.focus, "cleanup": Page.cleanup, "exit": Page.exitNode, "vpn": Page.exitNode, "profile": Page.profile, "connectors": Page.connectors, "people": Page.people, "map": Page.map][UserDefaults.standard.string(forKey: "startPage") ?? ""] ?? .pool
+	@State private var page: Page? = ["thisMac": Page.thisMac, "add": Page.add, "settings": Page.settings, "updates": Page.updates, "session": Page.session, "pool": Page.pool, "permissions": Page.permissions, "security": Page.permissions, "addons": Page.addons, "safety": Page.safety, "focus": Page.focus, "cleanup": Page.cleanup, "exit": Page.exitNode, "vpn": Page.exitNode, "profile": Page.profile, "connectors": Page.connectors, "people": Page.people, "map": Page.map][UserDefaults.standard.string(forKey: "startPage") ?? ""] ?? .pool
 
 	var body: some View {
 		NavigationSplitView {
@@ -986,6 +987,28 @@ struct MainWindow: View {
 			.listStyle(.sidebar)
 			.onChange(of: page) { _ in nav.current = .overview }
 			.task { m.loadPoolName() }
+			Button { page = .updates } label: {
+				HStack(spacing: 6) {
+					Label("Updates", systemImage: "arrow.down.circle")
+					Spacer(minLength: 0)
+					if m.updating {
+						ProgressView().controlSize(.mini)
+					} else if m.updateAvailable {
+						Text("New").font(.system(size: 10, weight: .semibold)).foregroundStyle(.white)
+							.padding(.horizontal, 6).padding(.vertical, 1).background(Capsule().fill(Color.accentColor))
+					} else {
+						Text(appVersion).font(.system(size: 11)).foregroundStyle(.tertiary)
+					}
+				}
+				.font(.system(size: 13))
+				.frame(maxWidth: .infinity, alignment: .leading)
+				.padding(.horizontal, 8).padding(.vertical, 6)
+				.background(RoundedRectangle(cornerRadius: 6).fill(page == .updates ? Color.accentColor.opacity(0.15) : .clear))
+				.contentShape(Rectangle())
+			}
+			.buttonStyle(.plain)
+			.help(m.updateAvailable ? "Cerver \(m.updates?.latest ?? "") is out" : "Cerver \(appVersion)")
+			.padding(.horizontal, 10)
 			Button { page = .settings } label: {
 				Label("Settings", systemImage: "gearshape")
 					.font(.system(size: 13))
@@ -1110,7 +1133,8 @@ struct MainWindow: View {
 			case .computer(let id):
 				if let c = m.computers.first(where: { $0.id == id }) { ComputerPage(m: m, c: c, nav: nav).environment(\.askAgent, askAgent).environment(\.openPage, OpenPage { page = $0 }) } else { PoolPage(m: m, open: { page = $0 }) }
 			case .add: AddPage(m: m)
-			case .settings: SettingsPage(m: m)
+			case .settings: SettingsPage(m: m).id("settings")
+			case .updates: SettingsPage(m: m, tab: "Updates").id("updates")
 			case .profile: ProfilePage(m: m)
 			case .session: SessionPage(m: m, s: session)
 			}
@@ -2407,7 +2431,7 @@ struct SettingsPage: View {
 		.onAppear { skillInstalled = FileManager.default.fileExists(atPath: skillFile) }
 	}
 
-	@State private var tab = "General"
+	@State var tab = "General"
 	@State private var skillInstalled = false
 	@State private var installingSkill = false
 	let skillFile = NSHomeDirectory() + "/.claude/skills/cerver/SKILL.md"
