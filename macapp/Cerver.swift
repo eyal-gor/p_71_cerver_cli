@@ -2124,8 +2124,9 @@ struct PermissionsPage: View {
 				Card {
 					Row(label: "The folder each agent is started in", note: "Usually a project, e.g. the folder you open in Claude Code.") { EmptyView() }
 					Divider().padding(.leading, 16)
-					Row(label: "Questions from Ask Compute Pool", note: SecurityRules.askFolder) {
-						Button("Show") { NSWorkspace.shared.open(URL(fileURLWithPath: (SecurityRules.askFolder as NSString).expandingTildeInPath)) }.buttonStyle(.link)
+					Row(label: "When no folder is given, agents start in", note: sec.startShown + "  ·  Ask Compute Pool, cerver run") {
+						Button("Change…") { if let f = SecurityRules.pick("Start here").first { sec.start = f; saveSec() } }.buttonStyle(.link)
+						if !sec.start.isEmpty { Button("Default") { sec.start = ""; saveSec() }.buttonStyle(.link) }
 					}
 					ForEach(sec.allowed, id: \.self) { f in
 						Divider().padding(.leading, 16)
@@ -3580,6 +3581,7 @@ struct AgentAccess: Decodable {
 	let blocked_folders: [String]?
 	let allowed_folders: [String]?
 	let ask_folder: String?
+	let start_folder: String?
 	let enforced_by: String?
 }
 
@@ -3587,6 +3589,9 @@ struct SecurityRules {
 	var mode = "as_you"
 	var blocked: [String] = []
 	var allowed: [String] = [] // own_folder: folders agents may also open
+	var start = ""             // where agents start when no folder is given ("" = default)
+	/// The start folder in effect on this Mac.
+	var startShown: String { !start.isEmpty ? start : (mode == "as_you" ? "~ (your home folder)" : SecurityRules.askFolder) }
 	static let file = NSHomeDirectory() + "/.cerver/security.json"
 	static let askFolder = "~/.cerver/work/ask"
 
@@ -3608,12 +3613,14 @@ struct SecurityRules {
 		if let m = o["agent_access"] as? String, ["as_you", "own_folder", "vm"].contains(m) { r.mode = m }
 		r.blocked = (o["blocked_folders"] as? [String]) ?? []
 		r.allowed = (o["allowed_folders"] as? [String]) ?? []
+		r.start = (o["start_folder"] as? String) ?? ""
 		return r
 	}
 
 	/// nil when saved, else what went wrong.
 	func save() -> String? {
-		let o: [String: Any] = ["agent_access": mode, "blocked_folders": blocked, "allowed_folders": allowed]
+		var o: [String: Any] = ["agent_access": mode, "blocked_folders": blocked, "allowed_folders": allowed]
+		if !start.isEmpty { o["start_folder"] = start }
 		do {
 			try FileManager.default.createDirectory(atPath: NSHomeDirectory() + "/.cerver", withIntermediateDirectories: true)
 			let d = try JSONSerialization.data(withJSONObject: o, options: [.prettyPrinted, .sortedKeys])
@@ -3843,7 +3850,26 @@ struct AccessSection: View {
 	var mode: String? { c.isThisMac ? sec.mode : c.spec?.agent_access?.mode }
 	var blocked: [String] { c.isThisMac ? sec.blocked : (c.spec?.agent_access?.blocked_folders ?? []) }
 	var allowed: [String] { c.isThisMac ? sec.allowed : (c.spec?.agent_access?.allowed_folders ?? []) }
-	var askFolder: String { c.isThisMac ? SecurityRules.askFolder : (c.spec?.agent_access?.ask_folder.map { $0.replacingOccurrences(of: #"^/Users/[^/]+"#, with: "~", options: .regularExpression) } ?? SecurityRules.askFolder) }
+	func tilde(_ p: String) -> String { p.replacingOccurrences(of: #"^/Users/[^/]+"#, with: "~", options: .regularExpression) }
+	var startFolder: String { c.isThisMac ? sec.startShown : (c.spec?.agent_access?.start_folder.map(tilde) ?? "not reported yet") }
+
+	/// Where agents start when the request names no folder; editable on this Mac.
+	var startLine: some View {
+		HStack(alignment: .firstTextBaseline, spacing: 10) {
+			Image(systemName: "folder.fill").foregroundStyle(Color.accentColor).frame(width: 16)
+			VStack(alignment: .leading, spacing: 3) {
+				Text("Starts in " + startFolder).font(.system(size: 13, weight: .medium))
+				Text("When a request names no folder (Ask Compute Pool, cerver run). A request can name a project folder instead.")
+					.font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+			}
+			Spacer()
+			if c.isThisMac {
+				Button("Change…") { if let f = SecurityRules.pick("Start here").first { sec.start = f; _ = sec.save() } }.buttonStyle(.link)
+				if !sec.start.isEmpty { Button("Default") { sec.start = ""; _ = sec.save() }.buttonStyle(.link) }
+			}
+		}
+		.padding(.horizontal, 16).padding(.vertical, 8)
+	}
 	var node: NetNodeAddons? { a.nodes.first { $0.ip == c.net?.ip || $0.name.lowercased() == c.name.lowercased() } }
 
 	func line(_ ok: Bool?, _ title: String, _ detail: String) -> some View {
@@ -3875,9 +3901,11 @@ struct AccessSection: View {
 				header("Agents", "cpu", change: "Change in Security", .permissions)
 				switch mode {
 				case "as_you":
+					startLine
 					line(true, "May open everything you can open", "Your files, apps and logins on \(c.name).")
 				case "own_folder":
-					line(true, "Works in the folder it's started in", "Usually a project. Questions from Ask Compute Pool work in \(askFolder).")
+					startLine
+					line(true, "May open the folder it works in", "The start folder above, or the project folder a request names.")
 					HStack(alignment: .firstTextBaseline, spacing: 10) {
 						Image(systemName: allowed.isEmpty ? "minus.circle" : "checkmark.circle.fill")
 							.foregroundStyle(allowed.isEmpty ? Color.secondary : Color.green).frame(width: 16)
