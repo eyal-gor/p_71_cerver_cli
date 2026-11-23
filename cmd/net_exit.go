@@ -63,7 +63,7 @@ type exitCtl struct {
 	gateway string // Cerver gateway host
 	st      exitState
 	why     string
-	lostAt  time.Time
+	misses  int
 	resolve time.Time
 	hosts   []string // gateway + STUN addresses, resolved
 }
@@ -149,7 +149,14 @@ func (e *exitCtl) update(node *wgnet.Node) {
 		e.stopUsing("")
 		node.SetExitPeer("")
 	}
-	healthy := peer != nil && peer.Connected
+	// Healthy: WireGuard has the peer, and it answers a ping through the
+	// tunnel (every few seconds), so a dead exit is noticed in ~10 s, not 3 min.
+	healthy := peer != nil && peer.Connected && pingOK(via)
+	if healthy {
+		e.misses = 0
+	} else {
+		e.misses++
+	}
 	switch {
 	case healthy && !e.st.Halves:
 		if err := e.startUsing(node, via); err != nil {
@@ -157,15 +164,10 @@ func (e *exitCtl) update(node *wgnet.Node) {
 			node.SetExitPeer("")
 		}
 	case healthy:
-		e.lostAt = time.Time{}
 		e.refreshRoutes(node) // a peer moved, the router changed
 	case !healthy && e.st.Halves:
-		if e.lostAt.IsZero() {
-			e.lostAt = time.Now()
-		}
-		// WireGuard counts a peer lost after 3 minutes without a handshake;
-		// give it a little more, then go back to the normal connection.
-		if time.Since(e.lostAt) > 30*time.Second {
+		// 3 missed checks in a row (~10 s): back to the normal connection.
+		if e.misses >= 3 {
 			name := via
 			if peer != nil {
 				name = peer.Name
@@ -329,7 +331,6 @@ func (e *exitCtl) startUsing(node *wgnet.Node, via string) error {
 	}
 	flushDNS()
 	e.why = ""
-	e.lostAt = time.Time{}
 	e.save()
 	fmt.Printf("Internet now goes through the exit node %s\n", via)
 	return nil
@@ -427,4 +428,9 @@ func (e *exitCtl) stopOffering() {
 	}
 	e.st.Offering, e.st.NatIface, e.st.PfToken, e.st.FwdWas = false, "", "", ""
 	e.save()
+}
+
+// pingOK: the exit answers through the tunnel within a second.
+func pingOK(ip string) bool {
+	return exec.Command("/sbin/ping", "-c", "1", "-t", "1", "-q", ip).Run() == nil
 }
