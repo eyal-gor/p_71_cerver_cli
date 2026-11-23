@@ -440,9 +440,17 @@ final class Model: ObservableObject {
 	var updateAvailable: Bool { updates?.any ?? false }
 
 	/// Asks `cerver update --check --json` what's installed and what's new.
-	/// On launch and every 6 hours (GitHub is asked at most that often).
+	/// On launch and every hour. When something is new and you haven't used
+	/// the app for 10 minutes, it updates itself and reopens in the background.
 	func checkUpdates(force: Bool = false) {
-		if !force && Date().timeIntervalSince(lastUpdateCheck) < 6 * 3600 { return }
+		if NSApp.isActive { lastActive = Date() }
+		if updates?.any == true, !updating, !NSApp.isActive, Date().timeIntervalSince(lastActive) > 600,
+		   Date().timeIntervalSince(lastAutoUpdate) > 3600 {
+			lastAutoUpdate = Date()
+			updateNow(quiet: true)
+			return
+		}
+		if !force && Date().timeIntervalSince(lastUpdateCheck) < 3600 { return }
 		lastUpdateCheck = Date()
 		Task.detached {
 			let (ok, out) = runCerver(["update", "--check", "--json"])
@@ -450,13 +458,17 @@ final class Model: ObservableObject {
 			await MainActor.run { if let i = info { self.updates = i } }
 		}
 	}
+	private var lastActive = Date()
+	private var lastAutoUpdate = Date.distantPast
 
 	/// Updates everything, then reopens the (new) app.
-	func updateNow() {
+	/// quiet: the automatic update while you're away. No password prompt (the
+	/// network service updates itself), and the app reopens in the background.
+	func updateNow(quiet: Bool = false) {
 		updating = true
 		updateProblem = nil
 		let netName = status?.name ?? ""
-		let netBehind = updates?.net?.update == true
+		let netBehind = !quiet && updates?.net?.update == true
 		Task.detached {
 			let (ok, out) = runCerver(["update", "--app"])
 			// The network service runs as admin, so updating it now needs the
@@ -477,7 +489,7 @@ final class Model: ObservableObject {
 				if self.updates?.app?.update == true {
 					let p = Process()
 					p.executableURL = URL(fileURLWithPath: "/bin/sh")
-					p.arguments = ["-c", "sleep 1; open /Applications/Cerver.app"]
+					p.arguments = ["-c", quiet ? "sleep 1; open -g -j /Applications/Cerver.app" : "sleep 1; open /Applications/Cerver.app"]
 					try? p.run()
 					NSApp.terminate(nil)
 				} else {
