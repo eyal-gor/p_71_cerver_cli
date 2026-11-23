@@ -830,7 +830,7 @@ struct MainWindow: View {
 	@AppStorage("moreFolded") private var moreFolded = true
 	/// Always foldable; going to one of its pages (e.g. -startPage) opens it once.
 	var moreOpen: Bool { !moreFolded }
-	static let morePages: [Page] = [.agents, .map, .people, .permissions, .addons, .safety, .focus, .cleanup, .exitNode]
+	static let morePages: [Page] = [.agents, .map, .connectors, .people, .permissions, .addons, .safety, .focus, .cleanup, .exitNode]
 	@State private var hoverAddons = false
 	// `-startPage thisMac` on launch opens that page (for screenshots).
 	@State private var page: Page? = ["thisMac": Page.thisMac, "add": Page.add, "settings": Page.settings, "updates": Page.updates, "session": Page.session, "pool": Page.pool, "permissions": Page.permissions, "security": Page.permissions, "addons": Page.addons, "safety": Page.safety, "focus": Page.focus, "cleanup": Page.cleanup, "exit": Page.exitNode, "vpn": Page.exitNode, "profile": Page.profile, "connectors": Page.connectors, "people": Page.people, "map": Page.map, "agents": Page.agents][UserDefaults.standard.string(forKey: "startPage") ?? ""] ?? .pool
@@ -948,8 +948,6 @@ struct MainWindow: View {
 					}
 				}
 				Section {
-					Label("Connectors", systemImage: "app.connected.to.app.below.fill")
-						.tag(Page.connectors)
 					// More: folded by default; opens by itself when one of its pages is showing.
 					Button { withAnimation(.easeInOut(duration: 0.15)) { moreFolded.toggle() } } label: {
 						HStack(spacing: 4) {
@@ -968,6 +966,9 @@ struct MainWindow: View {
 						Label("Map", systemImage: "map")
 							.padding(.leading, 14)
 							.tag(Page.map)
+						Label("Connectors", systemImage: "app.connected.to.app.below.fill")
+							.padding(.leading, 14)
+							.tag(Page.connectors)
 						Label("People", systemImage: "person.2")
 							.padding(.leading, 14)
 							.tag(Page.people)
