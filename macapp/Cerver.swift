@@ -785,7 +785,7 @@ func howConnected(_ p: NetPeer) -> String {
 // MARK: - Window (sidebar + page, in the style of the ChatGPT Mac app)
 
 enum Page: Hashable {
-	case map, pool, permissions, thisMac, computer(String), add, settings, session, profile, connectors, people
+	case map, pool, permissions, addons, thisMac, computer(String), add, settings, session, profile, connectors, people
 }
 
 struct MainWindow: View {
@@ -796,7 +796,7 @@ struct MainWindow: View {
 	@AppStorage("poolFolded") private var poolFolded = false
 	@State private var hoverPool = false
 	// `-startPage thisMac` on launch opens that page (for screenshots).
-	@State private var page: Page? = ["thisMac": Page.thisMac, "add": Page.add, "settings": Page.settings, "session": Page.session, "pool": Page.pool, "permissions": Page.permissions, "security": Page.permissions, "profile": Page.profile, "connectors": Page.connectors, "people": Page.people, "map": Page.map][UserDefaults.standard.string(forKey: "startPage") ?? ""] ?? .pool
+	@State private var page: Page? = ["thisMac": Page.thisMac, "add": Page.add, "settings": Page.settings, "session": Page.session, "pool": Page.pool, "permissions": Page.permissions, "security": Page.permissions, "addons": Page.addons, "profile": Page.profile, "connectors": Page.connectors, "people": Page.people, "map": Page.map][UserDefaults.standard.string(forKey: "startPage") ?? ""] ?? .pool
 
 	var body: some View {
 		NavigationSplitView {
@@ -919,6 +919,8 @@ struct MainWindow: View {
 						.tag(Page.people)
 					Label("Security", systemImage: "lock.shield")
 						.tag(Page.permissions)
+					Label("Add-ons", systemImage: "puzzlepiece.extension")
+						.tag(Page.addons)
 				}
 			}
 			.listStyle(.sidebar)
@@ -1039,6 +1041,7 @@ struct MainWindow: View {
 			case .people: PeoplePage(m: m)
 			case .pool: PoolPage(m: m, open: { page = $0 })
 			case .permissions: PermissionsPage(m: m)
+			case .addons: AddonsPage(m: m)
 			case .thisMac: ThisMacPage(m: m, nav: nav).environment(\.askAgent, askAgent)
 			case .computer(let id):
 				if let c = m.computers.first(where: { $0.id == id }) { ComputerPage(m: m, c: c, nav: nav).environment(\.askAgent, askAgent) } else { PoolPage(m: m, open: { page = $0 }) }
@@ -3682,5 +3685,244 @@ struct SearchField: View {
 		}
 		.padding(.horizontal, 8).padding(.vertical, 5)
 		.background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.06)))
+	}
+}
+
+
+// MARK: Add-ons
+
+/// One device on your network, with the add-ons chosen for it and what it
+/// last said it applied (GET /v2/net).
+struct NetNodeAddons: Decodable, Identifiable {
+	struct Wanted: Decodable {
+		struct Focus: Decodable { let sites: [String]; let policy: String; let until: Double? }
+		let level: String
+		let focus: Focus
+		let set_at: String?
+	}
+	struct Applied: Decodable {
+		struct Focus: Decodable { let policy: String?; let sites: [String]?; let blocking: Bool?; let until: Double? }
+		let level: String?
+		let focus: Focus?
+		let at: Double?
+	}
+	let ip: String
+	let name: String
+	let online: Bool
+	let os: String?
+	let addons: Wanted?
+	let addons_applied: Applied?
+	var id: String { ip }
+}
+
+/// Safety and Focus add-ons for any computer on your network. You choose
+/// here; that computer's Cerver network service applies it (no password) at
+/// its next check-in, about 20 seconds, and reports back.
+struct AddonsPage: View {
+	@ObservedObject var m: Model
+	@State private var nodes: [NetNodeAddons] = []
+	@State private var selected = ""   // ip
+	@State private var problem: String?
+	@State private var saving = false
+	@State private var custom = ""
+
+	struct Level { let id, name, what, icon: String }
+	let levels = [
+		Level(id: "off", name: "Off", what: "The router's DNS. Nothing is filtered.", icon: "circle.dashed"),
+		Level(id: "malware", name: "Block malware", what: "Blocks malware and phishing sites. By Cloudflare.", icon: "ladybug"),
+		Level(id: "adult", name: "Block adult sites", what: "Blocks adult sites, plus malware and phishing. Cloudflare for Families.", icon: "eye.slash"),
+		Level(id: "kids", name: "Kids safety", what: "Blocks adult sites and the proxies and VPNs used to get around a filter, and forces SafeSearch on Google, Bing and YouTube. By CleanBrowsing.", icon: "figure.and.child.holdinghands"),
+	]
+	let groups: [(String, String)] = [("facebook", "Facebook"), ("instagram", "Instagram"), ("youtube", "YouTube"), ("x", "X"), ("tiktok", "TikTok"), ("reddit", "Reddit"), ("netflix", "Netflix"), ("linkedin", "LinkedIn")]
+	let policies: [(String, String, String)] = [
+		("off", "Off", "Nothing blocked."),
+		("work_hours", "Work hours", "Monday to Friday, 9:00 to 18:00."),
+		("until", "Focus for an hour", "Blocked for the next hour, then back to normal."),
+		("always", "Always", "Blocked until you turn it off."),
+	]
+
+	var node: NetNodeAddons? { nodes.first { $0.ip == selected } }
+	var level: String { node?.addons?.level ?? node?.addons_applied?.level ?? "off" }
+	var sites: [String] { node?.addons?.focus.sites ?? node?.addons_applied?.focus?.sites ?? [] }
+	var policy: String { node?.addons?.focus.policy ?? node?.addons_applied?.focus?.policy ?? "off" }
+	var isMac: Bool { (node?.os ?? "darwin") == "darwin" }
+
+	var body: some View {
+		PageLayout(title: "Add-ons", subtitle: "Extra protection for a whole computer: every app and browser on it, not only agents.") {
+			if nodes.isEmpty {
+				Text(problem ?? "Loading your computers…").foregroundStyle(.secondary)
+			} else {
+				Picker("Computer", selection: $selected) {
+					ForEach(nodes) { n in
+						Text(n.name + (n.ip == m.status?.ip ? " (this Mac)" : "") + (n.online ? "" : " · offline")).tag(n.ip)
+					}
+				}
+				.frame(maxWidth: 360)
+				statusLine
+				if !isMac {
+					Text("Add-ons work on Macs for now.").foregroundStyle(.secondary)
+				} else {
+					safety
+					focus
+				}
+				if let p = problem { Text(p).font(.callout).foregroundStyle(.red) }
+				Text("The computer's Cerver network service applies your choice within about 20 seconds while it's on; no password needed. Safety changes its DNS (Cerver's computer names keep working). Focus blocks the sites by name; a browser using its own secure DNS can skip it, so turn that off there if a site still opens.")
+					.font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+			}
+		}
+		.task {
+			while !Task.isCancelled {
+				await load()
+				try? await Task.sleep(nanoseconds: 4_000_000_000)
+			}
+		}
+	}
+
+	@ViewBuilder var statusLine: some View {
+		if let n = node {
+			let applied = n.addons_applied
+			let pending = n.addons != nil && (applied?.level != n.addons?.level || applied?.focus?.policy != n.addons?.focus.policy || Set(applied?.focus?.sites ?? []) != Set(n.addons?.focus.sites ?? []))
+			HStack(spacing: 6) {
+				Circle().fill(!n.online ? Color.secondary.opacity(0.4) : pending ? Color.orange : Color.green).frame(width: 8, height: 8)
+				Text(!n.online ? "\(n.name) is offline; it applies your choice when it's back."
+					: pending ? (applied == nil ? "Waiting for \(n.name): its Cerver needs an update to use add-ons." : "Applying on \(n.name)…")
+					: "In effect on \(n.name)" + ((applied?.focus?.blocking ?? false) ? " · Focus is blocking now." : "."))
+					.font(.callout).foregroundStyle(.secondary)
+			}
+		}
+	}
+
+	var safety: some View {
+		VStack(alignment: .leading, spacing: 10) {
+			Text("Safety").font(.system(size: 15, weight: .semibold))
+			Card {
+				ForEach(Array(levels.enumerated()), id: \.element.id) { n, l in
+					if n > 0 { Divider().padding(.leading, 16) }
+					Button { save(level: l.id) } label: {
+						HStack(alignment: .top, spacing: 12) {
+							Image(systemName: l.icon).font(.system(size: 16)).frame(width: 22).foregroundStyle(.secondary).padding(.top, 2)
+							VStack(alignment: .leading, spacing: 3) {
+								Text(l.name).font(.system(size: 14, weight: .medium))
+								Text(l.what).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+							}
+							Spacer()
+							check(level == l.id)
+						}
+						.padding(.horizontal, 16).padding(.vertical, 12).contentShape(Rectangle())
+					}
+					.buttonStyle(.plain).disabled(saving)
+				}
+			}
+			Text("Each choice includes the ones above it.").font(.caption).foregroundStyle(.secondary)
+		}
+	}
+
+	var focus: some View {
+		VStack(alignment: .leading, spacing: 10) {
+			Text("Focus").font(.system(size: 15, weight: .semibold)).padding(.top, 8)
+			Text("Block distracting sites, when you choose.").font(.callout).foregroundStyle(.secondary)
+			Card {
+				VStack(alignment: .leading, spacing: 10) {
+					Text("Sites").font(.system(size: 13, weight: .medium))
+					FlowChips(items: groups + sites.filter { s in !groups.contains { $0.0 == s } }.map { ($0, $0) }, on: Set(sites)) { id in
+						var s = sites
+						if let i = s.firstIndex(of: id) { s.remove(at: i) } else { s.append(id) }
+						save(sites: s)
+					}
+					HStack {
+						TextField("Another site, e.g. news.ycombinator.com", text: $custom).textFieldStyle(.roundedBorder).onSubmit(addCustom)
+						Button("Add", action: addCustom).disabled(custom.trimmingCharacters(in: .whitespaces).isEmpty)
+					}
+				}
+				.padding(16)
+				Divider()
+				ForEach(Array(policies.enumerated()), id: \.element.0) { n, p in
+					if n > 0 { Divider().padding(.leading, 16) }
+					Button { save(policy: p.0) } label: {
+						HStack {
+							VStack(alignment: .leading, spacing: 2) {
+								Text(p.1).font(.system(size: 14, weight: .medium))
+								Text(untilText(p) ?? p.2).font(.callout).foregroundStyle(.secondary)
+							}
+							Spacer()
+							check(policy == p.0)
+						}
+						.padding(.horizontal, 16).padding(.vertical, 10).contentShape(Rectangle())
+					}
+					.buttonStyle(.plain).disabled(saving)
+				}
+			}
+		}
+	}
+
+	func untilText(_ p: (String, String, String)) -> String? {
+		guard p.0 == "until", policy == "until", let u = node?.addons?.focus.until, u > Date().timeIntervalSince1970 else { return nil }
+		return "Until \(Date(timeIntervalSince1970: u).formatted(date: .omitted, time: .shortened))."
+	}
+
+	func check(_ on: Bool) -> some View {
+		Image(systemName: on ? "checkmark.circle.fill" : "circle")
+			.font(.system(size: 18)).foregroundStyle(on ? Color.accentColor : Color.secondary.opacity(0.5))
+	}
+
+	func addCustom() {
+		let d = custom.trimmingCharacters(in: .whitespaces).lowercased()
+			.replacingOccurrences(of: "https://", with: "").replacingOccurrences(of: "http://", with: "")
+			.components(separatedBy: "/").first ?? ""
+		guard !d.isEmpty, !sites.contains(d) else { return }
+		custom = ""
+		save(sites: sites + [d])
+	}
+
+	func load() async {
+		struct R: Decodable { let nodes: [NetNodeAddons] }
+		guard let d = await gatewayGET("/v2/net"), let r = try? JSONDecoder().decode(R.self, from: d) else {
+			if nodes.isEmpty { problem = "Couldn't load your computers. Is Cerver's private network on?" }
+			return
+		}
+		nodes = r.nodes
+		if selected.isEmpty || !nodes.contains(where: { $0.ip == selected }) {
+			selected = nodes.first(where: { $0.ip == m.status?.ip })?.ip ?? nodes.first?.ip ?? ""
+		}
+		problem = nil
+	}
+
+	func save(level: String? = nil, sites: [String]? = nil, policy: String? = nil) {
+		guard !selected.isEmpty else { return }
+		let p = policy ?? self.policy
+		var focus: [String: Any] = ["sites": sites ?? self.sites, "policy": p]
+		if p == "until" { focus["until"] = Int(policy == "until" ? Date().timeIntervalSince1970 + 3600 : (node?.addons?.focus.until ?? Date().timeIntervalSince1970 + 3600)) }
+		let body = try? JSONSerialization.data(withJSONObject: ["level": level ?? self.level, "focus": focus])
+		saving = true
+		Task {
+			let ok = await gatewayRequest("PUT", "/v2/net/nodes/\(selected)/addons", body: body) != nil
+			saving = false
+			problem = ok ? nil : "Couldn't save it. Try again."
+			await load()
+		}
+	}
+}
+
+/// Toggle chips that wrap onto new lines.
+struct FlowChips: View {
+	let items: [(String, String)]
+	let on: Set<String>
+	let tap: (String) -> Void
+	var body: some View {
+		LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), spacing: 8, alignment: .leading)], alignment: .leading, spacing: 8) {
+			ForEach(items, id: \.0) { id, label in
+				Button { tap(id) } label: {
+					HStack(spacing: 5) {
+						Image(systemName: on.contains(id) ? "checkmark" : "plus").font(.system(size: 10, weight: .bold))
+						Text(label).font(.system(size: 13)).lineLimit(1)
+					}
+					.padding(.horizontal, 10).padding(.vertical, 5)
+					.frame(maxWidth: .infinity, alignment: .leading)
+					.background(Capsule().fill(on.contains(id) ? Color.accentColor.opacity(0.18) : Color.primary.opacity(0.06)))
+					.foregroundStyle(on.contains(id) ? Color.accentColor : Color.primary)
+				}
+				.buttonStyle(.plain)
+			}
+		}
 	}
 }

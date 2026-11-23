@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net"
 	"net/netip"
@@ -89,12 +90,16 @@ type CheckInRequest struct {
 	Name      string   `json:"name"`
 	Endpoints []string `json:"endpoints"`
 	OS        string   `json:"os"`
+	// What add-ons this device applied (reported to the owner's app).
+	AddonsApplied json.RawMessage `json:"addons_applied,omitempty"`
 }
 type CheckInAnswer struct {
 	IP          string `json:"ip"`
 	Prefix      string `json:"prefix"`
 	PollSeconds int    `json:"poll_seconds"`
 	Peers       []Peer `json:"peers"`
+	// Add-ons the owner chose for this device (null: none chosen from the app).
+	Addons json.RawMessage `json:"addons,omitempty"`
 }
 
 type peerState struct {

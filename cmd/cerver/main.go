@@ -81,6 +81,9 @@ commands:
                cerver vm start                  # start it, build the agent image
                cerver vm login                  # your Claude login for agents in the VM
                cerver vm run "…"                # try it in this folder
+  addons     Safety add-ons for this whole computer (filtering DNS).
+               cerver addons                    # what's on here
+               sudo cerver addons set kids      # off | malware | adult | kids
   forward    Reach an app on one of your machines from here, peer to peer.
                cerver forward MacBook-Air-2026 3456          # its port 3456 at localhost:3456 here
                cerver forward MacBook-Air-2026 3456 --local 8080
@@ -229,6 +232,8 @@ func main() {
 		err = cmd.Net(args)
 	case "vm":
 		err = cmd.VM(args)
+	case "addons":
+		err = cmd.Addons(args)
 	case "relay":
 		err = cmd.Relay(args)
 	case "envs", "env", "environments":

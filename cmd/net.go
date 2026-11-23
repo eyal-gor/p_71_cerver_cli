@@ -178,8 +178,12 @@ func netUp(args []string) error {
 		Dev:  dev, Bind: bind, Key: key, Name: *name, OS: runtime.GOOS, Relay: true,
 		Log: func(f string, a ...any) { fmt.Printf(f+"\n", a...) },
 		CheckIn: func(ctx context.Context, r wgnet.CheckInRequest) (*wgnet.CheckInAnswer, error) {
+			r.AddonsApplied = addonsApplied()
 			var ans wgnet.CheckInAnswer
 			err := gw.Do(ctx, "POST", "/v2/net/nodes", r, &ans)
+			if err == nil {
+				remoteAddons(ans.Addons) // the owner's choice from the app, for this device
+			}
 			return &ans, err
 		},
 	}
@@ -244,6 +248,7 @@ func netUp(args []string) error {
 			}
 			node.Retry()
 			writeNetStatus(*name, ip, relay.Connected(), node.Status())
+			applyFocus() // Add-ons → Focus: block distracting sites by its schedule
 		case <-selfUpdate.C:
 			if netSelfUpdate(ctx) {
 				fmt.Println("Updated; restarting with the new version.")
