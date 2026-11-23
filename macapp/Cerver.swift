@@ -806,6 +806,8 @@ struct MainWindow: View {
 	@StateObject private var addons = AddonsModel()
 	@AppStorage("poolFolded") private var poolFolded = false
 	@State private var hoverPool = false
+	@AppStorage("addonsFolded") private var addonsFolded = false
+	@State private var hoverAddons = false
 	// `-startPage thisMac` on launch opens that page (for screenshots).
 	@State private var page: Page? = ["thisMac": Page.thisMac, "add": Page.add, "settings": Page.settings, "session": Page.session, "pool": Page.pool, "permissions": Page.permissions, "security": Page.permissions, "addons": Page.addons, "safety": Page.safety, "focus": Page.focus, "cleanup": Page.cleanup, "profile": Page.profile, "connectors": Page.connectors, "people": Page.people, "map": Page.map][UserDefaults.standard.string(forKey: "startPage") ?? ""] ?? .pool
 
@@ -930,17 +932,33 @@ struct MainWindow: View {
 						.tag(Page.people)
 					Label("Security", systemImage: "lock.shield")
 						.tag(Page.permissions)
-					Label("Add-ons", systemImage: "puzzlepiece.extension")
-						.tag(Page.addons)
-					Label("Safety", systemImage: "checkmark.shield")
-						.padding(.leading, 14)
-						.tag(Page.safety)
-					Label("Focus", systemImage: "moon.zzz")
-						.padding(.leading, 14)
-						.tag(Page.focus)
-					Label("Cleanup", systemImage: "sparkles")
-						.padding(.leading, 14)
-						.tag(Page.cleanup)
+					HStack(spacing: 4) {
+						Label("Add-ons", systemImage: "puzzlepiece.extension")
+						Spacer()
+						Button { withAnimation(.easeInOut(duration: 0.15)) { addonsFolded.toggle() } } label: {
+							Image(systemName: addonsFolded ? "chevron.right" : "chevron.down")
+								.font(.system(size: 11, weight: .semibold))
+								.frame(width: 22, height: 18)
+								.background(RoundedRectangle(cornerRadius: 5).fill(Color.primary.opacity(hoverAddons ? 0.08 : 0)))
+						}
+						.buttonStyle(.plain)
+						.foregroundStyle(.secondary)
+						.opacity(hoverAddons ? 1 : 0)
+						.help(addonsFolded ? "Show the add-ons" : "Hide the add-ons")
+					}
+					.onHover { hoverAddons = $0 }
+					.tag(Page.addons)
+					if !addonsFolded || [Page.safety, .focus, .cleanup].contains(page) {
+						Label("Safety", systemImage: "checkmark.shield")
+							.padding(.leading, 14)
+							.tag(Page.safety)
+						Label("Focus", systemImage: "moon.zzz")
+							.padding(.leading, 14)
+							.tag(Page.focus)
+						Label("Cleanup", systemImage: "sparkles")
+							.padding(.leading, 14)
+							.tag(Page.cleanup)
+					}
 				}
 			}
 			.listStyle(.sidebar)
