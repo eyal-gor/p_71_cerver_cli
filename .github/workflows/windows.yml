@@ -29,7 +29,7 @@ jobs:
           New-Item -ItemType Directory -Force dist | Out-Null
           $LD = "-X github.com/eyal-gor/p_71_cerver_cli/internal/version.Version=1.0.0-test"
           go build -ldflags "$LD" -o dist/cerver-windows-amd64.exe ./cmd/cerver
-          go build -ldflags "$LD -H=windowsgui" -o dist/Cerver-windows-amd64.exe ./cmd/cerverapp
+          go build -ldflags "$LD -H=windowsgui" -o dist/CerverApp-windows-amd64.exe ./cmd/cerverapp
           go test ./cmd/
           Get-ChildItem dist -Filter *.exe | ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)" } | Set-Content dist/SHA256SUMS
           Get-Content dist/SHA256SUMS

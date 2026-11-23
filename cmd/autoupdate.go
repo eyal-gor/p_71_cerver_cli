@@ -243,7 +243,7 @@ func updateApp(ctx context.Context, v string) error {
 	if runtime.GOOS == "windows" {
 		// A running Cerver.exe can be renamed but not overwritten; replaceFile
 		// moves it aside. The app sees its file changed and restarts itself.
-		data, err := releaseAsset(ctx, v, "Cerver-windows-"+runtime.GOARCH+".exe")
+		data, err := releaseAsset(ctx, v, "CerverApp-windows-"+runtime.GOARCH+".exe")
 		if err != nil {
 			return err
 		}
