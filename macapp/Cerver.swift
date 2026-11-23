@@ -777,6 +777,7 @@ struct MainWindow: View {
 	@ObservedObject var m: Model
 	@StateObject private var session = SessionModel()
 	@StateObject private var apps = AppsModel()
+	@StateObject private var nav = SectionNav()
 	@AppStorage("poolFolded") private var poolFolded = false
 	@State private var hoverPool = false
 	// `-startPage thisMac` on launch opens that page (for screenshots).
@@ -801,6 +802,26 @@ struct MainWindow: View {
 	}
 
 	// MARK: Sidebar
+
+	/// The open computer's parts, indented under it. Click to scroll there;
+	/// the one you're reading is highlighted as you scroll.
+	@ViewBuilder var sectionRows: some View {
+		ForEach(Tab.page) { t in
+			Button { nav.go(t) } label: {
+				Text(t.rawValue)
+					.font(.system(size: 12, weight: nav.current == t ? .semibold : .regular))
+					.foregroundStyle(nav.current == t ? Color.primary : Color.secondary)
+					.frame(maxWidth: .infinity, alignment: .leading)
+					.padding(.leading, 44).padding(.vertical, 1)
+					.overlay(alignment: .leading) {
+						Rectangle().fill(nav.current == t ? Color.accentColor : Color.primary.opacity(0.12))
+							.frame(width: 2).padding(.leading, 34)
+					}
+					.contentShape(Rectangle())
+			}
+			.buttonStyle(.plain)
+		}
+	}
 
 	var sidebar: some View {
 		VStack(spacing: 0) {
@@ -847,6 +868,7 @@ struct MainWindow: View {
 						sidebarRow(name: c.name, dot: c.isThisMac ? thisMacDot : computerDot(c), icon: c.icon, you: c.isThisMac)
 							.padding(.leading, 14)
 							.tag(c.isThisMac ? Page.thisMac : Page.computer(c.id))
+						if page == (c.isThisMac ? Page.thisMac : Page.computer(c.id)) { sectionRows }
 					}
 					if !m.computers.contains(where: { $0.isThisMac }) {
 						sidebarRow(name: m.relayName, dot: thisMacDot, icon: "laptopcomputer", you: true)
@@ -871,6 +893,7 @@ struct MainWindow: View {
 				}
 			}
 			.listStyle(.sidebar)
+			.onChange(of: page) { _ in nav.current = .overview }
 			Button { page = .settings } label: {
 				Label("Settings", systemImage: "gearshape")
 					.font(.system(size: 13))
@@ -986,9 +1009,9 @@ struct MainWindow: View {
 			case .people: PeoplePage(m: m)
 			case .pool: PoolPage(m: m, open: { page = $0 })
 			case .permissions: PermissionsPage(m: m)
-			case .thisMac: ThisMacPage(m: m)
+			case .thisMac: ThisMacPage(m: m, nav: nav)
 			case .computer(let id):
-				if let c = m.computers.first(where: { $0.id == id }) { ComputerPage(m: m, c: c) } else { PoolPage(m: m, open: { page = $0 }) }
+				if let c = m.computers.first(where: { $0.id == id }) { ComputerPage(m: m, c: c, nav: nav) } else { PoolPage(m: m, open: { page = $0 }) }
 			case .add: AddPage(m: m)
 			case .settings: SettingsPage(m: m)
 			case .profile: ProfilePage(m: m)
@@ -1011,6 +1034,7 @@ struct PageLayout<Content: View>: View {
 
 	var body: some View {
 		ScrollView {
+			ScrollViewReader { proxy in
 			VStack(alignment: .leading, spacing: 22) {
 				VStack(alignment: .leading, spacing: 6) {
 					HStack(spacing: 8) {
@@ -1028,6 +1052,75 @@ struct PageLayout<Content: View>: View {
 			.padding(.horizontal, 40)
 			.padding(.vertical, 36)
 			.frame(maxWidth: .infinity)
+			.environment(\.pageScroller, PageScroller(proxy: proxy))
+			}
+		}
+		.coordinateSpace(name: "page")
+	}
+}
+
+/// Lets a section list inside a page scroll the page to one of its parts.
+struct PageScroller { var proxy: ScrollViewProxy? }
+private struct PageScrollerKey: EnvironmentKey { static let defaultValue = PageScroller(proxy: nil) }
+extension EnvironmentValues {
+	var pageScroller: PageScroller {
+		get { self[PageScrollerKey.self] }
+		set { self[PageScrollerKey.self] = newValue }
+	}
+}
+
+/// Which part of a computer's page is on screen, shared with the sidebar.
+@MainActor final class SectionNav: ObservableObject {
+	@Published var current: Tab = .overview
+	@Published var jump: Tab?
+	func go(_ t: Tab) { current = t; jump = t }
+}
+
+private struct SectionTops: PreferenceKey {
+	static var defaultValue: [Tab: CGFloat] = [:]
+	static func reduce(value: inout [Tab: CGFloat], nextValue: () -> [Tab: CGFloat]) { value.merge(nextValue()) { $1 } }
+}
+
+/// A computer's parts one after another on a single page. Reports which one is
+/// at the top while you scroll, and scrolls to one when the sidebar asks.
+struct SectionedPage<Body: View>: View {
+	@ObservedObject var nav: SectionNav
+	@ViewBuilder let part: (Tab) -> Body
+	@Environment(\.pageScroller) private var scroller
+	@State private var jumping = false
+
+	var body: some View {
+		VStack(alignment: .leading, spacing: 34) {
+			ForEach(Tab.page) { t in
+				VStack(alignment: .leading, spacing: 12) {
+					Text(t.rawValue).font(.system(size: 20, weight: .semibold))
+					part(t)
+				}
+				.id(t)
+				.background(GeometryReader { g in
+					Color.clear.preference(key: SectionTops.self, value: [t: g.frame(in: .named("page")).minY])
+				})
+			}
+			// Room so the last part can reach the top.
+			Color.clear.frame(height: 320)
+		}
+		.onPreferenceChange(SectionTops.self) { tops in
+			guard !jumping else { return }
+			let reading = Tab.page.last(where: { (tops[$0] ?? .infinity) <= 90 }) ?? .overview
+			if nav.current != reading { nav.current = reading }
+		}
+		.onChange(of: nav.jump) { t in
+			guard let t = t else { return }
+			jumping = true
+			withAnimation(.easeInOut(duration: 0.25)) { scroller.proxy?.scrollTo(t, anchor: .top) }
+			nav.jump = nil
+			DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { jumping = false }
+		}
+		.onAppear {
+			// `-startTab Software` opens there (for screenshots).
+			if let s = UserDefaults.standard.string(forKey: "startTab"), let t = Tab(rawValue: s) {
+				DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { nav.go(t) }
+			}
 		}
 	}
 }
@@ -1506,8 +1599,10 @@ struct PoolPage: View {
 // MARK: Tabs for a computer's page
 
 enum Tab: String, CaseIterable, Identifiable {
-	case overview = "Overview", agents = "Agents", network = "Network", software = "Provisioning", hardware = "Hardware", settings = "Settings"
+	case overview = "Overview", agents = "Agents", network = "Network", software = "Software", hardware = "Hardware", settings = "Settings"
 	var id: String { rawValue }
+	/// The parts of a computer's page, top to bottom.
+	static let page: [Tab] = [.overview, .agents, .network, .software, .hardware]
 }
 
 /// Segmented tabs under the title (like System Settings), only the ones given.
@@ -1534,8 +1629,7 @@ func logRow(_ label: String, _ path: String) -> some View {
 /// This Mac: the two switches up front; details in tabs.
 struct ThisMacPage: View {
 	@ObservedObject var m: Model
-	// `-startTab Settings` opens that tab (for screenshots).
-	@State private var tab: Tab = Tab(rawValue: UserDefaults.standard.string(forKey: "startTab") ?? "") ?? .overview
+	@ObservedObject var nav: SectionNav
 	@State private var editing = false
 	@State private var newName = ""
 	@State private var renaming = false
@@ -1545,18 +1639,18 @@ struct ThisMacPage: View {
 
 	var body: some View {
 		PageLayout(title: me?.name ?? m.relayName, subtitle: "This Mac", rename: me?.pool == nil ? nil : { renaming = true }) {
-			Tabs(tab: $tab, tabs: [.overview, .agents, .network, .software, .hardware])
 			if case .failed(let why) = m.phase { problem(why) }
 			if case .failed(let why) = m.relay { problem(why) }
-			switch tab {
-			case .overview: overview
-			case .agents: agents
-			case .network: network
-			case .software:
-				VMSection(vm: vm, reported: nil)
-				SoftwareSection(spec: me?.spec)
-			case .hardware: SpecSection(spec: me?.spec, showTitle: false)
-			case .settings: EmptyView()
+			SectionedPage(nav: nav) { t in
+				switch t {
+				case .overview: overview
+				case .agents: agents
+				case .network: network
+				case .software:
+					SoftwareSection(spec: me?.spec)
+					VMSection(vm: vm, reported: nil)
+				case .hardware, .settings: SpecSection(spec: me?.spec, showTitle: false)
+				}
 			}
 		}
 		.sheet(isPresented: $renaming) { RenameSheet(m: m, computeID: me?.pool?.compute_id ?? "", current: me?.name ?? m.relayName, shown: $renaming) }
@@ -1678,22 +1772,23 @@ struct ThisMacPage: View {
 struct ComputerPage: View {
 	@ObservedObject var m: Model
 	let c: Computer
-	@State private var tab: Tab = .overview
+	@ObservedObject var nav: SectionNav
 	@State private var renaming = false
 
 	var peer: NetPeer? { m.status?.peers.first { $0.ip == c.net?.ip } }
 
 	var body: some View {
 		PageLayout(title: c.name, subtitle: subtitle, rename: c.pool == nil ? nil : { renaming = true }) {
-			Tabs(tab: $tab, tabs: [.overview, .agents, .network, .software, .hardware])
-			switch tab {
-			case .overview: overview
-			case .agents: agents
-			case .network: network
-			case .software:
-				VMSection(vm: nil, reported: c.spec?.provisioning?.vm)
-				SoftwareSection(spec: c.spec)
-			case .hardware, .settings: SpecSection(spec: c.spec, showTitle: false)
+			SectionedPage(nav: nav) { t in
+				switch t {
+				case .overview: overview
+				case .agents: agents
+				case .network: network
+				case .software:
+					SoftwareSection(spec: c.spec)
+					VMSection(vm: nil, reported: c.spec?.provisioning?.vm)
+				case .hardware, .settings: SpecSection(spec: c.spec, showTitle: false)
+				}
 			}
 		}
 		.id(c.id)  // a different computer starts on Overview
@@ -3371,8 +3466,8 @@ struct VMSection: View {
 
 	var body: some View {
 		VStack(alignment: .leading, spacing: 8) {
-			Text("Local VM").font(.system(size: 15, weight: .semibold)).padding(.top, 6)
-			Text("A small Linux computer inside this Mac, made with Apple's own container tool. An agent there sees only the folder it works in, and can install anything without touching the Mac.")
+			Text("Provisioning").font(.system(size: 15, weight: .semibold)).padding(.top, 6)
+			Text("Local VM: a small Linux computer inside this Mac, made with Apple's own container tool. An agent there sees only the folder it works in, and can install anything without touching the Mac.")
 				.font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
 			if let vm = vm { ThisMacVM(vm: vm) } else { remote }
 		}
