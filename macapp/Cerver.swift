@@ -137,6 +137,12 @@ enum Phase: Equatable {
 
 @MainActor
 final class Model: ObservableObject {
+	/// Search computers by name (sidebar and Compute pool).
+	@Published var search = UserDefaults.standard.string(forKey: "startSearch") ?? ""  // `-startSearch mini` for screenshots
+	var shown: [Computer] {
+		let q = search.trimmingCharacters(in: .whitespaces)
+		return q.isEmpty ? computers : computers.filter { $0.name.localizedCaseInsensitiveContains(q) }
+	}
 	@Published var status: NetStatus?
 	@Published var phase: Phase = .off
 	@Published var openAtLogin = SMAppService.mainApp.status == .enabled
@@ -801,6 +807,17 @@ struct MainWindow: View {
 		}
 	}
 
+	/// Hand a task to an agent on a computer and show the conversation (Ask Compute Pool).
+	var askAgent: AskAgent {
+		AskAgent { prompt, name, isThisMac in
+			session.reset()
+			session.cli = "claude"
+			session.computer = isThisMac ? "" : name
+			session.send(prompt, on: isThisMac ? m.relayName : name)
+			page = .session
+		}
+	}
+
 	// MARK: Sidebar
 
 	/// The open computer's parts, indented under it. Click to scroll there;
@@ -841,6 +858,9 @@ struct MainWindow: View {
 			.padding(.top, 6)
 			.padding(.bottom, 10)
 
+			SearchField(text: $m.search, prompt: "Search computers")
+				.padding(.horizontal, 12).padding(.bottom, 6)
+
 			List(selection: $page) {
 				Section("Cerver Compute") {
 					HStack(spacing: 4) {
@@ -864,7 +884,7 @@ struct MainWindow: View {
 					Label("Ask Compute Pool", systemImage: "bubble.left.and.text.bubble.right")
 						.padding(.leading, 14)
 						.tag(Page.session)
-					ForEach(m.computers.filter { !$0.isPhone }) { c in
+					ForEach(m.shown.filter { !$0.isPhone }) { c in
 						sidebarRow(name: c.name, dot: c.isThisMac ? thisMacDot : computerDot(c), icon: c.icon, you: c.isThisMac)
 							.padding(.leading, 14)
 							.tag(c.isThisMac ? Page.thisMac : Page.computer(c.id))
@@ -1009,9 +1029,9 @@ struct MainWindow: View {
 			case .people: PeoplePage(m: m)
 			case .pool: PoolPage(m: m, open: { page = $0 })
 			case .permissions: PermissionsPage(m: m)
-			case .thisMac: ThisMacPage(m: m, nav: nav)
+			case .thisMac: ThisMacPage(m: m, nav: nav).environment(\.askAgent, askAgent)
 			case .computer(let id):
-				if let c = m.computers.first(where: { $0.id == id }) { ComputerPage(m: m, c: c, nav: nav) } else { PoolPage(m: m, open: { page = $0 }) }
+				if let c = m.computers.first(where: { $0.id == id }) { ComputerPage(m: m, c: c, nav: nav).environment(\.askAgent, askAgent) } else { PoolPage(m: m, open: { page = $0 }) }
 			case .add: AddPage(m: m)
 			case .settings: SettingsPage(m: m)
 			case .profile: ProfilePage(m: m)
@@ -1119,7 +1139,7 @@ struct SectionedPage<Body: View>: View {
 		.onAppear {
 			// `-startTab Software` opens there (for screenshots).
 			if let s = UserDefaults.standard.string(forKey: "startTab"), let t = Tab(rawValue: s) {
-				DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { nav.go(t) }
+				DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { nav.go(t) }
 			}
 		}
 	}
@@ -1390,7 +1410,7 @@ struct PoolPage: View {
 							header("Network")
 						}
 						.padding(.horizontal, 16).padding(.vertical, 10)
-						ForEach(m.computers) { c in
+						ForEach(m.shown) { c in
 							Divider().gridCellColumns(3)
 							GridRow {
 								HStack(spacing: 8) {
@@ -1540,7 +1560,7 @@ struct PoolPage: View {
 						ForEach(all, id: \.self) { h in header(h).gridColumnAlignment(.center) }
 					}
 					.padding(.horizontal, 16).padding(.vertical, 10)
-					ForEach(m.computers) { c in
+					ForEach(m.shown) { c in
 						Divider().gridCellColumns(all.count + 1)
 						GridRow {
 							Text(c.name).font(.system(size: 14, weight: .medium)).lineLimit(1).fixedSize()
@@ -1564,7 +1584,7 @@ struct PoolPage: View {
 	/// What's provisioned on each computer. Set up on each computer's page → Provisioning.
 	var provisioningTable: some View {
 		Card {
-			ForEach(Array(m.computers.enumerated()), id: \.element.id) { n, c in
+			ForEach(Array(m.shown.enumerated()), id: \.element.id) { n, c in
 				if n > 0 { Divider().padding(.leading, 16) }
 				Row(label: c.name + (c.isThisMac ? "  (this Mac)" : ""), note: vmNote(c.spec?.provisioning?.vm)) {
 					Button("Open") { open(c.isThisMac ? .thisMac : .computer(c.id)) }.buttonStyle(.link)
@@ -1647,8 +1667,8 @@ struct ThisMacPage: View {
 				case .agents: agents
 				case .network: network
 				case .software:
+					VMSection(vm: vm, reported: nil, computer: me?.name ?? m.relayName, isThisMac: true)
 					SoftwareSection(spec: me?.spec)
-					VMSection(vm: vm, reported: nil)
 				case .hardware, .settings: SpecSection(spec: me?.spec, showTitle: false)
 				}
 			}
@@ -1785,8 +1805,8 @@ struct ComputerPage: View {
 				case .agents: agents
 				case .network: network
 				case .software:
+					VMSection(vm: nil, reported: c.spec?.provisioning?.vm, computer: c.name, isThisMac: false, online: c.pool?.online == true)
 					SoftwareSection(spec: c.spec)
-					VMSection(vm: nil, reported: c.spec?.provisioning?.vm)
 				case .hardware, .settings: SpecSection(spec: c.spec, showTitle: false)
 				}
 			}
@@ -3463,6 +3483,10 @@ struct VMState: Decodable {
 struct VMSection: View {
 	var vm: VMModel?
 	var reported: VMState?
+	var computer = ""
+	var isThisMac = true
+	var online = true
+	@Environment(\.askAgent) private var ask
 
 	var body: some View {
 		VStack(alignment: .leading, spacing: 8) {
@@ -3470,6 +3494,28 @@ struct VMSection: View {
 			Text("Local VM: a small Linux computer inside this Mac, made with Apple's own container tool. An agent there sees only the folder it works in, and can install anything without touching the Mac.")
 				.font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
 			if let vm = vm { ThisMacVM(vm: vm) } else { remote }
+			if (vm?.state ?? reported)?.supported != false {
+				HStack(spacing: 10) {
+					Button { ask.run(vmSetupPrompt(computer), computer, isThisMac) } label: {
+						Label("Set up with an agent", systemImage: "sparkles")
+					}
+					.disabled(!online)
+					Text("An agent on \(isThisMac ? "this Mac" : computer) installs it, checks it works, and fixes problems on the way. You only type your password when macOS asks\(isThisMac ? "" : " on that computer").")
+						.font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+				}
+				.padding(.top, 4)
+				// What the agent will be told, word for word.
+				DisclosureGroup("See the agent's instructions") {
+					Text(vmSetupPrompt(computer))
+						.font(.system(size: 12, design: .monospaced))
+						.textSelection(.enabled)
+						.frame(maxWidth: .infinity, alignment: .leading)
+						.padding(12)
+						.background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.04)))
+						.padding(.top, 6)
+				}
+				.font(.callout)
+			}
 		}
 	}
 
@@ -3539,4 +3585,51 @@ struct ThisMacVM: View {
 	}
 
 	var done: some View { Image(systemName: "checkmark.circle.fill").foregroundStyle(.green) }
+}
+
+
+/// "Hand this task to an agent on that computer" — set by the main window.
+struct AskAgent { var run: (String, String, Bool) -> Void = { _, _, _ in } }
+private struct AskAgentKey: EnvironmentKey { static let defaultValue = AskAgent() }
+extension EnvironmentValues {
+	var askAgent: AskAgent {
+		get { self[AskAgentKey.self] }
+		set { self[AskAgentKey.self] = newValue }
+	}
+}
+
+/// The agent's instructions for provisioning the local VM. Diligent: verify
+/// every step, fix what fails, retry; never handle a password itself.
+func vmSetupPrompt(_ computer: String) -> String {
+	"""
+	Set up the Cerver local VM on this computer (\(computer)) and make sure it really works. Be diligent: check every step, and when something fails, find out why, fix it and try again. Stop only when it works or you're sure it can't on this computer.
+
+	Work quietly: don't write any message until you're done; then write one short report.
+
+	1. Find cerver: `command -v cerver`, else ~/.cerver/bin/cerver, else /Applications/Cerver.app/Contents/Resources/cerver. Run `cerver vm --json`. If it says `vm` is unknown, run `cerver update` and use the newer one.
+	2. If "supported" is false, stop and report the reason.
+	3. If "installed" is false, run exactly: osascript -e 'do shell script "<full path to cerver> vm install" with administrator privileges'. That opens macOS's own password box on this computer for me. Never ask me for a password and never type one. If I cancel (error -128), stop and say so. On any other error, read it, fix the cause (network, disk space, an earlier half install) and run it again.
+	4. If "running" or "image" is false, run `cerver vm start` (it can take several minutes the first time). If it fails: read `container system logs` if it helps, try `container system stop` then start again, check free disk space (it needs about 5 GB), and retry.
+	5. Verify for real: `/usr/local/bin/container run --rm cerver-agent:1 claude --version` must print a version, and `cerver vm --json` must show "ready": true.
+	6. Report in a few short bullets: what you did, what you checked and its result, anything you fixed, and what's left for me. Usually that's only the Claude sign-in: run `claude setup-token` in Terminal and paste the token in the Cerver app → \(computer) → Software → Provisioning.
+	"""
+}
+
+
+/// A small search box: magnifier, text, clear button.
+struct SearchField: View {
+	@Binding var text: String
+	var prompt: String
+	var body: some View {
+		HStack(spacing: 6) {
+			Image(systemName: "magnifyingglass").font(.system(size: 12)).foregroundStyle(.secondary)
+			TextField(prompt, text: $text).textFieldStyle(.plain).font(.system(size: 13))
+			if !text.isEmpty {
+				Button { text = "" } label: { Image(systemName: "xmark.circle.fill").font(.system(size: 12)) }
+					.buttonStyle(.plain).foregroundStyle(.secondary).help("Clear")
+			}
+		}
+		.padding(.horizontal, 8).padding(.vertical, 5)
+		.background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.06)))
+	}
 }
