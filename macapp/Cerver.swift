@@ -143,6 +143,15 @@ final class Model: ObservableObject {
 		let q = search.trimmingCharacters(in: .whitespaces)
 		return q.isEmpty ? computers : computers.filter { $0.name.localizedCaseInsensitiveContains(q) }
 	}
+	/// Your pool's name (PATCH /v2/pool); nil or "My pool" shows "Compute pool".
+	@Published var poolName: String?
+	var poolTitle: String { poolName.map { $0 == "My pool" ? "Compute pool" : $0 } ?? "Compute pool" }
+	func loadPoolName() {
+		Task { @MainActor in
+			struct P: Decodable { let name: String? }
+			if let d = await gatewayGET("/v2/pool"), let p = try? JSONDecoder().decode(P.self, from: d) { self.poolName = p.name }
+		}
+	}
 	@Published var status: NetStatus?
 	@Published var phase: Phase = .off
 	@Published var openAtLogin = SMAppService.mainApp.status == .enabled
@@ -864,7 +873,7 @@ struct MainWindow: View {
 			List(selection: $page) {
 				Section("Cerver Compute") {
 					HStack(spacing: 4) {
-						Label("Compute pool", systemImage: "server.rack")
+						Label(m.poolTitle, systemImage: "server.rack").lineLimit(1)
 						Spacer()
 						// Fold the computers away; the button shows when the pointer is on the row.
 						Button { withAnimation(.easeInOut(duration: 0.15)) { poolFolded.toggle() } } label: {
@@ -914,6 +923,7 @@ struct MainWindow: View {
 			}
 			.listStyle(.sidebar)
 			.onChange(of: page) { _ in nav.current = .overview }
+			.task { m.loadPoolName() }
 			Button { page = .settings } label: {
 				Label("Settings", systemImage: "gearshape")
 					.font(.system(size: 13))
@@ -1374,9 +1384,10 @@ struct PoolPage: View {
 	@State private var pings: [String: Double] = [:]      // net ip → ms; -1 = no reply
 	@State private var cerverMs: Double?
 	@State private var direct = NetSettings.direct
+	@State private var renamingPool = false
 
 	var body: some View {
-		PageLayout(title: "Compute pool", subtitle: "Every computer your agents can run on, and how they connect.") {
+		PageLayout(title: m.poolTitle, subtitle: "Every computer your agents can run on, and how they connect.", rename: { renamingPool = true }) {
 			HStack {
 				Picker("", selection: $view) {
 					Text("Computers").tag("Computers")
@@ -1476,6 +1487,7 @@ struct PoolPage: View {
 				.font(.callout).foregroundStyle(.secondary)
 
 		}
+		.sheet(isPresented: $renamingPool) { PoolNameSheet(m: m, shown: $renamingPool) }
 		.task { await load() }
 		.task {
 			// Measure every 10 s while the page is open.
@@ -3315,6 +3327,45 @@ struct PeoplePage: View {
 
 /// Renames a computer everywhere you see it (the app, cerver.ai, `cerver pool`).
 /// Its relay keeps its own name, so nothing on the computer changes.
+/// Name your pool: shown in the sidebar, on its page and in invite links.
+struct PoolNameSheet: View {
+	@ObservedObject var m: Model
+	@Binding var shown: Bool
+	@State private var name = ""
+	@State private var saving = false
+	@State private var failed = false
+
+	var body: some View {
+		VStack(alignment: .leading, spacing: 12) {
+			Text("Name your pool").font(.headline)
+			Text("People you invite see this name.").font(.callout).foregroundStyle(.secondary)
+			TextField("e.g. Eyal's computers", text: $name).textFieldStyle(.roundedBorder).frame(width: 300).onSubmit(save)
+			if failed { Text("Couldn't save it. Try again.").font(.callout).foregroundStyle(.red) }
+			HStack {
+				Spacer()
+				if saving { ProgressView().controlSize(.small) }
+				Button("Cancel") { shown = false }.keyboardShortcut(.cancelAction)
+				Button("Save", action: save).keyboardShortcut(.defaultAction)
+					.disabled(name.trimmingCharacters(in: .whitespaces).isEmpty || saving)
+			}
+		}
+		.padding(20)
+		.onAppear { name = m.poolName == "My pool" ? "" : (m.poolName ?? "") }
+	}
+
+	func save() {
+		let n = String(name.trimmingCharacters(in: .whitespaces).prefix(60))
+		guard !n.isEmpty, !saving else { return }
+		saving = true
+		Task {
+			let body = try? JSONSerialization.data(withJSONObject: ["name": n])
+			let ok = await gatewayRequest("PATCH", "/v2/pool", body: body) != nil
+			saving = false
+			if ok { m.poolName = n; shown = false } else { failed = true }
+		}
+	}
+}
+
 struct RenameSheet: View {
 	@ObservedObject var m: Model
 	let computeID: String
