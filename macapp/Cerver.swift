@@ -2010,78 +2010,141 @@ struct PermissionsPage: View {
 	@State private var advanced = false
 
 	var computers: [Computer] { m.computers.filter { !$0.isPhone } }
+	var others: [Computer] { computers.filter { !$0.isThisMac } }
+
+	struct Choice { let id, title, plain, example, icon: String }
+	var choices: [Choice] { [
+		Choice(id: "as_you", title: "Everything you can open",
+		       plain: "The agent works like you at the keyboard: it can open any file you can.",
+		       example: "Handy for \"clean my Desktop\" or \"why is my Mac slow\". Least safe.", icon: "person.fill"),
+		Choice(id: "own_folder", title: "Only the folder it works in",
+		       plain: "The agent sees the project folder it was given, and nothing else of yours.",
+		       example: "Your Documents, Desktop, photos and keys are invisible to it. Good default.", icon: "folder.fill"),
+		Choice(id: "vm", title: "A separate sandbox computer",
+		       plain: "The agent runs in a throwaway Linux computer inside your Mac, with only its folder copied in.",
+		       example: vmState.ready && vmState.signed_in ? "Safest. It can install anything without touching your Mac."
+		                : "Safest. Set it up first: this Mac → Software → Provisioning.", icon: "shippingbox.fill"),
+	] }
 
 	var body: some View {
-		PageLayout(title: "Security", subtitle: "Who can use each computer, and what agents may touch there.") {
-			section("What your agents can touch")
-			Text("Your own agents. Other people's agents are always fenced off from your files.")
-				.font(.callout).foregroundStyle(.secondary)
+		PageLayout(title: "Security", subtitle: "What your agents can see on your computers, and who can use them.") {
+			summary
+
+			section("1. How much of this Mac can your agents see?")
+			Text("Applies to the agents you start (from the app, Claude Code, or another computer). Other people's agents never see your files.")
+				.font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
 			Card {
-				ForEach(Array(computers.enumerated()), id: \.element.id) { n, c in
+				ForEach(Array(choices.enumerated()), id: \.element.id) { n, ch in
 					if n > 0 { Divider().padding(.leading, 16) }
-					Row(label: c.name + (c.isThisMac ? "  (this Mac)" : ""), note: accessNote(c)) {
-						if c.isThisMac {
-							Picker("", selection: Binding(get: { sec.mode }, set: { sec.mode = $0; saveSec() })) {
-								Text("As you").tag("as_you")
-								Text("Own folder only").tag("own_folder")
-								if vmState.ready && vmState.signed_in { Text("In a VM").tag("vm") }
+					let ready = ch.id != "vm" || (vmState.ready && vmState.signed_in)
+					Button { if ready { sec.mode = ch.id; saveSec() } } label: {
+						HStack(alignment: .top, spacing: 12) {
+							Image(systemName: ch.icon).font(.system(size: 16)).frame(width: 22).foregroundStyle(ready ? Color.accentColor : Color.secondary).padding(.top, 2)
+							VStack(alignment: .leading, spacing: 3) {
+								Text(ch.title).font(.system(size: 14, weight: .semibold))
+								Text(ch.plain).font(.callout).fixedSize(horizontal: false, vertical: true)
+								Text(ch.example).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
 							}
-							.pickerStyle(.segmented).labelsHidden().fixedSize()
-						} else {
-							HStack(spacing: 8) {
-								Text("change on that computer").font(.system(size: 11)).foregroundStyle(.tertiary)
-								Text(modeName(c.spec?.agent_access?.mode)).foregroundStyle(.secondary)
-							}
+							Spacer()
+							Image(systemName: sec.mode == ch.id ? "checkmark.circle.fill" : "circle")
+								.font(.system(size: 18)).foregroundStyle(sec.mode == ch.id ? Color.accentColor : Color.secondary.opacity(0.5))
 						}
+						.padding(.horizontal, 16).padding(.vertical, 12).contentShape(Rectangle())
+						.opacity(ready ? 1 : 0.55)
 					}
+					.buttonStyle(.plain)
+				}
+			}
+			if !others.isEmpty {
+				ForEach(others) { c in
+					Text("\(c.name): \(modeTitle(c.spec?.agent_access?.mode)). To change it, open Cerver on \(c.name).")
+						.font(.caption).foregroundStyle(.secondary)
 				}
 			}
 
-			section("Blocked folders")
-			Text("No agent on this Mac can open these, in either mode, even when it acts as you.")
+			section("2. Folders agents may never open")
+			Text("A hard \"no\" for these folders on this Mac, whatever you chose above.")
 				.font(.callout).foregroundStyle(.secondary)
 			Card {
 				if sec.blocked.isEmpty {
-					Row(label: "None yet") { EmptyView() }
+					Row(label: "No folders blocked") { EmptyView() }
 				}
 				ForEach(Array(sec.blocked.enumerated()), id: \.element) { n, f in
 					if n > 0 { Divider().padding(.leading, 16) }
-					Row(label: f) {
-						Button("Remove") { sec.blocked.removeAll { $0 == f }; saveSec() }.buttonStyle(.link)
+					Row(label: folderName(f), note: f) {
+						Button("Allow again") { sec.blocked.removeAll { $0 == f }; saveSec() }.buttonStyle(.link)
 					}
 				}
 			}
 			HStack(spacing: 14) {
 				Button { addFolder() } label: { Label("Block a folder…", systemImage: "plus") }.buttonStyle(.link)
 				ForEach(suggested.filter { !sec.blocked.contains($0) }, id: \.self) { f in
-					Button(f) { sec.blocked.append(f); saveSec() }.buttonStyle(.link).font(.callout)
+					Button("Block " + folderName(f)) { sec.blocked.append(f); saveSec() }.buttonStyle(.link).font(.callout)
 				}
 			}
 			if let e = secError { Text(e).font(.callout).foregroundStyle(.red) }
-			if !(vmState.ready && vmState.signed_in) && vmState.supported {
-				Text("To run agents in a VM, set it up first: This Mac → Provisioning.").font(.caption).foregroundStyle(.secondary)
-			}
-			Text("Applies from the next agent that starts. Enforced by macOS's own sandbox, the one Claude Code and Codex use.")
-				.font(.caption).foregroundStyle(.secondary)
 
-			section("Who can use each computer")
+			section("3. Who can use each computer")
 				.task { vmState = await VMModel.fetch() ?? VMState() }
-			permission("Run agents",
-				"Part of your compute pool: Cerver can start your agents here, as you.") { c in
-				cell(on: c.isThisMac ? (m.relay == .running || m.relay == .starting) : c.pool?.online == true,
-					enabled: c.isThisMac && !relayBusy, remote: !c.isThisMac) { $0 ? m.relayOn() : m.relayOff() }
+			Text("A grey switch belongs to another computer: change it in Cerver on that computer.")
+				.font(.callout).foregroundStyle(.secondary)
+			ForEach(computers) { c in
+				Card {
+					Text(c.name + (c.isThisMac ? "  (this Mac)" : "")).font(.system(size: 15, weight: .semibold))
+						.padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 4)
+					Row(label: "Your agents can run here", note: "Cerver can start Claude or Codex on it for you.") {
+						cell(on: c.isThisMac ? (m.relay == .running || m.relay == .starting) : c.pool?.online == true,
+							enabled: c.isThisMac && !relayBusy, remote: !c.isThisMac) { $0 ? m.relayOn() : m.relayOff() }
+					}
+					Divider().padding(.leading, 16)
+					Row(label: "Your other computers can connect to it", note: "Reach it by name: files, SSH, its screen.") {
+						cell(on: c.isThisMac ? (m.isOn || m.phase == .starting) : c.net?.online == true,
+							enabled: c.isThisMac && !m.busy, remote: !c.isThisMac) { $0 ? m.turnOn() : m.turnOff() }
+					}
+					Divider().padding(.leading, 16)
+					Row(label: "People you invited can run agents here", note: "In a fenced-off space; they never see your files.") {
+						cell(on: c.pool?.shared == true,
+							enabled: c.pool?.compute_id.map { !m.sharing.contains($0) } ?? false, remote: false) { m.setShared(c, $0) }
+					}
+				}
 			}
-			permission("Private network",
-				"Your other computers can reach it: SSH, files, its screen.") { c in
-				cell(on: c.isThisMac ? (m.isOn || m.phase == .starting) : c.net?.online == true,
-					enabled: c.isThisMac && !m.busy, remote: !c.isThisMac) { $0 ? m.turnOn() : m.turnOff() }
-			}
+			Text("Rules apply from the next agent that starts, enforced by macOS's own sandbox (the one Claude Code and Codex use).")
+				.font(.caption).foregroundStyle(.secondary)
+		}
+	}
 
-			permission("People you invite",
-				"Their agents can run here, fenced off from your files. Off unless you turn it on.") { c in
-				cell(on: c.pool?.shared == true,
-					enabled: c.pool?.compute_id.map { !m.sharing.contains($0) } ?? false, remote: false) { m.setShared(c, $0) }
+	/// One line: where this Mac stands.
+	var summary: some View {
+		let shared = computers.first { $0.isThisMac }?.pool?.shared == true
+		return HStack(spacing: 10) {
+			Image(systemName: sec.mode == "as_you" ? "exclamationmark.shield" : "checkmark.shield.fill")
+				.font(.system(size: 22)).foregroundStyle(sec.mode == "as_you" ? Color.orange : Color.green)
+			VStack(alignment: .leading, spacing: 2) {
+				Text("On this Mac, agents see: \(modeTitle(sec.mode).lowercased()).").font(.system(size: 14, weight: .medium))
+				Text("\(sec.blocked.count) blocked folder\(sec.blocked.count == 1 ? "" : "s") · \(shared ? "shared with people you invited" : "not shared with anyone")")
+					.font(.callout).foregroundStyle(.secondary)
 			}
+		}
+		.padding(14)
+		.frame(maxWidth: .infinity, alignment: .leading)
+		.background(RoundedRectangle(cornerRadius: 12).fill(Color.primary.opacity(0.04)))
+	}
+
+	func modeTitle(_ m: String?) -> String {
+		switch m {
+		case "own_folder": return "Only the folder it works in"
+		case "vm": return "A separate sandbox computer"
+		case "as_you": return "Everything you can open"
+		default: return "not reported yet"
+		}
+	}
+
+	func folderName(_ f: String) -> String {
+		switch f {
+		case "~/.ssh": return "SSH keys"
+		case "~/Documents": return "Documents"
+		case "~/Desktop": return "Desktop"
+		default: return (f as NSString).lastPathComponent
 		}
 	}
 
