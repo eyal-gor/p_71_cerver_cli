@@ -3792,13 +3792,14 @@ struct SearchField: View {
 /// last said it applied (GET /v2/net).
 struct NetNodeAddons: Decodable, Identifiable {
 	struct Wanted: Decodable {
-		struct Focus: Decodable { let sites: [String]; let policy: String; let until: Double? }
+		struct Focus: Decodable { let sites: [String]; let policy: String; let until: Double?; let rules: [FocusRule]? }
 		let level: String
 		let focus: Focus
 		let set_at: String?
 	}
 	struct Applied: Decodable {
-		struct Focus: Decodable { let policy: String?; let sites: [String]?; let blocking: Bool?; let until: Double? }
+		struct Rule: Decodable { let name: String?; let policy: String; let sites: [String]; let on: Bool }
+		struct Focus: Decodable { let policy: String?; let sites: [String]?; let blocking: Bool?; let until: Double?; let rules: [Rule]? }
 		let level: String?
 		let focus: Focus?
 		let at: Double?
@@ -3810,6 +3811,23 @@ struct NetNodeAddons: Decodable, Identifiable {
 	let addons: Wanted?
 	let addons_applied: Applied?
 	var id: String { ip }
+}
+
+/// One Focus rule: sites, and when they're blocked. A computer can have several.
+struct FocusRule: Codable, Equatable, Identifiable {
+	struct Entry: Codable, Equatable, Hashable { var at: String; var block: Bool }
+	var name: String?
+	var sites: [String]
+	var policy: String
+	var until: Double?
+	var schedule: [Entry]?
+	var days: [Int]?
+	var id: String { name ?? "Focus" }
+
+	/// Work hours 08:00–18:00, every day, with the last 5 minutes of each hour open.
+	static var workdayWithBreaks: [Entry] {
+		(8...17).flatMap { h in [Entry(at: String(format: "%02d:00", h), block: true), Entry(at: String(format: "%02d:55", h), block: false)] }
+	}
 }
 
 /// Add-ons for every computer on your network (GET /v2/net). You choose per
@@ -3834,13 +3852,28 @@ struct NetNodeAddons: Decodable, Identifiable {
 	func sites(_ n: NetNodeAddons) -> [String] { n.addons?.focus.sites ?? n.addons_applied?.focus?.sites ?? [] }
 	func policy(_ n: NetNodeAddons) -> String { n.addons?.focus.policy ?? n.addons_applied?.focus?.policy ?? "off" }
 
-	func save(_ n: NetNodeAddons, level: String? = nil, sites: [String]? = nil, policy: String? = nil) {
-		let p = policy ?? self.policy(n)
-		var focus: [String: Any] = ["sites": sites ?? self.sites(n), "policy": p]
-		if p == "until" {
-			focus["until"] = Int(policy == "until" ? Date().timeIntervalSince1970 + 3600 : (n.addons?.focus.until ?? Date().timeIntervalSince1970 + 3600))
+	/// The computer's Focus rules (what you chose; else what it reports).
+	func rules(_ n: NetNodeAddons) -> [FocusRule] {
+		if let f = n.addons?.focus {
+			if let r = f.rules, !r.isEmpty { return r }
+			return [FocusRule(name: nil, sites: f.sites, policy: f.policy, until: f.until)]
 		}
-		let body = try? JSONSerialization.data(withJSONObject: ["level": level ?? self.level(n), "focus": focus])
+		if let r = n.addons_applied?.focus?.rules, !r.isEmpty {
+			return r.map { FocusRule(name: $0.name, sites: $0.sites, policy: $0.policy) }
+		}
+		return [FocusRule(name: nil, sites: [], policy: "off")]
+	}
+
+	func saveRules(_ n: NetNodeAddons, _ rules: [FocusRule]) {
+		guard let r = try? JSONEncoder().encode(rules), let list = try? JSONSerialization.jsonObject(with: r) else { return }
+		send(n, ["focus": ["rules": list]])
+	}
+
+	/// Safety only (Focus stays as it is).
+	func save(_ n: NetNodeAddons, level: String) { send(n, ["level": level]) }
+
+	private func send(_ n: NetNodeAddons, _ obj: [String: Any]) {
+		let body = try? JSONSerialization.data(withJSONObject: obj)
 		saving.insert(n.ip)
 		Task {
 			let ok = await gatewayRequest("PUT", "/v2/net/nodes/\(n.ip)/addons", body: body) != nil
@@ -3855,8 +3888,12 @@ struct NetNodeAddons: Decodable, Identifiable {
 		if (n.os ?? "darwin") != "darwin" { return ("Macs only for now", .secondary) }
 		if !n.online { return ("Offline · applies when it's back", .secondary) }
 		guard let a = n.addons_applied else { return ("Needs a Cerver update (automatic, within the hour)", .orange) }
-		if let w = n.addons, a.level != w.level || a.focus?.policy != w.focus.policy || Set(a.focus?.sites ?? []) != Set(w.focus.sites) {
-			return ("Applying…", .orange)
+		if let w = n.addons {
+			let want = rules(n).map { "\($0.name ?? "")|\($0.policy)|\(Set($0.sites).sorted())" }
+			let got = (a.focus?.rules ?? []).map { "\($0.name ?? "")|\($0.policy)|\(Set($0.sites).sorted())" }
+			if a.level != w.level || (!got.isEmpty && want != got) || (got.isEmpty && (a.focus?.policy != w.focus.policy || Set(a.focus?.sites ?? []) != Set(w.focus.sites))) {
+				return ("Applying…", .orange)
+			}
 		}
 		return ((a.focus?.blocking ?? false) ? "In effect · blocking now" : "In effect", .green)
 	}
@@ -3887,7 +3924,7 @@ struct AddonsHome: View {
 				     -1, .cleanup)
 				Divider().padding(.leading, 16)
 				item("moon.zzz", "Focus", "Block distracting sites like Facebook, Instagram and YouTube: always, in work hours, or for an hour.",
-				     a.nodes.filter { a.policy($0) != "off" && !a.sites($0).isEmpty }.count, .focus)
+				     a.nodes.filter { a.rules($0).contains { $0.policy != "off" && !$0.sites.isEmpty } }.count, .focus)
 			}
 		}
 		.task { await a.load() }
@@ -3960,8 +3997,10 @@ struct FocusPage: View {
 	@ObservedObject var m: Model
 	@ObservedObject var a: AddonsModel
 	@State private var custom: [String: String] = [:]
+	@State private var names: [String: String] = [:]
+	@State private var newTime = ""
 	let groups: [(String, String)] = [("facebook", "Facebook"), ("instagram", "Instagram"), ("youtube", "YouTube"), ("x", "X"), ("tiktok", "TikTok"), ("reddit", "Reddit"), ("netflix", "Netflix"), ("linkedin", "LinkedIn")]
-	let policies: [(String, String)] = [("off", "Off"), ("work_hours", "Work hours"), ("until", "For an hour"), ("always", "Always")]
+	let policies: [(String, String)] = [("off", "Off"), ("work_hours", "Work hours"), ("until", "For an hour"), ("always", "Always"), ("schedule", "Schedule")]
 
 	var body: some View {
 		PageLayout(title: "Focus", subtitle: "Block distracting sites. Each computer has its own sites and its own schedule.") {
@@ -3975,8 +4014,9 @@ struct FocusPage: View {
 	}
 
 	func card(_ n: NetNodeAddons) -> some View {
-		let sites = a.sites(n)
 		let mac = (n.os ?? "darwin") == "darwin"
+		let rules = a.rules(n)
+		let on = Dictionary((n.addons_applied?.focus?.rules ?? []).map { ($0.name ?? "", $0.on) }, uniquingKeysWith: { x, _ in x })
 		return Card {
 			HStack {
 				Text(n.name + (n.ip == m.status?.ip ? "  (this Mac)" : "")).font(.system(size: 15, weight: .semibold))
@@ -3985,42 +4025,135 @@ struct FocusPage: View {
 				if a.saving.contains(n.ip) { ProgressView().controlSize(.small) }
 				AddonStatus(text: st.0, color: st.1)
 			}
-			.padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 10)
-			VStack(alignment: .leading, spacing: 10) {
-				HStack {
-					Text("When").font(.system(size: 13, weight: .medium)).frame(width: 46, alignment: .leading)
-					Picker("", selection: Binding(get: { a.policy(n) }, set: { a.save(n, policy: $0) })) {
-						ForEach(policies, id: \.0) { Text($0.1).tag($0.0) }
-					}
-					.pickerStyle(.segmented).labelsHidden()
-				}
-				if a.policy(n) == "until", let u = n.addons?.focus.until, u > Date().timeIntervalSince1970 {
-					Text("Blocked until \(Date(timeIntervalSince1970: u).formatted(date: .omitted, time: .shortened)).").font(.caption).foregroundStyle(.secondary)
-				}
-				Text("Sites").font(.system(size: 13, weight: .medium))
-				FlowChips(items: groups + sites.filter { s in !groups.contains { $0.0 == s } }.map { ($0, $0) }, on: Set(sites)) { id in
-					var s = sites
-					if let i = s.firstIndex(of: id) { s.remove(at: i) } else { s.append(id) }
-					a.save(n, sites: s)
-				}
-				HStack {
-					TextField("Another site, e.g. news.ycombinator.com", text: Binding(get: { custom[n.ip] ?? "" }, set: { custom[n.ip] = $0 }))
-						.textFieldStyle(.roundedBorder).onSubmit { addCustom(n) }
-					Button("Add") { addCustom(n) }.disabled((custom[n.ip] ?? "").trimmingCharacters(in: .whitespaces).isEmpty)
+			.padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 6)
+			ForEach(Array(rules.enumerated()), id: \.offset) { i, r in
+				Divider().padding(.leading, 16)
+				ruleView(n, rules, i, r, blockingNow: on[r.name ?? ""] ?? false)
+					.padding(.horizontal, 16).padding(.vertical, 12)
+			}
+			Divider().padding(.leading, 16)
+			Button { a.saveRules(n, rules + [FocusRule(name: "Rule \(rules.count + 1)", sites: [], policy: "off")]) } label: {
+				Label("Add a rule", systemImage: "plus")
+			}
+			.buttonStyle(.link).padding(.horizontal, 16).padding(.vertical, 10)
+		}
+		.disabled(!mac)
+	}
+
+	@ViewBuilder func ruleView(_ n: NetNodeAddons, _ rules: [FocusRule], _ i: Int, _ r: FocusRule, blockingNow: Bool) -> some View {
+		let key = "\(n.ip)#\(i)"
+		let set: (FocusRule) -> Void = { nr in var all = rules; all[i] = nr; a.saveRules(n, all) }
+		VStack(alignment: .leading, spacing: 10) {
+			HStack {
+				TextField("Rule name", text: Binding(get: { names[key] ?? (r.name ?? "Focus") }, set: { names[key] = $0 }))
+					.textFieldStyle(.plain).font(.system(size: 14, weight: .semibold)).frame(maxWidth: 220)
+					.onSubmit { var nr = r; nr.name = names[key]; set(nr) }
+				if blockingNow { AddonStatus(text: "blocking now", color: .green) }
+				Spacer()
+				if rules.count > 1 {
+					Button("Remove rule") { var all = rules; all.remove(at: i); a.saveRules(n, all) }.buttonStyle(.link).font(.caption)
 				}
 			}
-			.padding(.horizontal, 16).padding(.bottom, 14)
-			.disabled(!mac)
+			HStack {
+				Text("When").font(.system(size: 13, weight: .medium)).frame(width: 46, alignment: .leading)
+				Picker("", selection: Binding(get: { r.policy }, set: { p in
+					var nr = r; nr.policy = p
+					nr.until = p == "until" ? Date().timeIntervalSince1970 + 3600 : nil
+					if p == "schedule" && (nr.schedule ?? []).isEmpty { nr.schedule = FocusRule.workdayWithBreaks }
+					set(nr)
+				})) {
+					ForEach(policies, id: \.0) { Text($0.1).tag($0.0) }
+				}
+				.pickerStyle(.segmented).labelsHidden()
+			}
+			if r.policy == "until", let u = r.until, u > Date().timeIntervalSince1970 {
+				Text("Blocked until \(Date(timeIntervalSince1970: u).formatted(date: .omitted, time: .shortened)).").font(.caption).foregroundStyle(.secondary)
+			}
+			if r.policy == "schedule" { scheduleEditor(r, set) }
+			FlowChips(items: groups + r.sites.filter { s in !groups.contains { $0.0 == s } }.map { ($0, $0) }, on: Set(r.sites)) { id in
+				var nr = r
+				if let k = nr.sites.firstIndex(of: id) { nr.sites.remove(at: k) } else { nr.sites.append(id) }
+				set(nr)
+			}
+			HStack {
+				TextField("Another site, e.g. lichess.org", text: Binding(get: { custom[key] ?? "" }, set: { custom[key] = $0 }))
+					.textFieldStyle(.roundedBorder).onSubmit { addCustom(key, r, set) }
+				Button("Add") { addCustom(key, r, set) }.disabled((custom[key] ?? "").trimmingCharacters(in: .whitespaces).isEmpty)
+			}
 		}
 	}
 
-	func addCustom(_ n: NetNodeAddons) {
-		let d = (custom[n.ip] ?? "").trimmingCharacters(in: .whitespaces).lowercased()
+	/// Times of day: from each one on, the sites are blocked or open.
+	@ViewBuilder func scheduleEditor(_ r: FocusRule, _ set: @escaping (FocusRule) -> Void) -> some View {
+		let entries = (r.schedule ?? []).sorted { $0.at < $1.at }
+		VStack(alignment: .leading, spacing: 6) {
+			HStack(spacing: 6) {
+				Text("Days").font(.system(size: 13, weight: .medium)).frame(width: 46, alignment: .leading)
+				ForEach(Array(["S", "M", "T", "W", "T", "F", "S"].enumerated()), id: \.offset) { d, l in
+					let all = (r.days ?? []).isEmpty
+					let on = all || (r.days ?? []).contains(d)
+					Button(l) {
+						var days = all ? Array(0...6) : (r.days ?? [])
+						if let k = days.firstIndex(of: d) { days.remove(at: k) } else { days.append(d) }
+						var nr = r; nr.days = days.count == 7 ? nil : days.sorted(); set(nr)
+					}
+					.buttonStyle(.plain).font(.system(size: 12, weight: .semibold))
+					.frame(width: 24, height: 22)
+					.background(RoundedRectangle(cornerRadius: 5).fill(on ? Color.accentColor.opacity(0.2) : Color.primary.opacity(0.06)))
+					.foregroundStyle(on ? Color.accentColor : Color.secondary)
+				}
+			}
+			Text(scheduleSummary(entries)).font(.caption).foregroundStyle(.secondary)
+			LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: 8, alignment: .leading)], alignment: .leading, spacing: 6) {
+				ForEach(entries, id: \.self) { e in
+					HStack(spacing: 4) {
+						Text(e.at).font(.system(size: 12, design: .monospaced))
+						Button(e.block ? "block" : "open") {
+							var nr = r; nr.schedule = entries.map { $0 == e ? FocusRule.Entry(at: e.at, block: !e.block) : $0 }; set(nr)
+						}
+						.buttonStyle(.plain).font(.system(size: 12, weight: .medium))
+						.foregroundStyle(e.block ? Color.red : Color.green)
+						Button { var nr = r; nr.schedule = entries.filter { $0 != e }; set(nr) } label: { Image(systemName: "xmark").font(.system(size: 9)) }
+							.buttonStyle(.plain).foregroundStyle(.secondary)
+					}
+					.padding(.horizontal, 8).padding(.vertical, 4)
+					.background(Capsule().fill(Color.primary.opacity(0.05)))
+				}
+			}
+			HStack {
+				TextField("HH:MM", text: $newTime).textFieldStyle(.roundedBorder).frame(width: 70)
+				Button("Block from then") { addTime(r, entries, true, set) }
+				Button("Open from then") { addTime(r, entries, false, set) }
+				Spacer()
+				Button("Workday with breaks") { var nr = r; nr.schedule = FocusRule.workdayWithBreaks; set(nr) }.buttonStyle(.link).font(.caption)
+					.help("08:00–18:00, with the last 5 minutes of each hour open")
+			}
+		}
+		.padding(10)
+		.background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.03)))
+	}
+
+	func scheduleSummary(_ e: [FocusRule.Entry]) -> String {
+		guard let first = e.first(where: { $0.block }), let last = e.last(where: { !$0.block }) else { return "Add the times when blocking starts and stops." }
+		let breaks = e.filter { !$0.block }.count - 1
+		return "Blocked from \(first.at), open from \(last.at)" + (breaks > 0 ? ", with \(breaks) break\(breaks == 1 ? "" : "s") in between." : ".")
+	}
+
+	func addTime(_ r: FocusRule, _ entries: [FocusRule.Entry], _ block: Bool, _ set: (FocusRule) -> Void) {
+		let t = newTime.trimmingCharacters(in: .whitespaces)
+		guard t.range(of: #"^([01]\d|2[0-3]):[0-5]\d$"#, options: .regularExpression) != nil else { return }
+		var nr = r; nr.schedule = entries.filter { $0.at != t } + [FocusRule.Entry(at: t, block: block)]
+		newTime = ""
+		set(nr)
+	}
+
+	func addCustom(_ key: String, _ r: FocusRule, _ set: (FocusRule) -> Void) {
+		let d = (custom[key] ?? "").trimmingCharacters(in: .whitespaces).lowercased()
 			.replacingOccurrences(of: "https://", with: "").replacingOccurrences(of: "http://", with: "")
 			.components(separatedBy: "/").first ?? ""
-		guard !d.isEmpty, !a.sites(n).contains(d) else { return }
-		custom[n.ip] = ""
-		a.save(n, sites: a.sites(n) + [d])
+		guard !d.isEmpty, !r.sites.contains(d) else { return }
+		custom[key] = ""
+		var nr = r; nr.sites.append(d); set(nr)
 	}
 }
 

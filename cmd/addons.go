@@ -91,6 +91,11 @@ func Addons(args []string) error {
 		return setAddons(args[0])
 	case "list":
 		return listRemoteAddons(len(args) > 0 && args[0] == "--json")
+	case "import-block":
+		if len(args) != 1 {
+			return errors.New("usage: cerver addons import-block <computer>   (reads ~/.config/block)")
+		}
+		return importBlock(args[0])
 	}
 	if len(args) >= 2 && (args[0] == "safety" || args[0] == "focus") {
 		return setRemoteAddons(sub, args[0], args[1], args[2:])
@@ -231,12 +236,8 @@ type remoteNode struct {
 	OS     string `json:"os"`
 	Online bool   `json:"online"`
 	Addons *struct {
-		Level string `json:"level"`
-		Focus struct {
-			Sites  []string `json:"sites"`
-			Policy string   `json:"policy"`
-			Until  int64    `json:"until"`
-		} `json:"focus"`
+		Level string        `json:"level"`
+		Focus focusSettings `json:"focus"`
 	} `json:"addons"`
 	Applied json.RawMessage `json:"addons_applied"`
 }
@@ -272,9 +273,19 @@ func listRemoteAddons(asJSON bool) error {
 	for _, n := range nodes {
 		lvl, pol, sites := "off", "off", "-"
 		if n.Addons != nil {
-			lvl, pol = n.Addons.Level, n.Addons.Focus.Policy
-			if len(n.Addons.Focus.Sites) > 0 {
-				sites = strings.Join(n.Addons.Focus.Sites, ",")
+			lvl = n.Addons.Level
+			var ps, ss []string
+			for _, r := range n.Addons.Focus.rules() {
+				name := r.Name
+				if name != "" {
+					name += ":"
+				}
+				ps = append(ps, name+r.Policy)
+				ss = append(ss, strings.Join(r.Sites, ","))
+			}
+			pol, sites = strings.Join(ps, " "), strings.Join(ss, " | ")
+			if strings.Trim(sites, " |") == "" {
+				sites = "-"
 			}
 		}
 		applied := "needs a Cerver update"
@@ -340,16 +351,39 @@ func setRemoteAddons(computer, what, value string, sites []string) error {
 		if pol != "off" && pol != "work_hours" && pol != "until" && pol != "always" {
 			return errors.New("focus: off, work_hours, hour or always")
 		}
-		f := map[string]any{"policy": pol}
+		var cur focusSettings
+		if n.Addons != nil {
+			cur = n.Addons.Focus
+		}
+		rules := cur.rules()
+		// Which rule: the one named by a leading "rule=<name>" site, else the first.
+		idx := 0
+		if len(sites) > 0 && strings.HasPrefix(sites[0], "rule=") {
+			name := strings.TrimPrefix(sites[0], "rule=")
+			sites = sites[1:]
+			idx = -1
+			for i, r := range rules {
+				if strings.EqualFold(r.Name, name) {
+					idx = i
+				}
+			}
+			if idx < 0 {
+				rules = append(rules, focusSettings{Name: name})
+				idx = len(rules) - 1
+			}
+		}
+		r := rules[idx]
+		r.Policy = pol
 		if len(sites) > 0 {
-			f["sites"] = sites
-		} else if n.Addons != nil {
-			f["sites"] = n.Addons.Focus.Sites
+			r.Sites = sites
 		}
+		r.Until = 0
 		if pol == "until" {
-			f["until"] = time.Now().Add(time.Hour).Unix()
+			r.Until = time.Now().Add(time.Hour).Unix()
 		}
-		body["focus"] = f
+		r.Hours, r.Rules = nil, nil
+		rules[idx] = r
+		body["focus"] = map[string]any{"rules": rules}
 	}
 	var out struct {
 		Say string `json:"say"`
@@ -362,3 +396,97 @@ func setRemoteAddons(computer, what, value string, sites []string) error {
 }
 
 func wgHost(s string) string { return wgnet.HostName(s) }
+
+// importBlock moves the rules of the "block" tool (~/.config/block: <name>.list
+// files and a schedule of "HH:MM <list|off>" lines, every day) into Cerver
+// Focus rules for a computer: one rule per list, each with the schedule that
+// switches it on and off.
+func importBlock(computer string) error {
+	dir := filepath.Join(os.Getenv("HOME"), ".config", "block")
+	lists := map[string][]string{}
+	var names []string
+	files, _ := filepath.Glob(filepath.Join(dir, "*.list"))
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		name := strings.TrimSuffix(filepath.Base(f), ".list")
+		for _, line := range strings.Split(string(b), "\n") {
+			if d := strings.TrimSpace(line); d != "" && !strings.HasPrefix(d, "#") {
+				lists[name] = append(lists[name], d)
+			}
+		}
+		names = append(names, name)
+	}
+	if len(names) == 0 {
+		return fmt.Errorf("no lists in %s", dir)
+	}
+	sched := map[string][]schedEntry{}
+	if b, err := os.ReadFile(filepath.Join(dir, "schedule")); err == nil {
+		for _, line := range strings.Split(string(b), "\n") {
+			f := strings.Fields(line)
+			if len(f) != 2 || strings.HasPrefix(f[0], "#") || len(f[0]) != 5 || f[0][2] != ':' {
+				continue
+			}
+			// At this time, list f[1] turns on and every other list turns off.
+			for _, n := range names {
+				sched[n] = append(sched[n], schedEntry{At: f[0], Block: n == f[1]})
+			}
+		}
+	}
+	var rules []focusSettings
+	for _, n := range names {
+		r := focusSettings{Name: n, Sites: lists[n], Policy: "off"}
+		has := false
+		for _, e := range sched[n] {
+			has = has || e.Block
+		}
+		if has {
+			r.Policy, r.Schedule = "schedule", sched[n]
+		}
+		rules = append(rules, r)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	nodes, gw, err := remoteNodes(ctx)
+	if err != nil {
+		return err
+	}
+	var target *remoteNode
+	for i := range nodes {
+		if strings.EqualFold(nodes[i].Name, computer) || strings.Contains(wgHost(nodes[i].Name), wgHost(computer)) {
+			target = &nodes[i]
+		}
+	}
+	if target == nil {
+		return fmt.Errorf("no computer %q on your network", computer)
+	}
+	// Keep the computer's other rules (e.g. one made in the app).
+	if target.Addons != nil {
+		for _, r := range target.Addons.Focus.rules() {
+			dup := false
+			for _, n := range names {
+				dup = dup || strings.EqualFold(r.Name, n)
+			}
+			if !dup && len(r.Sites) > 0 {
+				if r.Name == "" {
+					r.Name = "Focus"
+				}
+				r.Hours, r.Rules = nil, nil
+				rules = append(rules, r)
+			}
+		}
+	}
+	var out struct {
+		Say string `json:"say"`
+	}
+	if err := gw.Do(ctx, "PUT", "/v2/net/nodes/"+target.IP+"/addons", map[string]any{"focus": map[string]any{"rules": rules}}, &out); err != nil {
+		return err
+	}
+	for _, r := range rules {
+		fmt.Printf("  %s: %s · %s\n", r.Name, r.Policy, strings.Join(r.Sites, ", "))
+	}
+	fmt.Printf("%s: imported %d rules from %s. %s\n", target.Name, len(rules), dir, out.Say)
+	return nil
+}

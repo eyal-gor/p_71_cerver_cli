@@ -36,3 +36,30 @@ func TestFocusDomainsAndSchedule(t *testing.T) {
 		t.Error("block replace wrong")
 	}
 }
+
+func TestFocusSchedule(t *testing.T) {
+	s := []schedEntry{{"08:00", true}, {"08:55", false}, {"09:00", true}, {"17:55", false}}
+	at := func(h, m int) time.Time { return time.Date(2026, 11, 23, h, m, 0, 0, time.Local) }
+	cases := map[[2]int]bool{{7, 0}: false, {8, 0}: true, {8, 30}: true, {8, 56}: false, {9, 1}: true, {17, 54}: true, {18, 0}: false, {23, 59}: false}
+	for hm, want := range cases {
+		if got := scheduleOn(s, nil, at(hm[0], hm[1])); got != want {
+			t.Errorf("%02d:%02d: got %v want %v", hm[0], hm[1], got, want)
+		}
+	}
+	// Overnight: block from 22:00 until 07:00.
+	n := []schedEntry{{"07:00", false}, {"22:00", true}}
+	if !scheduleOn(n, nil, at(3, 0)) || scheduleOn(n, nil, at(12, 0)) || !scheduleOn(n, nil, at(23, 0)) {
+		t.Error("overnight wrong")
+	}
+	// Rules: union of what's on.
+	f := focusSettings{Rules: []focusSettings{{Sites: []string{"x"}, Policy: "always"}, {Sites: []string{"lichess.org"}, Policy: "off"}}}
+	on := 0
+	for _, r := range f.rules() {
+		if focusOn(r, at(10, 0)) {
+			on++
+		}
+	}
+	if on != 1 {
+		t.Errorf("rules on = %d", on)
+	}
+}

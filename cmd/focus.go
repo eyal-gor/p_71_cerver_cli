@@ -48,20 +48,91 @@ type focusHours struct {
 	Days []int `json:"days"` // 0 = Sunday … 6 = Saturday
 }
 
+// One time of day in a schedule: from At (HH:MM) on, block or not.
+type schedEntry struct {
+	At    string `json:"at"`
+	Block bool   `json:"block"`
+}
+
+// focusSettings is one rule (sites + when). A computer can have several
+// (Rules); the old single-rule form (no Rules) still works.
+//
+//	policy "schedule": Schedule says, every day (or on Days), from which
+//	time on the sites are blocked or open, e.g. 08:00 block, 08:55 open, …
+//	Before the first entry of the day, the day before's last entry holds.
 type focusSettings struct {
-	Sites  []string    `json:"sites"`
-	Policy string      `json:"policy"`
-	Until  int64       `json:"until,omitempty"`
-	Hours  *focusHours `json:"hours,omitempty"`
+	Name     string          `json:"name,omitempty"`
+	Sites    []string        `json:"sites"`
+	Policy   string          `json:"policy"`
+	Until    int64           `json:"until,omitempty"`
+	Hours    *focusHours     `json:"hours,omitempty"`
+	Schedule []schedEntry    `json:"schedule,omitempty"`
+	Days     []int           `json:"days,omitempty"` // schedule days, 0 = Sunday; none = every day
+	Rules    []focusSettings `json:"rules,omitempty"`
+}
+
+// rules: the computer's Focus rules, each with defaults filled in.
+func (f focusSettings) rules() []focusSettings {
+	list := f.Rules
+	if len(list) == 0 {
+		list = []focusSettings{f}
+	}
+	out := make([]focusSettings, 0, len(list))
+	for _, r := range list {
+		if r.Policy == "" {
+			r.Policy = "off"
+		}
+		if r.Hours == nil {
+			r.Hours = &focusHours{From: 9, To: 18, Days: []int{1, 2, 3, 4, 5}}
+		}
+		out = append(out, r)
+	}
+	return out
+}
+
+// scheduleOn: what the schedule says at now.
+func scheduleOn(entries []schedEntry, days []int, now time.Time) bool {
+	if len(days) > 0 {
+		ok := false
+		for _, d := range days {
+			ok = ok || d == int(now.Weekday())
+		}
+		if !ok {
+			return false
+		}
+	}
+	list := append([]schedEntry(nil), entries...)
+	sort.Slice(list, func(i, j int) bool { return list[i].At < list[j].At })
+	if len(list) == 0 {
+		return false
+	}
+	hm := now.Format("15:04")
+	on := list[len(list)-1].Block // before today's first entry: yesterday's last
+	for _, e := range list {
+		if e.At <= hm {
+			on = e.Block
+		}
+	}
+	return on
 }
 
 type FocusStatus struct {
-	Blocking bool        `json:"blocking"` // in /etc/hosts right now
-	Want     bool        `json:"want"`     // what the schedule says now
-	Policy   string      `json:"policy"`
-	Sites    []string    `json:"sites"`
-	Until    int64       `json:"until,omitempty"`
-	Hours    *focusHours `json:"hours,omitempty"`
+	Blocking bool         `json:"blocking"` // in /etc/hosts right now
+	Want     bool         `json:"want"`     // what the schedule says now
+	Policy   string       `json:"policy"`
+	Sites    []string     `json:"sites"`
+	Until    int64        `json:"until,omitempty"`
+	Hours    *focusHours  `json:"hours,omitempty"`
+	Rules    []RuleStatus `json:"rules"`
+}
+
+// RuleStatus: one Focus rule as applied here, and whether it blocks now.
+type RuleStatus struct {
+	Name     string       `json:"name,omitempty"`
+	Policy   string       `json:"policy"`
+	Sites    []string     `json:"sites"`
+	Schedule []schedEntry `json:"schedule,omitempty"`
+	On       bool         `json:"on"`
 }
 
 func loadFocus() focusSettings {
@@ -91,6 +162,8 @@ func focusOn(f focusSettings, now time.Time) bool {
 		return true
 	case "until":
 		return now.Unix() < f.Until
+	case "schedule":
+		return scheduleOn(f.Schedule, f.Days, now)
 	case "work_hours":
 		h := f.Hours
 		day := false
@@ -187,10 +260,13 @@ func applyFocus() {
 		return
 	}
 	f := loadFocus()
-	block := ""
-	if focusOn(f, time.Now()) {
-		block = focusBlock(focusDomains(f.Sites))
+	var sites []string
+	for _, r := range f.rules() {
+		if focusOn(r, time.Now()) {
+			sites = append(sites, r.Sites...)
+		}
 	}
+	block := focusBlock(focusDomains(sites))
 	old, err := os.ReadFile(hostsPath)
 	if err != nil {
 		return
@@ -214,9 +290,21 @@ func focusStatus() FocusStatus {
 	if sites == nil {
 		sites = []string{}
 	}
+	want := false
+	rules := []RuleStatus{}
+	for _, r := range f.rules() {
+		on := focusOn(r, time.Now())
+		want = want || on
+		rs := r.Sites
+		if rs == nil {
+			rs = []string{}
+		}
+		rules = append(rules, RuleStatus{Name: r.Name, Policy: r.Policy, Sites: rs, Schedule: r.Schedule, On: on})
+	}
 	return FocusStatus{
+		Rules:    rules,
 		Blocking: strings.Contains(string(b), focusBegin),
-		Want:     focusOn(f, time.Now()),
+		Want:     want,
 		Policy:   f.Policy,
 		Sites:    sites,
 		Until:    f.Until,
@@ -274,7 +362,7 @@ func addonsApplied() json.RawMessage {
 	st := getAddons()
 	b, _ := json.Marshal(map[string]any{
 		"level": st.Level, "dns": st.DNS,
-		"focus": map[string]any{"policy": st.Focus.Policy, "sites": st.Focus.Sites, "blocking": st.Focus.Blocking, "until": st.Focus.Until},
+		"focus": map[string]any{"policy": st.Focus.Policy, "sites": st.Focus.Sites, "blocking": st.Focus.Blocking, "until": st.Focus.Until, "rules": st.Focus.Rules},
 		"at":    time.Now().Unix(),
 	})
 	return b
