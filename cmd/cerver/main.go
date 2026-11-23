@@ -84,6 +84,9 @@ commands:
   addons     Safety add-ons for this whole computer (filtering DNS).
                cerver addons                    # what's on here
                sudo cerver addons set kids      # off | malware | adult | kids
+               cerver addons list               # every computer on your network
+               cerver addons mac-mini safety kids
+               cerver addons mac-mini focus work_hours youtube x   # off|work_hours|hour|always
   forward    Reach an app on one of your machines from here, peer to peer.
                cerver forward MacBook-Air-2026 3456          # its port 3456 at localhost:3456 here
                cerver forward MacBook-Air-2026 3456 --local 8080

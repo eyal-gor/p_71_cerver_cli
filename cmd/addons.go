@@ -1,9 +1,15 @@
 package cmd
 
 import (
+	"context"
+	"text/tabwriter"
+	"time"
+
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/eyal-gor/p_71_cerver_cli/internal/gateway"
+	"github.com/eyal-gor/p_71_cerver_cli/internal/wgnet"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,7 +21,16 @@ import (
 // on it (every app, not just agents) goes through a filtering DNS.
 //
 //   cerver addons                   what's on here (--json for the app)
-//   sudo cerver addons set <level>  off | malware | adult | kids
+//   sudo cerver addons set <level>  off | malware | adult | kids, here, now
+//
+// Any computer on your network (agents use these; the app does the same):
+//   cerver addons list                              every computer's add-ons
+//   cerver addons <computer> safety <level>         off | malware | adult | kids
+//   cerver addons <computer> focus <when> [sites…]  off | work_hours | hour | always
+//                                                   sites: facebook instagram youtube
+//                                                   x tiktok reddit netflix linkedin
+//                                                   or any domain; none = keep the list
+// The computer's Cerver network service applies it within about 20 seconds.
 //
 // Levels, each one includes the one before:
 //   malware  blocks malware and phishing sites (Cloudflare 1.1.1.2)
@@ -74,8 +89,13 @@ func Addons(args []string) error {
 			return errors.New("usage: sudo cerver addons set off|malware|adult|kids")
 		}
 		return setAddons(args[0])
+	case "list":
+		return listRemoteAddons(len(args) > 0 && args[0] == "--json")
 	}
-	return fmt.Errorf("unknown: cerver addons %s (status | set)", sub)
+	if len(args) >= 2 && (args[0] == "safety" || args[0] == "focus") {
+		return setRemoteAddons(sub, args[0], args[1], args[2:])
+	}
+	return fmt.Errorf("unknown: cerver addons %s (status | list | <computer> safety <level> | <computer> focus <when> [sites…])", sub)
 }
 
 func levelName(id string) string {
@@ -202,3 +222,143 @@ func setAddons(id string) error {
 	fmt.Printf("%s: on for %s\n", lvl.Name, strings.Join(services, ", "))
 	return nil
 }
+
+// ── Any computer on the network, through the gateway
+
+type remoteNode struct {
+	Name   string `json:"name"`
+	IP     string `json:"ip"`
+	OS     string `json:"os"`
+	Online bool   `json:"online"`
+	Addons *struct {
+		Level string `json:"level"`
+		Focus struct {
+			Sites  []string `json:"sites"`
+			Policy string   `json:"policy"`
+			Until  int64    `json:"until"`
+		} `json:"focus"`
+	} `json:"addons"`
+	Applied json.RawMessage `json:"addons_applied"`
+}
+
+func remoteNodes(ctx context.Context) ([]remoteNode, *gateway.Client, error) {
+	gw, err := netGateway(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	var out struct {
+		Nodes []remoteNode `json:"nodes"`
+	}
+	if err := gw.Do(ctx, "GET", "/v2/net", nil, &out); err != nil {
+		return nil, nil, err
+	}
+	return out.Nodes, gw, nil
+}
+
+func listRemoteAddons(asJSON bool) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	nodes, _, err := remoteNodes(ctx)
+	if err != nil {
+		return err
+	}
+	if asJSON {
+		b, _ := json.Marshal(nodes)
+		fmt.Println(string(b))
+		return nil
+	}
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintln(w, "COMPUTER\tSAFETY\tFOCUS\tSITES\tAPPLIED")
+	for _, n := range nodes {
+		lvl, pol, sites := "off", "off", "-"
+		if n.Addons != nil {
+			lvl, pol = n.Addons.Level, n.Addons.Focus.Policy
+			if len(n.Addons.Focus.Sites) > 0 {
+				sites = strings.Join(n.Addons.Focus.Sites, ",")
+			}
+		}
+		applied := "needs a Cerver update"
+		if len(n.Applied) > 0 && string(n.Applied) != "null" {
+			applied = "yes"
+		}
+		if !n.Online {
+			applied = "offline"
+		}
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n", n.Name, lvl, pol, sites, applied)
+	}
+	return w.Flush()
+}
+
+func setRemoteAddons(computer, what, value string, sites []string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	nodes, gw, err := remoteNodes(ctx)
+	if err != nil {
+		return err
+	}
+	var n *remoteNode
+	want := strings.ToLower(computer)
+	for i := range nodes {
+		if strings.ToLower(nodes[i].Name) == want || nodes[i].IP == computer || wgHost(nodes[i].Name) == wgHost(computer) {
+			n = &nodes[i]
+		}
+	}
+	if n == nil { // "mac-mini" finds "eyals-mac-mini" when only one matches
+		var hit []int
+		for i := range nodes {
+			if strings.Contains(wgHost(nodes[i].Name), wgHost(computer)) {
+				hit = append(hit, i)
+			}
+		}
+		if len(hit) == 1 {
+			n = &nodes[hit[0]]
+		}
+	}
+	if n == nil {
+		var names []string
+		for _, x := range nodes {
+			names = append(names, x.Name)
+		}
+		return fmt.Errorf("no computer %q on your network (have: %s)", computer, strings.Join(names, ", "))
+	}
+	body := map[string]any{}
+	switch what {
+	case "safety":
+		ok := false
+		for _, l := range addonLevels {
+			ok = ok || l.ID == value
+		}
+		if !ok {
+			return errors.New("safety: off, malware, adult or kids")
+		}
+		body["level"] = value
+	case "focus":
+		pol := value
+		if pol == "hour" {
+			pol = "until"
+		}
+		if pol != "off" && pol != "work_hours" && pol != "until" && pol != "always" {
+			return errors.New("focus: off, work_hours, hour or always")
+		}
+		f := map[string]any{"policy": pol}
+		if len(sites) > 0 {
+			f["sites"] = sites
+		} else if n.Addons != nil {
+			f["sites"] = n.Addons.Focus.Sites
+		}
+		if pol == "until" {
+			f["until"] = time.Now().Add(time.Hour).Unix()
+		}
+		body["focus"] = f
+	}
+	var out struct {
+		Say string `json:"say"`
+	}
+	if err := gw.Do(ctx, "PUT", "/v2/net/nodes/"+n.IP+"/addons", body, &out); err != nil {
+		return err
+	}
+	fmt.Printf("%s: %s set to %s. %s\n", n.Name, what, value, out.Say)
+	return nil
+}
+
+func wgHost(s string) string { return wgnet.HostName(s) }
