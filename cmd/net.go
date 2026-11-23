@@ -218,7 +218,7 @@ func netUp(args []string) error {
 	// The installed service keeps itself current: it runs as admin, so nothing
 	// else can replace it. After an update it exits and the service manager
 	// starts the new one (a few seconds offline).
-	selfUpdate := time.NewTicker(time.Hour)
+	selfUpdate := time.NewTicker(15 * time.Minute) // new features (add-ons) reach every computer soon after a release
 	defer selfUpdate.Stop()
 	shown := map[string]bool{}
 	for {
