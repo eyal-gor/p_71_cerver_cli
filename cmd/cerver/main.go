@@ -95,11 +95,12 @@ commands:
                cerver access unlist ~/Code         # no rule
                cerver access mode own_folder       # as_you | own_folder | vm
                cerver access start ~/Code          # start folder when none is given (or: default)
-  exit       Exit nodes: send a computer's internet through another one (e.g. home).
-               cerver exit                                  # who offers, who uses which
-               cerver exit offer mac-mini                   # mac-mini becomes an exit node
-               cerver exit use macbook mac-mini             # macbook's internet goes through it
-               cerver exit off macbook                      # macbook goes direct again
+  vpn        VPN through your own computers: send a computer's internet through another (e.g. home).
+               cerver vpn                                   # who offers, who uses which
+               cerver vpn offer mac-mini                    # mac-mini can be your VPN
+               cerver vpn use macbook mac-mini              # macbook's internet goes through it
+               cerver vpn off macbook                       # macbook goes direct again
+               (cerver exit … still works)
   forward    Reach an app on one of your machines from here, peer to peer.
                cerver forward MacBook-Air-2026 3456          # its port 3456 at localhost:3456 here
                cerver forward MacBook-Air-2026 3456 --local 8080
@@ -250,7 +251,7 @@ func main() {
 		err = cmd.VM(args)
 	case "access":
 		err = cmd.Access(args)
-	case "exit":
+	case "exit", "vpn":
 		err = cmd.Exit(args)
 	case "addons":
 		err = cmd.Addons(args)

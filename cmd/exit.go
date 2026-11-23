@@ -60,7 +60,7 @@ func Exit(args []string) error {
 			names[n.IP] = n.Name
 		}
 		w := tabwriter.NewWriter(os.Stdout, 0, 2, 2, ' ', 0)
-		fmt.Fprintln(w, "COMPUTER\tEXIT NODE\tINTERNET GOES\tNOW")
+		fmt.Fprintln(w, "COMPUTER\tVPN FOR OTHERS\tINTERNET GOES\tNOW")
 		for _, n := range nodes {
 			offer, via, now := "-", "directly", ""
 			if n.ExitOffer {
@@ -94,7 +94,7 @@ func Exit(args []string) error {
 	switch args[0] {
 	case "offer", "stop", "off":
 		if len(args) != 2 {
-			return errors.New("usage: cerver exit " + args[0] + " <computer>")
+			return errors.New("usage: cerver vpn " + args[0] + " <computer>")
 		}
 		n, err := find(args[1])
 		if err != nil {
@@ -110,7 +110,7 @@ func Exit(args []string) error {
 		}
 	case "use":
 		if len(args) != 3 {
-			return errors.New("usage: cerver exit use <computer> <exit computer>")
+			return errors.New("usage: cerver vpn use <computer> <vpn computer>")
 		}
 		n, err := find(args[1])
 		if err != nil {
@@ -122,5 +122,5 @@ func Exit(args []string) error {
 		}
 		return put(n, map[string]any{"via": ex.IP})
 	}
-	return errors.New("usage: cerver exit [offer|stop|use|off] …")
+	return errors.New("usage: cerver vpn [offer|stop|use|off] …")
 }

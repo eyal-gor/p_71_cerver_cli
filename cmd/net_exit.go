@@ -94,7 +94,7 @@ func newExitCtl(ifname, gatewayURL string) *exitCtl {
 		var old exitState
 		if json.Unmarshal(b, &old) == nil {
 			e.st = old
-			e.stopUsing("restarted")
+			e.stopUsing("")
 			e.stopOffering()
 		}
 	}

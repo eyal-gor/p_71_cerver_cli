@@ -828,7 +828,7 @@ struct MainWindow: View {
 	@AppStorage("addonsFolded") private var addonsFolded = true
 	@State private var hoverAddons = false
 	// `-startPage thisMac` on launch opens that page (for screenshots).
-	@State private var page: Page? = ["thisMac": Page.thisMac, "add": Page.add, "settings": Page.settings, "session": Page.session, "pool": Page.pool, "permissions": Page.permissions, "security": Page.permissions, "addons": Page.addons, "safety": Page.safety, "focus": Page.focus, "cleanup": Page.cleanup, "exit": Page.exitNode, "profile": Page.profile, "connectors": Page.connectors, "people": Page.people, "map": Page.map][UserDefaults.standard.string(forKey: "startPage") ?? ""] ?? .pool
+	@State private var page: Page? = ["thisMac": Page.thisMac, "add": Page.add, "settings": Page.settings, "session": Page.session, "pool": Page.pool, "permissions": Page.permissions, "security": Page.permissions, "addons": Page.addons, "safety": Page.safety, "focus": Page.focus, "cleanup": Page.cleanup, "exit": Page.exitNode, "vpn": Page.exitNode, "profile": Page.profile, "connectors": Page.connectors, "people": Page.people, "map": Page.map][UserDefaults.standard.string(forKey: "startPage") ?? ""] ?? .pool
 
 	var body: some View {
 		NavigationSplitView {
@@ -977,7 +977,7 @@ struct MainWindow: View {
 						Label("Cleanup", systemImage: "sparkles")
 							.padding(.leading, 14)
 							.tag(Page.cleanup)
-						Label("Exit node", systemImage: "arrow.up.right.circle")
+						Label("VPN", systemImage: "lock.shield")
 							.padding(.leading, 14)
 							.tag(Page.exitNode)
 					}
@@ -4053,14 +4053,14 @@ struct AccessSection: View {
 						}
 					}
 					if let via = n.exit_via, let ex = a.nodes.first(where: { $0.ip == via }) {
-						line(true, "Internet goes through \(ex.name)", "Exit node: encrypted to there; the local network sees nothing.")
+						line(true, "Internet goes through \(ex.name)", "VPN: encrypted to there; the local network sees nothing.")
 					} else if n.exit_offer == true {
-						line(true, "Other computers may send their internet through this one", "Exit node")
+						line(true, "Your other computers may use it as their VPN", "VPN")
 					} else {
-						line(nil, "Internet goes directly", "Exit node off")
+						line(nil, "Internet goes directly", "VPN off")
 					}
 				} else if c.net == nil {
-					line(nil, "Not on your private network", "Add-ons (Safety, Focus, exit node) need Cerver's network on this computer.")
+					line(nil, "Not on your private network", "Add-ons (Safety, Focus, VPN) need Cerver's network on this computer.")
 				} else {
 					line(nil, "Loading…", "")
 				}
@@ -4299,7 +4299,7 @@ struct AddonsHome: View {
 				item("moon.zzz", "Focus", "Block distracting sites like Facebook, Instagram and YouTube: always, in work hours, or for an hour.",
 				     a.nodes.filter { a.rules($0).contains { $0.policy != "off" && !$0.sites.isEmpty } }.count, .focus)
 				Divider().padding(.leading, 16)
-				item("arrow.up.right.circle", "Exit node", "On café Wi-Fi, send your laptop's internet through your computer at home, encrypted. The café sees nothing.",
+				item("lock.shield", "VPN", "On café Wi-Fi, send your laptop's internet through your own computer at home, encrypted. The café sees nothing.",
 				     a.nodes.filter { $0.exit_via != nil }.count, .exitNode)
 			}
 		}
@@ -4379,13 +4379,13 @@ struct ExitNodePage: View {
 		if (n.os ?? "darwin") != "darwin" { return ("Macs only for now", .secondary) }
 		if !n.online { return ("Offline", .secondary) }
 		if let why = e?.why, !why.isEmpty { return (why, .orange) }
-		if n.exit_via != nil { return e?.active == true ? ("Internet goes through the exit node", .green) : ("Switching…", .orange) }
-		if n.exit_offer == true { return e?.offering == true ? ("Ready as an exit node", .green) : ("Setting up… (needs a Cerver update)", .orange) }
+		if n.exit_via != nil { return e?.active == true ? ("VPN on", .green) : ("Switching…", .orange) }
+		if n.exit_offer == true { return e?.offering == true ? ("Ready as a VPN", .green) : ("Setting up… (needs a Cerver update)", .orange) }
 		return ("Uses its own connection", .secondary)
 	}
 
 	var body: some View {
-		PageLayout(title: "Exit node", subtitle: "Send a computer's internet through another one of yours, encrypted. From café Wi-Fi, the café sees only one scrambled connection, and websites see your home's address.") {
+		PageLayout(title: "VPN, through your own computers", subtitle: "Send a computer's internet through another one of yours, encrypted. From café Wi-Fi, the café sees only one scrambled connection, and websites see your home's address. Unlike a VPN company, nobody else's servers are in between.") {
 			if a.nodes.isEmpty { Text(a.problem ?? "Loading your computers…").foregroundStyle(.secondary) }
 			ForEach(a.nodes) { n in
 				let exits = a.nodes.filter { $0.exit_offer == true && $0.ip != n.ip }
@@ -4399,12 +4399,12 @@ struct ExitNodePage: View {
 					}
 					.padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 10)
 					Divider().padding(.leading, 16)
-					Row(label: "Offer as exit node") {
+					Row(label: "Use as VPN for my other computers") {
 						Toggle("", isOn: Binding(get: { n.exit_offer == true }, set: { a.saveExit(n, ["offer": $0]) }))
 							.toggleStyle(.switch).labelsHidden()
 							.disabled(n.exit_via != nil)
 					}
-					.help(n.exit_via != nil ? "It sends its own internet through an exit node; turn that off first." : "Your other computers can send their internet through this one. Best on a computer that stays home and on.")
+					.help(n.exit_via != nil ? "It sends its own internet through a VPN; turn that off first." : "Your other computers can send their internet through this one. Best on a computer that stays home and on.")
 					Divider().padding(.leading, 16)
 					Row(label: "Internet goes") {
 						Picker("", selection: Binding(get: { n.exit_via ?? "" }, set: { v in a.saveExit(n, ["via": v.isEmpty ? NSNull() : v]) })) {
@@ -4417,7 +4417,7 @@ struct ExitNodePage: View {
 				}
 			}
 			if let p = a.problem, !a.nodes.isEmpty { Text(p).font(.callout).foregroundStyle(.red) }
-			Text("Speed is limited by the exit computer's home upload. If it stops answering, the computer goes back to its own connection by itself. Your Safety and Focus settings keep working.")
+			Text("Speed is limited by that computer's home upload. If it stops answering, the computer goes back to its own connection by itself. Your Safety and Focus settings keep working.")
 				.font(.caption).foregroundStyle(.secondary)
 		}
 		.task { while !Task.isCancelled { await a.load(); try? await Task.sleep(nanoseconds: 4_000_000_000) } }
