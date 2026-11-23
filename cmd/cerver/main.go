@@ -75,6 +75,12 @@ commands:
                cerver net                       # your devices; reach them by name (ssh macbook)
                cerver net phone [--name iphone] # QR code for the WireGuard app on a phone
                cerver net rm <name|address>     # take a device out
+  vm         A local VM for agents on an Apple computer (Apple's container tool).
+               cerver vm                        # what's provisioned here
+               sudo cerver vm install           # Apple's container tool (signed by Apple)
+               cerver vm start                  # start it, build the agent image
+               cerver vm login                  # your Claude login for agents in the VM
+               cerver vm run "…"                # try it in this folder
   forward    Reach an app on one of your machines from here, peer to peer.
                cerver forward MacBook-Air-2026 3456          # its port 3456 at localhost:3456 here
                cerver forward MacBook-Air-2026 3456 --local 8080
@@ -221,6 +227,8 @@ func main() {
 		err = cmd.Forward(args)
 	case "net":
 		err = cmd.Net(args)
+	case "vm":
+		err = cmd.VM(args)
 	case "relay":
 		err = cmd.Relay(args)
 	case "envs", "env", "environments":

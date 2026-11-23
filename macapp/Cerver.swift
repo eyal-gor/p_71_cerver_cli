@@ -526,6 +526,7 @@ struct Spec: Decodable {
 	var installs_tools: Bool? = nil
 	let reported: Bool?
 	var agent_access: AgentAccess? = nil
+	var provisioning: Provisioning? = nil
 
 	var system: String? {
 		guard let os = os else { return nil }
@@ -1267,6 +1268,7 @@ struct PoolPage: View {
 				Picker("", selection: $view) {
 					Text("Computers").tag("Computers")
 					Text("Coding agents").tag("Coding agents")
+					Text("Provisioning").tag("Provisioning")
 				}
 				.pickerStyle(.segmented).labelsHidden().fixedSize()
 				Spacer()
@@ -1284,6 +1286,8 @@ struct PoolPage: View {
 				Text(m.poolChecked ? "No computers yet." : "Loading…").foregroundStyle(.secondary)
 			} else if view == "Coding agents" {
 				harnessTable
+			} else if view == "Provisioning" {
+				provisioningTable
 			} else {
 				Card {
 					Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 0) {
@@ -1464,6 +1468,27 @@ struct PoolPage: View {
 		}
 	}
 
+	/// What's provisioned on each computer. Set up on each computer's page → Provisioning.
+	var provisioningTable: some View {
+		Card {
+			ForEach(Array(m.computers.enumerated()), id: \.element.id) { n, c in
+				if n > 0 { Divider().padding(.leading, 16) }
+				Row(label: c.name + (c.isThisMac ? "  (this Mac)" : ""), note: vmNote(c.spec?.provisioning?.vm)) {
+					Button("Open") { open(c.isThisMac ? .thisMac : .computer(c.id)) }.buttonStyle(.link)
+				}
+			}
+		}
+	}
+
+	func vmNote(_ v: VMState?) -> String {
+		guard let v = v else { return "Local VM: not reported yet" }
+		if !v.supported { return "Local VM: not available (\(v.why ?? "this computer"))" }
+		if v.ready && v.signed_in { return "Local VM: ready" }
+		if v.ready { return "Local VM: ready, needs your Claude login" }
+		if v.installed { return "Local VM: installed, not started" }
+		return "Local VM: available, not installed"
+	}
+
 	func harnessOrder(_ h: String) -> String {
 		let known = ["claude", "codex", "grok", "gemini", "gemma", "opencode"]
 		return known.firstIndex(of: h).map { String(format: "%02d", $0) } ?? "99" + h
@@ -1481,7 +1506,7 @@ struct PoolPage: View {
 // MARK: Tabs for a computer's page
 
 enum Tab: String, CaseIterable, Identifiable {
-	case overview = "Overview", agents = "Agents", network = "Network", software = "Software", hardware = "Hardware", settings = "Settings"
+	case overview = "Overview", agents = "Agents", network = "Network", software = "Provisioning", hardware = "Hardware", settings = "Settings"
 	var id: String { rawValue }
 }
 
@@ -1514,6 +1539,7 @@ struct ThisMacPage: View {
 	@State private var editing = false
 	@State private var newName = ""
 	@State private var renaming = false
+	@StateObject private var vm = VMModel()
 
 	var me: Computer? { m.computers.first(where: { $0.isThisMac }) }
 
@@ -1526,7 +1552,9 @@ struct ThisMacPage: View {
 			case .overview: overview
 			case .agents: agents
 			case .network: network
-			case .software: SoftwareSection(spec: me?.spec)
+			case .software:
+				VMSection(vm: vm, reported: nil)
+				SoftwareSection(spec: me?.spec)
 			case .hardware: SpecSection(spec: me?.spec, showTitle: false)
 			case .settings: EmptyView()
 			}
@@ -1662,7 +1690,9 @@ struct ComputerPage: View {
 			case .overview: overview
 			case .agents: agents
 			case .network: network
-			case .software: SoftwareSection(spec: c.spec)
+			case .software:
+				VMSection(vm: nil, reported: c.spec?.provisioning?.vm)
+				SoftwareSection(spec: c.spec)
 			case .hardware, .settings: SpecSection(spec: c.spec, showTitle: false)
 			}
 		}
@@ -1855,6 +1885,7 @@ struct PermissionsPage: View {
 							Picker("", selection: Binding(get: { sec.mode }, set: { sec.mode = $0; saveSec() })) {
 								Text("As you").tag("as_you")
 								Text("Own folder only").tag("own_folder")
+								if vmState.ready && vmState.signed_in { Text("In a VM").tag("vm") }
 							}
 							.pickerStyle(.segmented).labelsHidden().fixedSize()
 						} else {
@@ -1888,10 +1919,14 @@ struct PermissionsPage: View {
 				}
 			}
 			if let e = secError { Text(e).font(.callout).foregroundStyle(.red) }
+			if !(vmState.ready && vmState.signed_in) && vmState.supported {
+				Text("To run agents in a VM, set it up first: This Mac → Provisioning.").font(.caption).foregroundStyle(.secondary)
+			}
 			Text("Applies from the next agent that starts. Enforced by macOS's own sandbox, the one Claude Code and Codex use.")
 				.font(.caption).foregroundStyle(.secondary)
 
 			section("Who can use each computer")
+				.task { vmState = await VMModel.fetch() ?? VMState() }
 			permission("Run agents",
 				"Part of your compute pool: Cerver can start your agents here, as you.") { c in
 				cell(on: c.isThisMac ? (m.relay == .running || m.relay == .starting) : c.pool?.online == true,
@@ -1914,6 +1949,7 @@ struct PermissionsPage: View {
 	var relayBusy: Bool { if case .working = m.relay { return true }; return false }
 
 	@State private var sec = SecurityRules.load()
+	@State private var vmState = VMState()
 	@State private var secError: String?
 	let suggested = ["~/.ssh", "~/Documents", "~/Desktop"]
 
@@ -1924,6 +1960,7 @@ struct PermissionsPage: View {
 	func modeName(_ m: String?) -> String {
 		switch m {
 		case "own_folder": return "Own folder only"
+		case "vm": return "In a VM"
 		case "as_you": return "As you"
 		default: return "Not reported yet"
 		}
@@ -1933,6 +1970,7 @@ struct PermissionsPage: View {
 		let mode = c.isThisMac ? sec.mode : (c.spec?.agent_access?.mode ?? "")
 		switch mode {
 		case "own_folder": return "Agents see only the folder they work in, plus their own settings."
+		case "vm": return "Each agent runs in a fresh Linux VM that sees only the folder it works in."
 		case "as_you": return "Agents can open what you can, except blocked folders."
 		default: return "Its relay hasn't reported its rules yet."
 		}
@@ -3220,7 +3258,7 @@ struct SecurityRules {
 		var r = SecurityRules()
 		guard let d = FileManager.default.contents(atPath: file),
 			  let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return r }
-		if let m = o["agent_access"] as? String, ["as_you", "own_folder"].contains(m) { r.mode = m }
+		if let m = o["agent_access"] as? String, ["as_you", "own_folder", "vm"].contains(m) { r.mode = m }
 		r.blocked = (o["blocked_folders"] as? [String]) ?? []
 		return r
 	}
@@ -3237,4 +3275,173 @@ struct SecurityRules {
 			return "Couldn't save: \(error.localizedDescription)"
 		}
 	}
+}
+
+
+// MARK: - Provisioning: the local VM (cerver vm, Apple's container tool)
+
+struct Provisioning: Decodable { let vm: VMState? }
+
+struct VMState: Decodable {
+	var supported = false
+	var why: String? = nil
+	var installed = false
+	var version: String? = nil
+	var running = false
+	var image = false
+	var signed_in = false
+	var ready = false
+}
+
+@MainActor final class VMModel: ObservableObject {
+	@Published var state: VMState?
+	@Published var busy: String?
+	@Published var problem: String?
+	@Published var token = ""
+
+	static func fetch() async -> VMState? {
+		await Task.detached { () -> VMState? in
+			let (ok, out) = runCerver(["vm", "--json"])
+			guard ok, let d = out.data(using: .utf8) else { return nil }
+			return try? JSONDecoder().decode(VMState.self, from: d)
+		}.value
+	}
+
+	func refresh() async { state = await Self.fetch() }
+
+	/// Apple's container tool: needs admin, so macOS asks for the password.
+	func install() {
+		guard let bin = Bundle.main.path(forResource: "cerver", ofType: nil) else { return }
+		busy = "Installing Apple's container tool…"; problem = nil
+		let script = "do shell script \"'\(bin)' vm install\" with administrator privileges"
+		Task {
+			let (ok, msg) = await Task.detached { () -> (Bool, String) in
+				let p = Process()
+				p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+				p.arguments = ["-e", script]
+				let out = Pipe(); p.standardOutput = out; p.standardError = out
+				do { try p.run() } catch { return (false, error.localizedDescription) }
+				let d = out.fileHandleForReading.readDataToEndOfFile()
+				p.waitUntilExit()
+				return (p.terminationStatus == 0, String(data: d, encoding: .utf8) ?? "")
+			}.value
+			busy = nil
+			if !ok && !msg.contains("-128") { problem = cleanError(msg) }
+			await refresh()
+		}
+	}
+
+	/// Start the VM service and build the agent image (a few minutes the first time).
+	func start() {
+		busy = "Starting the VM and building the agent image… (a few minutes the first time)"; problem = nil
+		Task {
+			let (ok, out) = await Task.detached { runCerver(["vm", "start"]) }.value
+			busy = nil
+			if !ok { problem = out.split(separator: "\n").suffix(3).joined(separator: "\n") }
+			await refresh()
+		}
+	}
+
+	func saveToken() {
+		let t = token.trimmingCharacters(in: .whitespacesAndNewlines)
+		guard let bin = Bundle.main.path(forResource: "cerver", ofType: nil), !t.isEmpty else { return }
+		problem = nil
+		let p = Process()
+		p.executableURL = URL(fileURLWithPath: bin)
+		p.arguments = ["vm", "login", "--stdin"]
+		let inp = Pipe(), out = Pipe()
+		p.standardInput = inp; p.standardOutput = out; p.standardError = out
+		do { try p.run() } catch { problem = error.localizedDescription; return }
+		inp.fileHandleForWriting.write((t + "\n").data(using: .utf8)!)
+		try? inp.fileHandleForWriting.close()
+		p.waitUntilExit()
+		if p.terminationStatus != 0 {
+			problem = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8)
+		}
+		token = ""
+		Task { await refresh() }
+	}
+}
+
+/// The local VM, step by step. `vm` set: this Mac, with the buttons.
+/// `reported`: another computer, as its relay reported.
+struct VMSection: View {
+	var vm: VMModel?
+	var reported: VMState?
+
+	var body: some View {
+		VStack(alignment: .leading, spacing: 8) {
+			Text("Local VM").font(.system(size: 15, weight: .semibold)).padding(.top, 6)
+			Text("A small Linux computer inside this Mac, made with Apple's own container tool. An agent there sees only the folder it works in, and can install anything without touching the Mac.")
+				.font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+			if let vm = vm { ThisMacVM(vm: vm) } else { remote }
+		}
+	}
+
+	@ViewBuilder var remote: some View {
+		Card {
+			if let r = reported {
+				if !r.supported {
+					Row(label: "Not on this computer", note: r.why) { EmptyView() }
+				} else {
+					step("Apple's container tool", r.installed, r.version)
+					Divider().padding(.leading, 16)
+					step("VM running, agent image built", r.running && r.image, nil)
+					Divider().padding(.leading, 16)
+					step("Claude login for the VM", r.signed_in, nil)
+				}
+			} else {
+				Row(label: "Not reported yet", note: "Set it up on that computer: its Cerver app → This Mac → Provisioning.") { EmptyView() }
+			}
+		}
+	}
+
+	func step(_ label: String, _ done: Bool, _ note: String?) -> some View {
+		Row(label: label, note: note) {
+			Image(systemName: done ? "checkmark.circle.fill" : "circle").foregroundStyle(done ? Color.green : Color.secondary)
+		}
+	}
+}
+
+struct ThisMacVM: View {
+	@ObservedObject var vm: VMModel
+
+	var body: some View {
+		Group {
+			if let s = vm.state {
+				if !s.supported {
+					Card { Row(label: "Not on this Mac", note: s.why) { EmptyView() } }
+				} else {
+					Card {
+						Row(label: "1. Apple's container tool", note: s.installed ? s.version : "Downloaded from Apple, checked to be signed by Apple. macOS asks for your password once.") {
+							if s.installed { done } else { Button("Install") { vm.install() }.disabled(vm.busy != nil) }
+						}
+						Divider().padding(.leading, 16)
+						Row(label: "2. Start the VM and build the agent image", note: "Claude Code, Codex, git and Python inside. About 1–2 GB, a few minutes the first time.") {
+							if s.running && s.image { done } else { Button("Start") { vm.start() }.disabled(!s.installed || vm.busy != nil) }
+						}
+						Divider().padding(.leading, 16)
+						Row(label: "3. Your Claude login for the VM", note: s.signed_in ? "Saved on this Mac only." : "Run claude setup-token in Terminal, then paste the token here. It stays on this Mac.") {
+							if s.signed_in { done } else {
+								SecureField("sk-ant-…", text: $vm.token).textFieldStyle(.roundedBorder).frame(width: 180)
+								Button("Save") { vm.saveToken() }.disabled(vm.token.isEmpty)
+							}
+						}
+					}
+					if s.ready && s.signed_in {
+						Text("Ready. To run agents in it, choose \"In a VM\" on the Security page.").font(.callout).foregroundStyle(.secondary)
+					}
+				}
+			} else {
+				ProgressView().controlSize(.small)
+			}
+			if let b = vm.busy {
+				HStack(spacing: 8) { ProgressView().controlSize(.small); Text(b).font(.callout).foregroundStyle(.secondary) }
+			}
+			if let p = vm.problem { Text(p).font(.callout).foregroundStyle(.red).textSelection(.enabled) }
+		}
+		.task { await vm.refresh() }
+	}
+
+	var done: some View { Image(systemName: "checkmark.circle.fill").foregroundStyle(.green) }
 }
