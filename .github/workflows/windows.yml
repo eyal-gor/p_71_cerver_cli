@@ -33,7 +33,8 @@ jobs:
           go test ./cmd/
           Get-ChildItem dist -Filter *.exe | ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)" } | Set-Content dist/SHA256SUMS
           Get-Content dist/SHA256SUMS
-      - name: Install with install.ps1
+      # One step: on Windows, Actions ends every process a step started when the step ends.
+      - name: Install with install.ps1, then check the app, Restart and uninstall
         shell: pwsh
         env:
           CERVER_SKIP_CLI_PROVISION: "1"
@@ -45,15 +46,13 @@ jobs:
           $env:CERVER_MACHINE_NAME = "win-ci"
           Invoke-RestMethod https://cerver.ai/install.ps1 | Set-Content install.ps1
           ./install.ps1
-      - name: The app runs the relay and the page
-        shell: pwsh
-        run: |
+          # ── The app runs the relay and the page
           $ok = $false
           for ($i = 0; $i -lt 120; $i++) {
             Start-Sleep 2
             try { Invoke-RestMethod http://127.0.0.1:18081/health -TimeoutSec 3 | Out-Null; $ok = $true; break } catch {}
           }
-          Get-Process Cerver -ErrorAction SilentlyContinue | Format-Table Id, ProcessName, StartTime
+          Get-Process Cerver -ErrorAction SilentlyContinue | Format-Table Id, ProcessName, StartTime | Out-String | Write-Host
           Write-Host "---- relay.log ----"; Get-Content "$HOME\.cerver\relay.log" -ErrorAction SilentlyContinue | Select-Object -Last 40
           if (-not $ok) { throw "the relay never answered" }
           $st = Invoke-RestMethod http://127.0.0.1:18090/app/state
@@ -68,9 +67,7 @@ jobs:
           try { Invoke-RestMethod -Method Post http://127.0.0.1:18090/app/restart; throw "restart without the header worked" } catch { if ($_.Exception.Message -match "worked") { throw } }
           & "$HOME\.cerver\bin\cerver.exe" relay status
           & "$HOME\.cerver\bin\cerver.exe" update --check
-      - name: Restart brings the relay back
-        shell: pwsh
-        run: |
+          # ── Restart brings the relay back
           $old = Get-Content "$HOME\.cerver\relay.pid"
           Invoke-RestMethod -Method Post -Headers @{ "X-Cerver" = "1" } http://127.0.0.1:18090/app/restart | Out-Null
           $back = $false
@@ -81,9 +78,7 @@ jobs:
           }
           if (-not $back) { throw "the relay didn't come back after Restart" }
           Write-Host "relay $old -> $(Get-Content "$HOME\.cerver\relay.pid"), answering again"
-      - name: Uninstall stops it
-        shell: pwsh
-        run: |
+          # ── Uninstall stops it
           & "$HOME\.cerver\bin\cerver.exe" relay uninstall
           Start-Sleep 5
           if (Get-Process Cerver -ErrorAction SilentlyContinue) { throw "the app is still running" }
