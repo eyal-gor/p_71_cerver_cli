@@ -814,7 +814,7 @@ func howConnected(_ p: NetPeer) -> String {
 // MARK: - Window (sidebar + page, in the style of the ChatGPT Mac app)
 
 enum Page: Hashable {
-	case updates
+	case updates, agents
 	case map, pool, permissions, addons, safety, focus, cleanup, exitNode, thisMac, computer(String), add, settings, session, profile, connectors, people
 }
 
@@ -830,10 +830,10 @@ struct MainWindow: View {
 	@AppStorage("moreFolded") private var moreFolded = true
 	/// Always foldable; going to one of its pages (e.g. -startPage) opens it once.
 	var moreOpen: Bool { !moreFolded }
-	static let morePages: [Page] = [.map, .people, .permissions, .addons, .safety, .focus, .cleanup, .exitNode]
+	static let morePages: [Page] = [.agents, .map, .people, .permissions, .addons, .safety, .focus, .cleanup, .exitNode]
 	@State private var hoverAddons = false
 	// `-startPage thisMac` on launch opens that page (for screenshots).
-	@State private var page: Page? = ["thisMac": Page.thisMac, "add": Page.add, "settings": Page.settings, "updates": Page.updates, "session": Page.session, "pool": Page.pool, "permissions": Page.permissions, "security": Page.permissions, "addons": Page.addons, "safety": Page.safety, "focus": Page.focus, "cleanup": Page.cleanup, "exit": Page.exitNode, "vpn": Page.exitNode, "profile": Page.profile, "connectors": Page.connectors, "people": Page.people, "map": Page.map][UserDefaults.standard.string(forKey: "startPage") ?? ""] ?? .pool
+	@State private var page: Page? = ["thisMac": Page.thisMac, "add": Page.add, "settings": Page.settings, "updates": Page.updates, "session": Page.session, "pool": Page.pool, "permissions": Page.permissions, "security": Page.permissions, "addons": Page.addons, "safety": Page.safety, "focus": Page.focus, "cleanup": Page.cleanup, "exit": Page.exitNode, "vpn": Page.exitNode, "profile": Page.profile, "connectors": Page.connectors, "people": Page.people, "map": Page.map, "agents": Page.agents][UserDefaults.standard.string(forKey: "startPage") ?? ""] ?? .pool
 
 	var body: some View {
 		NavigationSplitView {
@@ -962,6 +962,9 @@ struct MainWindow: View {
 					}
 					.buttonStyle(.plain)
 					if moreOpen {
+						Label("Agents", systemImage: "cpu")
+							.padding(.leading, 14)
+							.tag(Page.agents)
 						Label("Map", systemImage: "map")
 							.padding(.leading, 14)
 							.tag(Page.map)
@@ -1137,6 +1140,7 @@ struct MainWindow: View {
 			case .map: MapPage(m: m, apps: apps, open: { page = $0 })
 			case .connectors: ConnectorsPage(a: apps)
 			case .people: PeoplePage(m: m)
+			case .agents: AgentsPage(m: m)
 			case .pool: PoolPage(m: m, open: { page = $0 })
 			case .permissions: PermissionsPage(m: m)
 			case .addons: AddonsHome(a: addons, open: { page = $0 })
@@ -4833,3 +4837,190 @@ Never touch: Documents, Desktop, Pictures, Movies, Music, Downloads, ~/Code or a
 
 Reply short: free space before → after, then each item you cleaned with the GB it freed, and anything big you left for the owner to decide.
 """
+
+// MARK: - Agents: what this Mac's relay is doing (jobs received, work done)
+
+/// The relay's local service (127.0.0.1:18081): status, jobs, load, log.
+struct RelayJob: Decodable, Identifiable {
+	let id: String
+	let at: Double
+	let task: String?
+	let cli: String?
+	let from: String?
+	let project: String?
+	let status: String
+	let seconds: Double?
+	let error: String?
+}
+struct RelayJobs: Decodable {
+	struct Today: Decodable { let jobs: Int; let done: Int; let failed: Int; let seconds: Int }
+	let running: [RelayJob]
+	let jobs: [RelayJob]
+	let today: Today
+	let total: Int
+}
+struct RelayStats: Decodable {
+	struct Compute: Decodable {
+		struct Mem: Decodable { let percent: Double }
+		struct Disk: Decodable { let free_bytes: Double; let percent: Double }
+		let cpu_percent: Double?
+		let memory: Mem?
+		let disk: Disk?
+	}
+	let home_directory: String?
+	let compute: Compute?
+}
+struct RelayLogLine: Decodable { let timestamp: String?; let line: String }
+struct RelayLog: Decodable { let lines: [RelayLogLine] }
+
+@MainActor final class RelayWatch: ObservableObject {
+	@Published var up: Bool?
+	@Published var jobs: RelayJobs?
+	@Published var stats: RelayStats?
+	@Published var log: [RelayLogLine] = []
+	@Published var restarting = false
+	private var timer: Timer?
+	let base = "http://127.0.0.1:18081"
+
+	func start() {
+		refresh()
+		timer?.invalidate()
+		timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in Task { @MainActor in self?.refresh() } }
+	}
+	func stop() { timer?.invalidate(); timer = nil }
+
+	func get<T: Decodable>(_ path: String, _ t: T.Type) async -> T? {
+		guard let u = URL(string: base + path) else { return nil }
+		var r = URLRequest(url: u); r.timeoutInterval = 2
+		guard let (d, resp) = try? await URLSession.shared.data(for: r), (resp as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+		return try? JSONDecoder().decode(T.self, from: d)
+	}
+
+	func refresh() {
+		Task {
+			struct H: Decodable { let status: String }
+			let h = await get("/health", H.self)
+			up = h != nil
+			guard h != nil else { return }
+			jobs = await get("/api/cerver/jobs?n=40", RelayJobs.self)
+			stats = await get("/api/local-claude/stats", RelayStats.self)
+			if let l = await get("/api/local-claude/logs/tail?n=40", RelayLog.self) { log = l.lines }
+		}
+	}
+
+	/// launchd restarts it (KeepAlive); no password.
+	func restart() {
+		restarting = true
+		let p = Process()
+		p.executableURL = URL(fileURLWithPath: "/bin/launchctl")
+		p.arguments = ["kickstart", "-k", "gui/\(getuid())/ai.cerver.relay"]
+		try? p.run()
+		DispatchQueue.main.asyncAfter(deadline: .now() + 6) { self.restarting = false; self.refresh() }
+	}
+}
+
+struct AgentsPage: View {
+	@ObservedObject var m: Model
+	@StateObject private var w = RelayWatch()
+	@State private var showLog = false
+
+	func ago(_ t: Double) -> String {
+		let s = Int(Date().timeIntervalSince1970 - t)
+		if s < 60 { return "just now" }
+		if s < 3600 { return "\(s / 60) min ago" }
+		if s < 86400 { return "\(s / 3600) h ago" }
+		return Date(timeIntervalSince1970: t).formatted(date: .abbreviated, time: .shortened)
+	}
+	func dur(_ s: Double) -> String { s < 60 ? "\(Int(s)) s" : (s < 3600 ? "\(Int(s / 60)) min" : String(format: "%.1f h", s / 3600)) }
+	func clean(_ s: String) -> String { s.replacingOccurrences(of: "\u{1b}\\[[0-9;]*m", with: "", options: .regularExpression) }
+
+	var body: some View {
+		PageLayout(title: "Agents", subtitle: "What Cerver's agent runner (the relay) on this Mac is doing: jobs it received and the work it did.") {
+			Card {
+				Row(label: "Relay", note: w.up == false ? "Not running, so this Mac can't take agent jobs." : (w.stats?.home_directory).map { "Works in " + (($0 as NSString).abbreviatingWithTildeInPath) + " when a job names no folder" }) {
+					HStack(spacing: 10) {
+						if let v = m.updates?.relay?.current { Text("v" + v).font(.system(size: 12, design: .monospaced)).foregroundStyle(.secondary) }
+						switch w.up {
+						case .some(true): StatusPill(text: (w.jobs?.running.isEmpty ?? true) ? "Ready" : "Working", color: .green)
+						case .some(false): StatusPill(text: "Stopped", color: .red)
+						case .none: ProgressView().controlSize(.small)
+						}
+						Button(w.restarting ? "Restarting…" : "Restart") { w.restart() }.buttonStyle(.link).disabled(w.restarting)
+					}
+				}
+				if let c = w.stats?.compute {
+					Divider().padding(.leading, 16)
+					Row(label: "This Mac now") {
+						Text([c.cpu_percent.map { "CPU \(Int($0))%" }, c.memory.map { "memory \(Int($0.percent))%" }, c.disk.map { "\(Int($0.free_bytes / 1e9)) GB free" }].compactMap { $0 }.joined(separator: " · "))
+							.foregroundStyle(.secondary)
+					}
+				}
+			}
+
+			if let j = w.jobs {
+				HStack(spacing: 12) {
+					stat("\(j.today.jobs)", "jobs today")
+					stat("\(j.today.done)", "done")
+					stat("\(j.today.failed)", "failed", j.today.failed > 0 ? .red : .primary)
+					stat(dur(Double(j.today.seconds)), "of work")
+				}
+
+				if !j.running.isEmpty {
+					Text("Working now").font(.system(size: 15, weight: .semibold)).padding(.top, 6)
+					Card { ForEach(j.running) { job in jobRow(job); if job.id != j.running.last?.id { Divider().padding(.leading, 16) } } }
+				}
+
+				Text("Recent jobs").font(.system(size: 15, weight: .semibold)).padding(.top, 6)
+				if j.jobs.isEmpty {
+					Card { Row(label: "No jobs yet", note: "Send one: Ask Compute Pool, or `cerver run --on this-mac \"…\"` from another computer.") { EmptyView() } }
+				} else {
+					Card { ForEach(j.jobs) { job in jobRow(job); if job.id != j.jobs.last?.id { Divider().padding(.leading, 16) } } }
+				}
+			} else if w.up == true {
+				Text("This relay doesn't keep a job list yet: update it (Updates).").font(.callout).foregroundStyle(.secondary)
+			}
+
+			DisclosureGroup(isExpanded: $showLog) {
+				ScrollView {
+					Text(w.log.map { clean($0.line) }.joined(separator: "\n"))
+						.font(.system(size: 11, design: .monospaced))
+						.textSelection(.enabled)
+						.frame(maxWidth: .infinity, alignment: .leading)
+						.padding(10)
+				}
+				.frame(height: 260)
+				.background(RoundedRectangle(cornerRadius: 10).fill(Color(nsColor: .textBackgroundColor)))
+			} label: {
+				Text("What the relay prints").font(.system(size: 15, weight: .semibold))
+			}
+			.padding(.top, 6)
+		}
+		.onAppear { w.start() }
+		.onDisappear { w.stop() }
+	}
+
+	func stat(_ v: String, _ label: String, _ color: Color = .primary) -> some View {
+		VStack(alignment: .leading, spacing: 2) {
+			Text(v).font(.system(size: 22, weight: .semibold)).foregroundStyle(color)
+			Text(label).font(.callout).foregroundStyle(.secondary)
+		}
+		.frame(maxWidth: .infinity, alignment: .leading)
+		.padding(12)
+		.background(RoundedRectangle(cornerRadius: 12).fill(Color(nsColor: .controlBackgroundColor)))
+	}
+
+	func jobRow(_ j: RelayJob) -> some View {
+		HStack(alignment: .firstTextBaseline, spacing: 10) {
+			Image(systemName: j.status == "running" ? "circle.dotted" : (j.status == "done" ? "checkmark.circle.fill" : "xmark.circle.fill"))
+				.foregroundStyle(j.status == "running" ? .blue : (j.status == "done" ? .green : .red))
+			VStack(alignment: .leading, spacing: 2) {
+				Text((j.task ?? "").isEmpty ? "(no text)" : j.task!).lineLimit(2)
+				Text([ago(j.at), j.cli.flatMap { $0.isEmpty ? nil : $0 }, j.from.flatMap { $0.isEmpty ? nil : "from " + $0 }, j.project.flatMap { $0.isEmpty ? nil : $0 }, j.error].compactMap { $0 }.joined(separator: " · "))
+					.font(.system(size: 11.5)).foregroundStyle(.secondary).lineLimit(1)
+			}
+			Spacer()
+			Text(j.status == "running" ? dur(Date().timeIntervalSince1970 - j.at) : (j.seconds.map(dur) ?? "")).font(.system(size: 12)).foregroundStyle(.secondary)
+		}
+		.padding(.horizontal, 16).padding(.vertical, 10)
+	}
+}
