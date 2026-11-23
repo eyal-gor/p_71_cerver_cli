@@ -3862,6 +3862,18 @@ struct FocusRule: Codable, Equatable, Identifiable {
 	var days: [Int]?
 	var id: String { name ?? "Focus" }
 
+	/// The same groups as cerver's focusGroups.
+	static let groupDomains: [String: [String]] = [
+		"facebook": ["facebook.com", "www.facebook.com", "m.facebook.com", "web.facebook.com", "fb.com"],
+		"instagram": ["instagram.com", "www.instagram.com"],
+		"youtube": ["youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"],
+		"x": ["x.com", "www.x.com", "twitter.com", "www.twitter.com", "mobile.twitter.com"],
+		"tiktok": ["tiktok.com", "www.tiktok.com"],
+		"reddit": ["reddit.com", "www.reddit.com", "old.reddit.com"],
+		"netflix": ["netflix.com", "www.netflix.com"],
+		"linkedin": ["linkedin.com", "www.linkedin.com"],
+	]
+
 	/// Work hours 08:00–18:00, every day, with the last 5 minutes of each hour open.
 	static var workdayWithBreaks: [Entry] {
 		(8...17).flatMap { h in [Entry(at: String(format: "%02d:00", h), block: true), Entry(at: String(format: "%02d:55", h), block: false)] }
@@ -4107,6 +4119,7 @@ struct FocusPage: View {
 	@ObservedObject var a: AddonsModel
 	@State private var custom: [String: String] = [:]
 	@State private var names: [String: String] = [:]
+	@State private var open: Set<String> = []
 	@State private var newTime = ""
 	let groups: [(String, String)] = [("facebook", "Facebook"), ("instagram", "Instagram"), ("youtube", "YouTube"), ("x", "X"), ("tiktok", "TikTok"), ("reddit", "Reddit"), ("netflix", "Netflix"), ("linkedin", "LinkedIn")]
 	let policies: [(String, String)] = [("off", "Off"), ("work_hours", "Work hours"), ("until", "For an hour"), ("always", "Always"), ("schedule", "Schedule")]
@@ -4132,16 +4145,40 @@ struct FocusPage: View {
 				Spacer()
 				let st = a.status(n, thisMac: n.ip == m.status?.ip)
 				if a.saving.contains(n.ip) { ProgressView().controlSize(.small) }
-				AddonStatus(text: st.0, color: st.1)
+				AddonStatus(text: st.0.replacingOccurrences(of: " · blocking now", with: ""), color: st.1)
 			}
 			.padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 6)
 			ForEach(Array(rules.enumerated()), id: \.offset) { i, r in
+				let key = "\(n.ip)#\(i)"
 				Divider().padding(.leading, 16)
-				ruleView(n, rules, i, r, blockingNow: on[r.name ?? ""] ?? false)
-					.padding(.horizontal, 16).padding(.vertical, 12)
+				Button { withAnimation(.easeInOut(duration: 0.15)) { if open.contains(key) { open.remove(key) } else { open.insert(key) } } } label: {
+					HStack(spacing: 10) {
+						Image(systemName: open.contains(key) ? "chevron.down" : "chevron.right")
+							.font(.system(size: 10, weight: .semibold)).foregroundStyle(.secondary).frame(width: 12)
+						Circle().fill((on[r.name ?? ""] ?? false) ? Color.green : Color.secondary.opacity(0.3)).frame(width: 7, height: 7)
+							.help((on[r.name ?? ""] ?? false) ? "Blocking now" : "Not blocking now")
+						Text(r.name ?? "Focus").font(.system(size: 14, weight: .semibold))
+						Text(whenSummary(r)).font(.system(size: 13)).foregroundStyle(.secondary)
+						Spacer(minLength: 12)
+						Text(sitesSummary(r)).font(.system(size: 13)).foregroundStyle(.secondary).lineLimit(1).truncationMode(.tail)
+					}
+					.contentShape(Rectangle())
+				}
+				.buttonStyle(.plain)
+				.padding(.horizontal, 16).padding(.vertical, 11)
+				if open.contains(key) {
+					ruleView(n, rules, i, r, blockingNow: on[r.name ?? ""] ?? false)
+						.padding(14)
+						.background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.03)))
+						.padding(.horizontal, 16).padding(.bottom, 12)
+				}
 			}
 			Divider().padding(.leading, 16)
-			Button { a.saveRules(n, rules + [FocusRule(name: "Rule \(rules.count + 1)", sites: [], policy: "off")]) } label: {
+			Button {
+				let new = rules.count
+				a.saveRules(n, rules + [FocusRule(name: "Rule \(rules.count + 1)", sites: [], policy: "off")])
+				open.insert("\(n.ip)#\(new)")
+			} label: {
 				Label("Add a rule", systemImage: "plus")
 			}
 			.buttonStyle(.link).padding(.horizontal, 16).padding(.vertical, 10)
@@ -4151,13 +4188,13 @@ struct FocusPage: View {
 
 	@ViewBuilder func ruleView(_ n: NetNodeAddons, _ rules: [FocusRule], _ i: Int, _ r: FocusRule, blockingNow: Bool) -> some View {
 		let key = "\(n.ip)#\(i)"
-		let set: (FocusRule) -> Void = { nr in var all = rules; all[i] = nr; a.saveRules(n, all) }
+		let set: (FocusRule) -> Void = { nr in var c = nr; c.sites = canonSites(nr.sites); var all = rules; all[i] = c; a.saveRules(n, all) }
+		let sites = canonSites(r.sites)
 		VStack(alignment: .leading, spacing: 10) {
 			HStack {
 				TextField("Rule name", text: Binding(get: { names[key] ?? (r.name ?? "Focus") }, set: { names[key] = $0 }))
 					.textFieldStyle(.plain).font(.system(size: 14, weight: .semibold)).frame(maxWidth: 220)
 					.onSubmit { var nr = r; nr.name = names[key]; set(nr) }
-				if blockingNow { AddonStatus(text: "blocking now", color: .green) }
 				Spacer()
 				if rules.count > 1 {
 					Button("Remove rule") { var all = rules; all.remove(at: i); a.saveRules(n, all) }.buttonStyle(.link).font(.caption)
@@ -4179,8 +4216,9 @@ struct FocusPage: View {
 				Text("Blocked until \(Date(timeIntervalSince1970: u).formatted(date: .omitted, time: .shortened)).").font(.caption).foregroundStyle(.secondary)
 			}
 			if r.policy == "schedule" { scheduleEditor(r, set) }
-			FlowChips(items: groups + r.sites.filter { s in !groups.contains { $0.0 == s } }.map { ($0, $0) }, on: Set(r.sites)) { id in
+			FlowChips(items: groups + sites.filter { s in !groups.contains { $0.0 == s } }.map { ($0, $0) }, on: Set(sites)) { id in
 				var nr = r
+				nr.sites = sites
 				if let k = nr.sites.firstIndex(of: id) { nr.sites.remove(at: k) } else { nr.sites.append(id) }
 				set(nr)
 			}
@@ -4189,6 +4227,39 @@ struct FocusPage: View {
 					.textFieldStyle(.roundedBorder).onSubmit { addCustom(key, r, set) }
 				Button("Add") { addCustom(key, r, set) }.disabled((custom[key] ?? "").trimmingCharacters(in: .whitespaces).isEmpty)
 			}
+		}
+	}
+
+	/// Domains that belong to a group become the group ("m.facebook.com" → Facebook).
+	func canonSites(_ sites: [String]) -> [String] {
+		var out: [String] = []
+		for s in sites {
+			let d = s.lowercased()
+			let g = FocusRule.groupDomains.first { $0.value.contains(d) }?.key ?? d
+			if !out.contains(g) { out.append(g) }
+		}
+		return out
+	}
+
+	func sitesSummary(_ r: FocusRule) -> String {
+		let names = canonSites(r.sites).map { id in groups.first { $0.0 == id }?.1 ?? id }
+		return names.isEmpty ? "No sites" : names.joined(separator: ", ")
+	}
+
+	func whenSummary(_ r: FocusRule) -> String {
+		switch r.policy {
+		case "always": return "Always"
+		case "work_hours": return "Mon–Fri 9:00–18:00"
+		case "until":
+			if let u = r.until, u > Date().timeIntervalSince1970 { return "Until \(Date(timeIntervalSince1970: u).formatted(date: .omitted, time: .shortened))" }
+			return "Hour ended"
+		case "schedule":
+			let e = (r.schedule ?? []).sorted { $0.at < $1.at }
+			guard let first = e.first(where: { $0.block }), let last = e.last(where: { !$0.block }) else { return "Schedule" }
+			let breaks = e.filter { !$0.block }.count - 1
+			let days = (r.days ?? []).isEmpty ? "" : " · " + (r.days ?? []).map { ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"][$0] }.joined(separator: " ")
+			return "\(first.at)–\(last.at)" + (breaks > 0 ? ", \(breaks) breaks" : "") + days
+		default: return "Off"
 		}
 	}
 
@@ -4272,7 +4343,7 @@ struct FlowChips: View {
 	let on: Set<String>
 	let tap: (String) -> Void
 	var body: some View {
-		LazyVGrid(columns: [GridItem(.adaptive(minimum: 110), spacing: 8, alignment: .leading)], alignment: .leading, spacing: 8) {
+		Flow(spacing: 8) {
 			ForEach(items, id: \.0) { id, label in
 				Button { tap(id) } label: {
 					HStack(spacing: 5) {
@@ -4280,7 +4351,6 @@ struct FlowChips: View {
 						Text(label).font(.system(size: 13)).lineLimit(1)
 					}
 					.padding(.horizontal, 10).padding(.vertical, 5)
-					.frame(maxWidth: .infinity, alignment: .leading)
 					.background(Capsule().fill(on.contains(id) ? Color.accentColor.opacity(0.18) : Color.primary.opacity(0.06)))
 					.foregroundStyle(on.contains(id) ? Color.accentColor : Color.primary)
 				}
@@ -4290,6 +4360,30 @@ struct FlowChips: View {
 	}
 }
 
+
+/// Lays children out left to right, wrapping onto new lines; each keeps its own width.
+struct Flow: Layout {
+	var spacing: CGFloat = 8
+	func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+		let width = proposal.width ?? 600
+		var x: CGFloat = 0, y: CGFloat = 0, row: CGFloat = 0, widest: CGFloat = 0
+		for v in subviews {
+			let s = v.sizeThatFits(.unspecified)
+			if x > 0 && x + s.width > width { y += row + spacing; x = 0; row = 0 }
+			x += s.width + spacing; row = max(row, s.height); widest = max(widest, x - spacing)
+		}
+		return CGSize(width: proposal.width ?? widest, height: y + row)
+	}
+	func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+		var x = bounds.minX, y = bounds.minY, row: CGFloat = 0
+		for v in subviews {
+			let s = v.sizeThatFits(.unspecified)
+			if x > bounds.minX && x + s.width > bounds.maxX { y += row + spacing; x = bounds.minX; row = 0 }
+			v.place(at: CGPoint(x: x, y: y), proposal: ProposedViewSize(s))
+			x += s.width + spacing; row = max(row, s.height)
+		}
+	}
+}
 
 // MARK: Cleanup (an agentic add-on)
 
