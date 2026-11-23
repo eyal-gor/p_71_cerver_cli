@@ -436,6 +436,8 @@ final class Model: ObservableObject {
 	@Published var updateProblem: String?
 	@Published var uninstalling = false
 	private var lastUpdateCheck = Date.distantPast
+	@Published var checking = false
+	@Published var checkedAt: Date?
 
 	var updateAvailable: Bool { updates?.any ?? false }
 
@@ -452,10 +454,15 @@ final class Model: ObservableObject {
 		}
 		if !force && Date().timeIntervalSince(lastUpdateCheck) < 3600 { return }
 		lastUpdateCheck = Date()
+		checking = true
 		Task.detached {
 			let (ok, out) = runCerver(["update", "--check", "--json"])
 			let info = ok ? try? JSONDecoder().decode(UpdateInfo.self, from: Data(out.utf8)) : nil
-			await MainActor.run { if let i = info { self.updates = i } }
+			await MainActor.run {
+				if let i = info { self.updates = i }
+				self.checking = false
+				self.checkedAt = Date()
+			}
 		}
 	}
 	private var lastActive = Date()
@@ -2494,11 +2501,14 @@ struct SettingsPage: View {
 				}
 				Divider().padding(.leading, 16)
 				Row(label: u.any ? "An update is available" : (u.latest.isEmpty ? "Couldn't check for updates" : "Up to date")) {
-					if m.updating { ProgressView().controlSize(.small) }
+					if m.updating || m.checking { ProgressView().controlSize(.small) }
+					if !u.any, !m.checking, let t = m.checkedAt {
+						Text("checked \(t.formatted(date: .omitted, time: .shortened)), latest \(u.latest)").foregroundStyle(.secondary)
+					}
 					if u.any {
 						Button("Update now") { m.updateNow() }.buttonStyle(.borderedProminent).disabled(m.updating)
 					} else {
-						Button("Check again") { m.checkUpdates(force: true) }.buttonStyle(.link)
+						Button(m.checking ? "Checking…" : "Check again") { m.checkUpdates(force: true) }.buttonStyle(.link).disabled(m.checking)
 					}
 				}
 			} else {
