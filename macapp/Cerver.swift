@@ -827,6 +827,8 @@ struct MainWindow: View {
 	@AppStorage("poolFolded") private var poolFolded = false
 	@State private var hoverPool = false
 	@AppStorage("addonsFolded") private var addonsFolded = true
+	@AppStorage("moreFolded") private var moreFolded = true
+	var moreOpen: Bool { !moreFolded || [Page.map, .permissions, .addons, .safety, .focus, .cleanup, .exitNode].contains(page) }
 	@State private var hoverAddons = false
 	// `-startPage thisMac` on launch opens that page (for screenshots).
 	@State private var page: Page? = ["thisMac": Page.thisMac, "add": Page.add, "settings": Page.settings, "updates": Page.updates, "session": Page.session, "pool": Page.pool, "permissions": Page.permissions, "security": Page.permissions, "addons": Page.addons, "safety": Page.safety, "focus": Page.focus, "cleanup": Page.cleanup, "exit": Page.exitNode, "vpn": Page.exitNode, "profile": Page.profile, "connectors": Page.connectors, "people": Page.people, "map": Page.map][UserDefaults.standard.string(forKey: "startPage") ?? ""] ?? .pool
@@ -944,43 +946,59 @@ struct MainWindow: View {
 					}
 				}
 				Section {
-					Label("Map", systemImage: "map")
-						.tag(Page.map)
 					Label("Connectors", systemImage: "app.connected.to.app.below.fill")
 						.tag(Page.connectors)
 					Label("People", systemImage: "person.2")
 						.tag(Page.people)
-					Label("Security", systemImage: "lock.shield")
-						.tag(Page.permissions)
-					HStack(spacing: 4) {
-						Label("Add-ons", systemImage: "puzzlepiece.extension")
-						Spacer()
-						Button { withAnimation(.easeInOut(duration: 0.15)) { addonsFolded.toggle() } } label: {
-							Image(systemName: addonsFolded ? "chevron.right" : "chevron.down")
-								.font(.system(size: 11, weight: .semibold))
-								.frame(width: 22, height: 18)
-								.background(RoundedRectangle(cornerRadius: 5).fill(Color.primary.opacity(hoverAddons ? 0.08 : 0)))
+					// More: folded by default; opens by itself when one of its pages is showing.
+					Button { withAnimation(.easeInOut(duration: 0.15)) { moreFolded.toggle() } } label: {
+						HStack(spacing: 4) {
+							Label("More", systemImage: "ellipsis.circle")
+							Spacer()
+							Image(systemName: moreOpen ? "chevron.down" : "chevron.right")
+								.font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
 						}
-						.buttonStyle(.plain)
-						.foregroundStyle(.secondary)
-						.opacity(hoverAddons ? 1 : 0)
-						.help(addonsFolded ? "Show the add-ons" : "Hide the add-ons")
+						.contentShape(Rectangle())
 					}
-					.onHover { hoverAddons = $0 }
-					.tag(Page.addons)
-					if !addonsFolded || [Page.safety, .focus, .cleanup, .exitNode].contains(page) {
-						Label("Safety", systemImage: "checkmark.shield")
+					.buttonStyle(.plain)
+					if moreOpen {
+						Label("Map", systemImage: "map")
 							.padding(.leading, 14)
-							.tag(Page.safety)
-						Label("Focus", systemImage: "moon.zzz")
+							.tag(Page.map)
+						Label("Security", systemImage: "lock.shield")
 							.padding(.leading, 14)
-							.tag(Page.focus)
-						Label("Cleanup", systemImage: "sparkles")
-							.padding(.leading, 14)
-							.tag(Page.cleanup)
-						Label("VPN", systemImage: "lock.shield")
-							.padding(.leading, 14)
-							.tag(Page.exitNode)
+							.tag(Page.permissions)
+						HStack(spacing: 4) {
+							Label("Add-ons", systemImage: "puzzlepiece.extension")
+							Spacer()
+							Button { withAnimation(.easeInOut(duration: 0.15)) { addonsFolded.toggle() } } label: {
+								Image(systemName: addonsFolded ? "chevron.right" : "chevron.down")
+									.font(.system(size: 11, weight: .semibold))
+									.frame(width: 22, height: 18)
+									.background(RoundedRectangle(cornerRadius: 5).fill(Color.primary.opacity(hoverAddons ? 0.08 : 0)))
+							}
+							.buttonStyle(.plain)
+							.foregroundStyle(.secondary)
+							.opacity(hoverAddons ? 1 : 0)
+							.help(addonsFolded ? "Show the add-ons" : "Hide the add-ons")
+						}
+						.padding(.leading, 14)
+						.onHover { hoverAddons = $0 }
+						.tag(Page.addons)
+						if !addonsFolded || [Page.safety, .focus, .cleanup, .exitNode].contains(page) {
+							Label("Safety", systemImage: "checkmark.shield")
+								.padding(.leading, 28)
+								.tag(Page.safety)
+							Label("Focus", systemImage: "moon.zzz")
+								.padding(.leading, 28)
+								.tag(Page.focus)
+							Label("Cleanup", systemImage: "sparkles")
+								.padding(.leading, 28)
+								.tag(Page.cleanup)
+							Label("VPN", systemImage: "network.badge.shield.half.filled")
+								.padding(.leading, 28)
+								.tag(Page.exitNode)
+						}
 					}
 				}
 			}
