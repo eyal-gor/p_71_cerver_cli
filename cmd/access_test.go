@@ -1,8 +1,14 @@
 package cmd
 
-import "testing"
+import (
+	"runtime"
+	"testing"
+)
 
 func TestAccessLists(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("agent folder rules are macOS and Linux only")
+	}
 	r := accessRules{Mode: "as_you"}
 	r, _, _ = applyAccess(r, "allow", []string{"~/Code"})
 	r, _, _ = applyAccess(r, "ask", []string{"~/Code"}) // moves, never in two lists
