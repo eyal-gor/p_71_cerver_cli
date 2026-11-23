@@ -818,7 +818,7 @@ struct MainWindow: View {
 	@StateObject private var addons = AddonsModel()
 	@AppStorage("poolFolded") private var poolFolded = false
 	@State private var hoverPool = false
-	@AppStorage("addonsFolded") private var addonsFolded = false
+	@AppStorage("addonsFolded") private var addonsFolded = true
 	@State private var hoverAddons = false
 	// `-startPage thisMac` on launch opens that page (for screenshots).
 	@State private var page: Page? = ["thisMac": Page.thisMac, "add": Page.add, "settings": Page.settings, "session": Page.session, "pool": Page.pool, "permissions": Page.permissions, "security": Page.permissions, "addons": Page.addons, "safety": Page.safety, "focus": Page.focus, "cleanup": Page.cleanup, "profile": Page.profile, "connectors": Page.connectors, "people": Page.people, "map": Page.map][UserDefaults.standard.string(forKey: "startPage") ?? ""] ?? .pool
