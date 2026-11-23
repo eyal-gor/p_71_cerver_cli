@@ -828,7 +828,9 @@ struct MainWindow: View {
 	@State private var hoverPool = false
 	@AppStorage("addonsFolded") private var addonsFolded = true
 	@AppStorage("moreFolded") private var moreFolded = true
-	var moreOpen: Bool { !moreFolded || [Page.map, .permissions, .addons, .safety, .focus, .cleanup, .exitNode].contains(page) }
+	/// Always foldable; going to one of its pages (e.g. -startPage) opens it once.
+	var moreOpen: Bool { !moreFolded }
+	static let morePages: [Page] = [.map, .people, .permissions, .addons, .safety, .focus, .cleanup, .exitNode]
 	@State private var hoverAddons = false
 	// `-startPage thisMac` on launch opens that page (for screenshots).
 	@State private var page: Page? = ["thisMac": Page.thisMac, "add": Page.add, "settings": Page.settings, "updates": Page.updates, "session": Page.session, "pool": Page.pool, "permissions": Page.permissions, "security": Page.permissions, "addons": Page.addons, "safety": Page.safety, "focus": Page.focus, "cleanup": Page.cleanup, "exit": Page.exitNode, "vpn": Page.exitNode, "profile": Page.profile, "connectors": Page.connectors, "people": Page.people, "map": Page.map][UserDefaults.standard.string(forKey: "startPage") ?? ""] ?? .pool
@@ -948,8 +950,6 @@ struct MainWindow: View {
 				Section {
 					Label("Connectors", systemImage: "app.connected.to.app.below.fill")
 						.tag(Page.connectors)
-					Label("People", systemImage: "person.2")
-						.tag(Page.people)
 					// More: folded by default; opens by itself when one of its pages is showing.
 					Button { withAnimation(.easeInOut(duration: 0.15)) { moreFolded.toggle() } } label: {
 						HStack(spacing: 4) {
@@ -965,6 +965,9 @@ struct MainWindow: View {
 						Label("Map", systemImage: "map")
 							.padding(.leading, 14)
 							.tag(Page.map)
+						Label("People", systemImage: "person.2")
+							.padding(.leading, 14)
+							.tag(Page.people)
 						Label("Security", systemImage: "lock.shield")
 							.padding(.leading, 14)
 							.tag(Page.permissions)
@@ -985,7 +988,7 @@ struct MainWindow: View {
 						.padding(.leading, 14)
 						.onHover { hoverAddons = $0 }
 						.tag(Page.addons)
-						if !addonsFolded || [Page.safety, .focus, .cleanup, .exitNode].contains(page) {
+						if !addonsFolded {
 							Label("Safety", systemImage: "checkmark.shield")
 								.padding(.leading, 28)
 								.tag(Page.safety)
@@ -1003,7 +1006,11 @@ struct MainWindow: View {
 				}
 			}
 			.listStyle(.sidebar)
-			.onChange(of: page) { _ in nav.current = .overview }
+			.onChange(of: page) { p in
+				nav.current = .overview
+				if let p, Self.morePages.contains(p), moreFolded { moreFolded = false }
+			}
+			.onAppear { if let p = page, Self.morePages.contains(p) { moreFolded = false } }
 			.task { m.loadPoolName() }
 			Button { page = .updates } label: {
 				HStack(spacing: 6) {
