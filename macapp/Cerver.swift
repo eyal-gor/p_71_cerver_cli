@@ -795,7 +795,7 @@ func howConnected(_ p: NetPeer) -> String {
 // MARK: - Window (sidebar + page, in the style of the ChatGPT Mac app)
 
 enum Page: Hashable {
-	case map, pool, permissions, addons, safety, focus, thisMac, computer(String), add, settings, session, profile, connectors, people
+	case map, pool, permissions, addons, safety, focus, cleanup, thisMac, computer(String), add, settings, session, profile, connectors, people
 }
 
 struct MainWindow: View {
@@ -807,7 +807,7 @@ struct MainWindow: View {
 	@AppStorage("poolFolded") private var poolFolded = false
 	@State private var hoverPool = false
 	// `-startPage thisMac` on launch opens that page (for screenshots).
-	@State private var page: Page? = ["thisMac": Page.thisMac, "add": Page.add, "settings": Page.settings, "session": Page.session, "pool": Page.pool, "permissions": Page.permissions, "security": Page.permissions, "addons": Page.addons, "safety": Page.safety, "focus": Page.focus, "profile": Page.profile, "connectors": Page.connectors, "people": Page.people, "map": Page.map][UserDefaults.standard.string(forKey: "startPage") ?? ""] ?? .pool
+	@State private var page: Page? = ["thisMac": Page.thisMac, "add": Page.add, "settings": Page.settings, "session": Page.session, "pool": Page.pool, "permissions": Page.permissions, "security": Page.permissions, "addons": Page.addons, "safety": Page.safety, "focus": Page.focus, "cleanup": Page.cleanup, "profile": Page.profile, "connectors": Page.connectors, "people": Page.people, "map": Page.map][UserDefaults.standard.string(forKey: "startPage") ?? ""] ?? .pool
 
 	var body: some View {
 		NavigationSplitView {
@@ -938,6 +938,9 @@ struct MainWindow: View {
 					Label("Focus", systemImage: "moon.zzz")
 						.padding(.leading, 14)
 						.tag(Page.focus)
+					Label("Cleanup", systemImage: "sparkles")
+						.padding(.leading, 14)
+						.tag(Page.cleanup)
 				}
 			}
 			.listStyle(.sidebar)
@@ -1061,6 +1064,7 @@ struct MainWindow: View {
 			case .addons: AddonsHome(a: addons, open: { page = $0 })
 			case .safety: SafetyPage(m: m, a: addons)
 			case .focus: FocusPage(m: m, a: addons)
+			case .cleanup: CleanupPage(m: m).environment(\.askAgent, askAgent)
 			case .thisMac: ThisMacPage(m: m, nav: nav).environment(\.askAgent, askAgent)
 			case .computer(let id):
 				if let c = m.computers.first(where: { $0.id == id }) { ComputerPage(m: m, c: c, nav: nav).environment(\.askAgent, askAgent) } else { PoolPage(m: m, open: { page = $0 }) }
@@ -3879,6 +3883,9 @@ struct AddonsHome: View {
 				item("checkmark.shield", "Safety", "Block malware, adult sites, or turn on kids safety.",
 				     a.nodes.filter { a.level($0) != "off" }.count, .safety)
 				Divider().padding(.leading, 16)
+				item("sparkles", "Cleanup", "An agent finds what's filling a computer's disk and what slows it down, and cleans the safe things when you say so.",
+				     -1, .cleanup)
+				Divider().padding(.leading, 16)
 				item("moon.zzz", "Focus", "Block distracting sites like Facebook, Instagram and YouTube: always, in work hours, or for an hour.",
 				     a.nodes.filter { a.policy($0) != "off" && !a.sites($0).isEmpty }.count, .focus)
 			}
@@ -3892,7 +3899,9 @@ struct AddonsHome: View {
 				VStack(alignment: .leading, spacing: 3) {
 					Text(name).font(.system(size: 15, weight: .semibold))
 					Text(what).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-					Text(on == 0 ? "Off on all your computers" : "On for \(on) of \(a.nodes.count) computers").font(.caption).foregroundStyle(.secondary)
+					if on >= 0 {
+						Text(on == 0 ? "Off on all your computers" : "On for \(on) of \(a.nodes.count) computers").font(.caption).foregroundStyle(.secondary)
+					}
 				}
 				Spacer()
 				Image(systemName: "chevron.right").foregroundStyle(.secondary)
@@ -4038,3 +4047,99 @@ struct FlowChips: View {
 		}
 	}
 }
+
+
+// MARK: Cleanup (an agentic add-on)
+
+/// Cleanup: an agent on the chosen computer finds what fills its disk and
+/// what slows it down, and cleans only the safe things, only when asked.
+/// Each button hands the task to Claude on that computer (Ask Compute Pool).
+struct CleanupPage: View {
+	@ObservedObject var m: Model
+	@Environment(\.askAgent) private var ask
+	@State private var confirm: Computer?
+
+	var computers: [Computer] { m.computers.filter { !$0.isPhone && ($0.pool != nil || $0.isThisMac) } }
+
+	var body: some View {
+		PageLayout(title: "Cleanup", subtitle: "An agent on each computer finds what's filling its disk and what's slowing it down. It only deletes when you say so, and never your own files.") {
+			ForEach(computers) { c in
+				let online = c.isThisMac || c.pool?.online == true
+				Card {
+					HStack {
+						Text(c.name + (c.isThisMac ? "  (this Mac)" : "")).font(.system(size: 15, weight: .semibold))
+						Spacer()
+						if let f = c.spec?.disk_free_gb {
+							Text("\(Int(f)) GB free").font(.callout).foregroundStyle(f < 30 ? Color.orange : Color.secondary)
+						}
+					}
+					.padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 10)
+					HStack(spacing: 10) {
+						Button { ask.run(cleanupFindPrompt, c.name, c.isThisMac) } label: { Label("Find what's taking space", systemImage: "magnifyingglass") }
+						Button { ask.run(cleanupSlowPrompt, c.name, c.isThisMac) } label: { Label("Why is it slow?", systemImage: "gauge.with.needle") }
+						Button { confirm = c } label: { Label("Clean the safe things…", systemImage: "trash") }
+					}
+					.disabled(!online)
+					.padding(.horizontal, 16).padding(.bottom, 14)
+					if !online {
+						Text("Offline: it needs to be on to run an agent.").font(.caption).foregroundStyle(.secondary)
+							.padding(.horizontal, 16).padding(.bottom, 12)
+					}
+				}
+			}
+			DisclosureGroup("See the agents' instructions") {
+				VStack(alignment: .leading, spacing: 10) {
+					ForEach([("Find what's taking space", cleanupFindPrompt), ("Why is it slow?", cleanupSlowPrompt), ("Clean the safe things", cleanupCleanPrompt)], id: \.0) { t, p in
+						Text(t).font(.system(size: 13, weight: .semibold))
+						Text(p).font(.system(size: 12, design: .monospaced)).textSelection(.enabled)
+							.frame(maxWidth: .infinity, alignment: .leading).padding(10)
+							.background(RoundedRectangle(cornerRadius: 8).fill(Color.primary.opacity(0.04)))
+					}
+				}
+				.padding(.top, 6)
+			}
+			.font(.callout)
+			Text("Each button opens the conversation in Ask Compute Pool, where you can ask follow-ups. Agents can do the same from Claude Code with cerver run.")
+				.font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+		}
+		.alert("Clean the safe things on \(confirm?.name ?? "")?", isPresented: Binding(get: { confirm != nil }, set: { if !$0 { confirm = nil } }), presenting: confirm) { c in
+			Button("Clean") { ask.run(cleanupCleanPrompt, c.name, c.isThisMac) }
+			Button("Cancel", role: .cancel) {}
+		} message: { _ in
+			Text("The agent empties caches, old logs, unused Docker data and the Trash, and reports how much it freed. It never touches your documents, photos, code or app data.")
+		}
+	}
+}
+
+let cleanupFindPrompt = """
+Find what's taking the most disk space on this computer. Read only: don't delete, move or change anything.
+
+1. Free and total space: df -h / (and diskutil info / on a Mac).
+2. The biggest folders in the home folder: du -xhd1 ~ | sort -hr | head -15, then inside the 3 biggest.
+3. Check the usual suspects: ~/Library/Caches, ~/.cache, ~/Library/Developer (Xcode), Docker, node_modules folders under ~/Code or ~/Projects, big log files (find ~ -name '*.log' -size +500M), ~/Downloads, the Trash, local Time Machine snapshots (tmutil listlocalsnapshots /).
+
+Reply short: free/total first, then a table of the top items (size, what it is), then two lists: safe to clean (rebuilds or re-downloads by itself) with the GB it would free, and personal data to review yourself. End with the total you could free safely.
+"""
+
+let cleanupSlowPrompt = """
+Find out why this computer is slow. Read only: don't quit, kill or change anything.
+
+Check: load and uptime (uptime), the top CPU and memory users (top -l 1 -o cpu -n 10 on a Mac, ps aux --sort=-%cpu | head on Linux), memory pressure (memory_pressure on a Mac, free -h on Linux), swap use, free disk space (under ~10% free slows a Mac down), login items and background agents that use a lot, and very old uptime.
+
+Reply short: the one or two main causes first, with the numbers that show it, then what to do about each (and which of those an agent could do for you).
+"""
+
+let cleanupCleanPrompt = """
+Free disk space on this computer, safely. The owner asked for this.
+
+Allowed (each one rebuilds or re-downloads by itself), measure each before and after:
+- caches: ~/Library/Caches/*, ~/.cache/* (uv, pip, puppeteer, huggingface), npm cache clean --force, pnpm store prune, brew cleanup
+- Xcode: ~/Library/Developer/Xcode/DerivedData/*
+- Docker: docker system prune -f (NOT -a, NOT volumes)
+- log files over 500 MB in ~/Library/Logs or a dot-folder of a tool: empty them (truncate), don't delete
+- the Trash: ~/.Trash/*
+
+Never touch: Documents, Desktop, Pictures, Movies, Music, Downloads, ~/Code or any project, app data (WhatsApp, Mail, browser profiles), keys and settings (~/.ssh, ~/.config), anything you're unsure about. Don't use sudo.
+
+Reply short: free space before → after, then each item you cleaned with the GB it freed, and anything big you left for the owner to decide.
+"""
