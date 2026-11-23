@@ -455,8 +455,18 @@ final class Model: ObservableObject {
 	func updateNow() {
 		updating = true
 		updateProblem = nil
+		let netName = status?.name ?? ""
+		let netBehind = updates?.net?.update == true
 		Task.detached {
 			let (ok, out) = runCerver(["update", "--app"])
+			// The network service runs as admin, so updating it now needs the
+			// password (macOS asks); otherwise it updates itself later.
+			if ok, netBehind, !netName.isEmpty, let bin = Bundle.main.path(forResource: "cerver", ofType: nil) {
+				let p = Process()
+				p.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+				p.arguments = ["-e", "do shell script \"'\(bin)' net install --name '\(netName.replacingOccurrences(of: "'", with: ""))'\" with administrator privileges"]
+				try? p.run(); p.waitUntilExit()
+			}
 			await MainActor.run {
 				self.updating = false
 				if !ok || out.contains("couldn't") {
