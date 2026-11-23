@@ -87,6 +87,11 @@ commands:
                cerver addons list               # every computer on your network
                cerver addons mac-mini safety kids
                cerver addons mac-mini focus work_hours youtube x   # off|work_hours|hour|always
+  exit       Exit nodes: send a computer's internet through another one (e.g. home).
+               cerver exit                                  # who offers, who uses which
+               cerver exit offer mac-mini                   # mac-mini becomes an exit node
+               cerver exit use macbook mac-mini             # macbook's internet goes through it
+               cerver exit off macbook                      # macbook goes direct again
   forward    Reach an app on one of your machines from here, peer to peer.
                cerver forward MacBook-Air-2026 3456          # its port 3456 at localhost:3456 here
                cerver forward MacBook-Air-2026 3456 --local 8080
@@ -235,6 +240,8 @@ func main() {
 		err = cmd.Net(args)
 	case "vm":
 		err = cmd.VM(args)
+	case "exit":
+		err = cmd.Exit(args)
 	case "addons":
 		err = cmd.Addons(args)
 	case "relay":

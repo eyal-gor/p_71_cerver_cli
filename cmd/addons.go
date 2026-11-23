@@ -239,7 +239,9 @@ type remoteNode struct {
 		Level string        `json:"level"`
 		Focus focusSettings `json:"focus"`
 	} `json:"addons"`
-	Applied json.RawMessage `json:"addons_applied"`
+	Applied   json.RawMessage `json:"addons_applied"`
+	ExitOffer bool            `json:"exit_offer"`
+	ExitVia   string          `json:"exit_via"`
 }
 
 func remoteNodes(ctx context.Context) ([]remoteNode, *gateway.Client, error) {

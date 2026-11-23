@@ -807,7 +807,7 @@ func howConnected(_ p: NetPeer) -> String {
 // MARK: - Window (sidebar + page, in the style of the ChatGPT Mac app)
 
 enum Page: Hashable {
-	case map, pool, permissions, addons, safety, focus, cleanup, thisMac, computer(String), add, settings, session, profile, connectors, people
+	case map, pool, permissions, addons, safety, focus, cleanup, exitNode, thisMac, computer(String), add, settings, session, profile, connectors, people
 }
 
 struct MainWindow: View {
@@ -821,7 +821,7 @@ struct MainWindow: View {
 	@AppStorage("addonsFolded") private var addonsFolded = true
 	@State private var hoverAddons = false
 	// `-startPage thisMac` on launch opens that page (for screenshots).
-	@State private var page: Page? = ["thisMac": Page.thisMac, "add": Page.add, "settings": Page.settings, "session": Page.session, "pool": Page.pool, "permissions": Page.permissions, "security": Page.permissions, "addons": Page.addons, "safety": Page.safety, "focus": Page.focus, "cleanup": Page.cleanup, "profile": Page.profile, "connectors": Page.connectors, "people": Page.people, "map": Page.map][UserDefaults.standard.string(forKey: "startPage") ?? ""] ?? .pool
+	@State private var page: Page? = ["thisMac": Page.thisMac, "add": Page.add, "settings": Page.settings, "session": Page.session, "pool": Page.pool, "permissions": Page.permissions, "security": Page.permissions, "addons": Page.addons, "safety": Page.safety, "focus": Page.focus, "cleanup": Page.cleanup, "exit": Page.exitNode, "profile": Page.profile, "connectors": Page.connectors, "people": Page.people, "map": Page.map][UserDefaults.standard.string(forKey: "startPage") ?? ""] ?? .pool
 
 	var body: some View {
 		NavigationSplitView {
@@ -960,7 +960,7 @@ struct MainWindow: View {
 					}
 					.onHover { hoverAddons = $0 }
 					.tag(Page.addons)
-					if !addonsFolded || [Page.safety, .focus, .cleanup].contains(page) {
+					if !addonsFolded || [Page.safety, .focus, .cleanup, .exitNode].contains(page) {
 						Label("Safety", systemImage: "checkmark.shield")
 							.padding(.leading, 14)
 							.tag(Page.safety)
@@ -970,6 +970,9 @@ struct MainWindow: View {
 						Label("Cleanup", systemImage: "sparkles")
 							.padding(.leading, 14)
 							.tag(Page.cleanup)
+						Label("Exit node", systemImage: "arrow.up.right.circle")
+							.padding(.leading, 14)
+							.tag(Page.exitNode)
 					}
 				}
 			}
@@ -1093,6 +1096,7 @@ struct MainWindow: View {
 			case .permissions: PermissionsPage(m: m)
 			case .addons: AddonsHome(a: addons, open: { page = $0 })
 			case .safety: SafetyPage(m: m, a: addons)
+			case .exitNode: ExitNodePage(m: m, a: addons)
 			case .focus: FocusPage(m: m, a: addons)
 			case .cleanup: CleanupPage(m: m).environment(\.askAgent, askAgent)
 			case .thisMac: ThisMacPage(m: m, nav: nav).environment(\.askAgent, askAgent)
@@ -3830,8 +3834,10 @@ struct NetNodeAddons: Decodable, Identifiable {
 	struct Applied: Decodable {
 		struct Rule: Decodable { let name: String?; let policy: String; let sites: [String]; let on: Bool }
 		struct Focus: Decodable { let policy: String?; let sites: [String]?; let blocking: Bool?; let until: Double?; let rules: [Rule]? }
+		struct Exit: Decodable { let offering: Bool?; let via: String?; let active: Bool?; let why: String? }
 		let level: String?
 		let focus: Focus?
+		let exit: Exit?
 		let at: Double?
 	}
 	let ip: String
@@ -3840,6 +3846,8 @@ struct NetNodeAddons: Decodable, Identifiable {
 	let os: String?
 	let addons: Wanted?
 	let addons_applied: Applied?
+	let exit_offer: Bool?
+	let exit_via: String?
 	var id: String { ip }
 }
 
@@ -3899,6 +3907,18 @@ struct FocusRule: Codable, Equatable, Identifiable {
 		send(n, ["focus": ["rules": list]])
 	}
 
+	/// Exit node: {offer: Bool} or {via: ip or NSNull()}.
+	func saveExit(_ n: NetNodeAddons, _ body: [String: Any]) {
+		let data = try? JSONSerialization.data(withJSONObject: body)
+		saving.insert(n.ip)
+		Task {
+			let ok = await gatewayRequest("PUT", "/v2/net/nodes/\(n.ip)/exit", body: data) != nil
+			saving.remove(n.ip)
+			problem = ok ? nil : "Couldn't change it for \(n.name). Try again."
+			await load()
+		}
+	}
+
 	/// Safety only (Focus stays as it is).
 	func save(_ n: NetNodeAddons, level: String) { send(n, ["level": level]) }
 
@@ -3955,6 +3975,9 @@ struct AddonsHome: View {
 				Divider().padding(.leading, 16)
 				item("moon.zzz", "Focus", "Block distracting sites like Facebook, Instagram and YouTube: always, in work hours, or for an hour.",
 				     a.nodes.filter { a.rules($0).contains { $0.policy != "off" && !$0.sites.isEmpty } }.count, .focus)
+				Divider().padding(.leading, 16)
+				item("arrow.up.right.circle", "Exit node", "On café Wi-Fi, send your laptop's internet through your computer at home, encrypted. The café sees nothing.",
+				     a.nodes.filter { $0.exit_via != nil }.count, .exitNode)
 			}
 		}
 		.task { await a.load() }
@@ -4016,6 +4039,62 @@ struct SafetyPage: View {
 			}
 			if let p = a.problem, !a.nodes.isEmpty { Text(p).font(.callout).foregroundStyle(.red) }
 			Text("Each level includes the ones before it. Cerver's names for your computers keep working.")
+				.font(.caption).foregroundStyle(.secondary)
+		}
+		.task { while !Task.isCancelled { await a.load(); try? await Task.sleep(nanoseconds: 4_000_000_000) } }
+	}
+}
+
+/// Exit node: a computer (at home) your other computers can send their
+/// internet through, encrypted, e.g. from café Wi-Fi.
+struct ExitNodePage: View {
+	@ObservedObject var m: Model
+	@ObservedObject var a: AddonsModel
+
+	func now(_ n: NetNodeAddons) -> (String, Color) {
+		let e = n.addons_applied?.exit
+		if (n.os ?? "darwin") != "darwin" { return ("Macs only for now", .secondary) }
+		if !n.online { return ("Offline", .secondary) }
+		if let why = e?.why, !why.isEmpty { return (why, .orange) }
+		if n.exit_via != nil { return e?.active == true ? ("Internet goes through the exit node", .green) : ("Switching…", .orange) }
+		if n.exit_offer == true { return e?.offering == true ? ("Ready as an exit node", .green) : ("Setting up… (needs a Cerver update)", .orange) }
+		return ("Uses its own connection", .secondary)
+	}
+
+	var body: some View {
+		PageLayout(title: "Exit node", subtitle: "Send a computer's internet through another one of yours, encrypted. From café Wi-Fi, the café sees only one scrambled connection, and websites see your home's address.") {
+			if a.nodes.isEmpty { Text(a.problem ?? "Loading your computers…").foregroundStyle(.secondary) }
+			ForEach(a.nodes) { n in
+				let exits = a.nodes.filter { $0.exit_offer == true && $0.ip != n.ip }
+				Card {
+					HStack {
+						Text(n.name + (n.ip == m.status?.ip ? "  (this Mac)" : "")).font(.system(size: 15, weight: .semibold))
+						Spacer()
+						if a.saving.contains(n.ip) { ProgressView().controlSize(.small) }
+						let st = now(n)
+						AddonStatus(text: st.0, color: st.1)
+					}
+					.padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 10)
+					Divider().padding(.leading, 16)
+					Row(label: "Offer as exit node") {
+						Toggle("", isOn: Binding(get: { n.exit_offer == true }, set: { a.saveExit(n, ["offer": $0]) }))
+							.toggleStyle(.switch).labelsHidden()
+							.disabled(n.exit_via != nil)
+					}
+					.help(n.exit_via != nil ? "It sends its own internet through an exit node; turn that off first." : "Your other computers can send their internet through this one. Best on a computer that stays home and on.")
+					Divider().padding(.leading, 16)
+					Row(label: "Internet goes") {
+						Picker("", selection: Binding(get: { n.exit_via ?? "" }, set: { v in a.saveExit(n, ["via": v.isEmpty ? NSNull() : v]) })) {
+							Text("Directly").tag("")
+							ForEach(exits) { e in Text("Through \(e.name)").tag(e.ip) }
+						}
+						.labelsHidden().frame(maxWidth: 260)
+						.disabled(n.exit_offer == true || (exits.isEmpty && n.exit_via == nil))
+					}
+				}
+			}
+			if let p = a.problem, !a.nodes.isEmpty { Text(p).font(.callout).foregroundStyle(.red) }
+			Text("Speed is limited by the exit computer's home upload. If it stops answering, the computer goes back to its own connection by itself. Your Safety and Focus settings keep working.")
 				.font(.caption).foregroundStyle(.secondary)
 		}
 		.task { while !Task.isCancelled { await a.load(); try? await Task.sleep(nanoseconds: 4_000_000_000) } }

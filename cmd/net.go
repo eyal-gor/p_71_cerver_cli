@@ -200,6 +200,9 @@ func netUp(args []string) error {
 		return err
 	}
 	updateNames(*name, node)
+	exits := newExitCtl(ifname, gw.BaseURL)
+	defer func() { exits.stopUsing(""); exits.stopOffering() }()
+	exits.update(node)
 	defer wgnet.WriteHosts(hostsFile, "")
 	writeNetStatus(*name, ip, false, node.Status())
 	defer os.Remove(netStatusFile)
@@ -253,7 +256,8 @@ func netUp(args []string) error {
 			}
 			node.Retry()
 			writeNetStatus(*name, ip, relay.Connected(), node.Status())
-			applyFocus() // Add-ons → Focus: block distracting sites by its schedule
+			applyFocus()       // Add-ons → Focus: block distracting sites by its schedule
+			exits.update(node) // exit nodes: offer this one, or use another
 		case <-selfUpdate.C:
 			if netSelfUpdate(ctx) {
 				fmt.Println("Updated; restarting with the new version.")

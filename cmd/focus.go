@@ -363,6 +363,7 @@ func addonsApplied() json.RawMessage {
 	b, _ := json.Marshal(map[string]any{
 		"level": st.Level, "dns": st.DNS,
 		"focus": map[string]any{"policy": st.Focus.Policy, "sites": st.Focus.Sites, "blocking": st.Focus.Blocking, "until": st.Focus.Until, "rules": st.Focus.Rules},
+		"exit":  exitApplied(),
 		"at":    time.Now().Unix(),
 	})
 	return b

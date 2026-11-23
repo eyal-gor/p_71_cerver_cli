@@ -100,6 +100,12 @@ type CheckInAnswer struct {
 	Peers       []Peer `json:"peers"`
 	// Add-ons the owner chose for this device (null: none chosen from the app).
 	Addons json.RawMessage `json:"addons,omitempty"`
+	// Exit node: Offer = let your other devices send their internet through
+	// this one; Via = send this device's internet through that device (its IP).
+	Exit struct {
+		Offer bool   `json:"offer"`
+		Via   string `json:"via"`
+	} `json:"exit"`
 }
 
 type peerState struct {
@@ -141,11 +147,12 @@ type Node struct {
 	// be told about changes (a phone's WireGuard app) keep reaching this one.
 	Port uint16
 
-	mu      sync.Mutex
-	peers   map[string]*peerState
-	public  netip.Addr
-	Answer  *CheckInAnswer
-	natWarn bool
+	mu       sync.Mutex
+	exitPeer string // this device's internet goes to that peer (all addresses)
+	peers    map[string]*peerState
+	public   netip.Addr
+	Answer   *CheckInAnswer
+	natWarn  bool
 }
 
 // Start sets the key and opens the socket.
@@ -303,6 +310,9 @@ func (n *Node) apply(peers []Peer) error {
 			st.candidates = append(st.candidates, RelayAddr(k))
 		}
 		fmt.Fprintf(&cfg, "public_key=%s\nreplace_allowed_ips=true\nallowed_ip=%s/32\npersistent_keepalive_interval=25\n", hexKey, p.IP)
+		if p.IP == n.exitPeer {
+			cfg.WriteString("allowed_ip=0.0.0.0/0\n") // the exit node: everything else goes to it
+		}
 		if n.DirectOff && n.Relay && !strings.HasPrefix(actual[hexKey], relayPrefix) {
 			// Just turned off (or the peer roamed us): onto the relay now.
 			// Keepalive 0→25 sends a packet at once, so the peer follows.
@@ -447,6 +457,19 @@ func (n *Node) tryFor() time.Duration {
 }
 
 // Retry moves peers that aren't answering on to their next address, without
+// SetExitPeer sends every address that isn't a peer's to the peer at ip
+// (its exit node), or to nobody with "".
+func (n *Node) SetExitPeer(ip string) error {
+	n.mu.Lock()
+	n.exitPeer = ip
+	ans := n.Answer
+	n.mu.Unlock()
+	if ans == nil {
+		return nil
+	}
+	return n.apply(ans.Peers)
+}
+
 // checking in again. Call it every few seconds so a blocked direct path
 // gives way to the relay quickly.
 func (n *Node) Retry() error {
