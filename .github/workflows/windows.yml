@@ -1,0 +1,91 @@
+# Cerver on Windows, end to end on a real Windows machine: build cerver.exe and
+# the app, install them with cerver.ai/install.ps1 (from these builds), and
+# check that the app runs the relay and shows this PC's Agents page.
+name: windows
+on:
+  push:
+    branches: [main]
+    paths: ["cmd/**", "internal/**", "go.mod", ".github/workflows/windows.yml"]
+  workflow_dispatch:
+jobs:
+  install:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: false
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: false
+      - name: Build
+        shell: pwsh
+        env:
+          GOFLAGS: -mod=mod
+          CGO_ENABLED: "0"
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          $LD = "-X github.com/eyal-gor/p_71_cerver_cli/internal/version.Version=1.0.0-test"
+          go build -ldflags "$LD" -o dist/cerver-windows-amd64.exe ./cmd/cerver
+          go build -ldflags "$LD -H=windowsgui" -o dist/Cerver-windows-amd64.exe ./cmd/cerverapp
+          go test ./cmd/
+          Get-ChildItem dist -Filter *.exe | ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)" } | Set-Content dist/SHA256SUMS
+          Get-Content dist/SHA256SUMS
+      - name: Install with install.ps1
+        shell: pwsh
+        env:
+          CERVER_SKIP_CLI_PROVISION: "1"
+        run: |
+          # Signed in already (a stand-in key: the relay starts, the gateway refuses it)
+          New-Item -ItemType Directory -Force "$HOME\.cerver" | Out-Null
+          "CERVER_API_KEY=cerver_test_not_real`nCERVER_GATEWAY_URL=https://gateway.cerver.ai" | Set-Content "$HOME\.cerver\cerver.env"
+          $env:CERVER_FROM = (Resolve-Path dist).Path
+          $env:CERVER_MACHINE_NAME = "win-ci"
+          Invoke-RestMethod https://cerver.ai/install.ps1 | Set-Content install.ps1
+          ./install.ps1
+      - name: The app runs the relay and the page
+        shell: pwsh
+        run: |
+          $ok = $false
+          for ($i = 0; $i -lt 120; $i++) {
+            Start-Sleep 2
+            try { Invoke-RestMethod http://127.0.0.1:18081/health -TimeoutSec 3 | Out-Null; $ok = $true; break } catch {}
+          }
+          Get-Process Cerver -ErrorAction SilentlyContinue | Format-Table Id, ProcessName, StartTime
+          Write-Host "---- relay.log ----"; Get-Content "$HOME\.cerver\relay.log" -ErrorAction SilentlyContinue | Select-Object -Last 40
+          if (-not $ok) { throw "the relay never answered" }
+          $st = Invoke-RestMethod http://127.0.0.1:18090/app/state
+          Write-Host "app state: $($st | ConvertTo-Json -Compress)"
+          $page = Invoke-WebRequest -UseBasicParsing http://127.0.0.1:18090/
+          if ($page.Content -notmatch "Recent jobs") { throw "no Agents page" }
+          $jobs = Invoke-RestMethod "http://127.0.0.1:18090/relay/api/cerver/jobs?n=5"
+          Write-Host "jobs via the app: $($jobs | ConvertTo-Json -Compress)"
+          $stats = Invoke-RestMethod http://127.0.0.1:18090/relay/api/local-claude/stats
+          Write-Host "cpu $($stats.compute.cpu_percent)% · memory $($stats.compute.memory.percent)%"
+          # A page from another site can't press Restart
+          try { Invoke-RestMethod -Method Post http://127.0.0.1:18090/app/restart; throw "restart without the header worked" } catch { if ($_.Exception.Message -match "worked") { throw } }
+          & "$HOME\.cerver\bin\cerver.exe" relay status
+          & "$HOME\.cerver\bin\cerver.exe" update --check
+      - name: Restart brings the relay back
+        shell: pwsh
+        run: |
+          $old = Get-Content "$HOME\.cerver\relay.pid"
+          Invoke-RestMethod -Method Post -Headers @{ "X-Cerver" = "1" } http://127.0.0.1:18090/app/restart | Out-Null
+          $back = $false
+          for ($i = 0; $i -lt 90; $i++) {
+            Start-Sleep 2
+            $new = Get-Content "$HOME\.cerver\relay.pid"
+            if ($new -ne $old) { try { Invoke-RestMethod http://127.0.0.1:18081/health -TimeoutSec 3 | Out-Null; $back = $true; break } catch {} }
+          }
+          if (-not $back) { throw "the relay didn't come back after Restart" }
+          Write-Host "relay $old -> $(Get-Content "$HOME\.cerver\relay.pid"), answering again"
+      - name: Uninstall stops it
+        shell: pwsh
+        run: |
+          & "$HOME\.cerver\bin\cerver.exe" relay uninstall
+          Start-Sleep 5
+          if (Get-Process Cerver -ErrorAction SilentlyContinue) { throw "the app is still running" }
+          try { Invoke-RestMethod http://127.0.0.1:18081/health -TimeoutSec 3; throw "the relay is still running" } catch { if ($_.Exception.Message -match "still") { throw } }
+          Write-Host "stopped"

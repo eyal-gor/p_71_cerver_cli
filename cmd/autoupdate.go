@@ -83,7 +83,7 @@ func Update(args []string) error {
 
 	// 2. The Mac app.
 	if st.App != nil && st.App.Update {
-		if appOpen() && !*app {
+		if appOpen() && !*app && runtime.GOOS != "windows" {
 			say("Cerver app: %s → %s available; it updates when you click Update in the app", st.App.Current, st.Latest)
 		} else if err := updateApp(ctx, st.Latest); err != nil {
 			say("Cerver app: couldn't update: %v", err)
@@ -158,6 +158,11 @@ func updateState(ctx context.Context) state {
 	managed := strings.HasPrefix(target, filepath.Join(home(), ".cerver", "bin"))
 	st.CLI = part{Current: cli, Latest: latest, Update: managed && newer(cli)}
 
+	if runtime.GOOS == "windows" {
+		if v := winAppVersion(); v != "" {
+			st.App = &part{Current: v, Latest: latest, Update: v != "dev" && newer(v)}
+		}
+	}
 	if runtime.GOOS == "darwin" {
 		if v := appVersion(); v != "" {
 			// "dev" is an app built on this Mac: leave it alone.
@@ -225,11 +230,25 @@ func appVersion() string {
 	return strings.TrimSpace(string(out))
 }
 
-func appOpen() bool { return exec.Command("pgrep", "-x", "Cerver").Run() == nil }
+func appOpen() bool {
+	if runtime.GOOS == "windows" {
+		return winAppOpen()
+	}
+	return exec.Command("pgrep", "-x", "Cerver").Run() == nil
+}
 
 // updateApp unpacks Cerver.zip from release v next to the old app, then
 // swaps them. A running app keeps working until it restarts.
 func updateApp(ctx context.Context, v string) error {
+	if runtime.GOOS == "windows" {
+		// A running Cerver.exe can be renamed but not overwritten; replaceFile
+		// moves it aside. The app sees its file changed and restarts itself.
+		data, err := releaseAsset(ctx, v, "Cerver-windows-"+runtime.GOARCH+".exe")
+		if err != nil {
+			return err
+		}
+		return replaceFile(winAppPath(), data)
+	}
 	data, err := releaseAsset(ctx, v, "Cerver.zip")
 	if err != nil {
 		return err
@@ -294,13 +313,15 @@ func restartRelay() error {
 		return exec.Command("launchctl", "kickstart", "-k", launchdDomain()+"/"+relayLabel).Run()
 	case "linux":
 		return exec.Command("systemctl", "--user", "restart", relayLinuxUnit).Run()
+	case "windows":
+		return winKillRelay() // the Cerver app starts it again within seconds
 	}
 	return nil
 }
 
 // cliTarget is the cerver program updates replace.
 func cliTarget() string {
-	p := filepath.Join(home(), ".cerver", "bin", "cerver")
+	p := filepath.Join(home(), ".cerver", "bin", "cerver"+exeSuffix())
 	if _, err := os.Stat(p); err == nil {
 		return p
 	}

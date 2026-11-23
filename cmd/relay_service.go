@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bufio"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -63,8 +64,11 @@ func relayUnitPath() string {
 func launchdDomain() string { return "gui/" + strconv.Itoa(os.Getuid()) }
 func relayInstalled() bool  { _, err := os.Stat(relayServiceFile()); return err == nil }
 func relayServiceFile() string {
-	if runtime.GOOS == "darwin" {
+	switch runtime.GOOS {
+	case "darwin":
 		return relayPlist()
+	case "windows":
+		return winRelayFile()
 	}
 	return relayUnitPath()
 }
@@ -74,8 +78,8 @@ func findUVX() string {
 		return p
 	}
 	for _, p := range []string{
-		filepath.Join(home(), ".local", "bin", "uvx"),
-		filepath.Join(home(), ".cargo", "bin", "uvx"),
+		filepath.Join(home(), ".local", "bin", "uvx"+exeSuffix()),
+		filepath.Join(home(), ".cargo", "bin", "uvx"+exeSuffix()),
 		"/opt/homebrew/bin/uvx",
 		"/usr/local/bin/uvx",
 	} {
@@ -124,6 +128,12 @@ func relayDefaultName() string {
 			}
 		}
 	}
+	if b, err := os.ReadFile(winRelayFile()); err == nil {
+		var s winRelaySpec
+		if json.Unmarshal(b, &s) == nil && s.Name != "" {
+			return s.Name
+		}
+	}
 	if n := os.Getenv("CERVER_MACHINE_NAME"); n != "" {
 		return n
 	}
@@ -165,7 +175,7 @@ func relayInstall(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	if os.Geteuid() == 0 {
+	if runtime.GOOS != "windows" && os.Geteuid() == 0 {
 		return fmt.Errorf("run this without sudo: the relay runs as you, with your logins and files")
 	}
 	if _, err := os.Stat(filepath.Join(home(), ".cerver", "cerver.env")); err != nil {
@@ -223,8 +233,12 @@ func relayInstall(args []string) error {
 		if err := exec.Command("loginctl", "enable-linger").Run(); err != nil {
 			fmt.Printf("To keep it running after you log out: sudo loginctl enable-linger %s\n", os.Getenv("USER"))
 		}
+	case "windows":
+		if err := winRelayInstall(cmdArgs, dir, *name); err != nil {
+			return err
+		}
 	default:
-		return fmt.Errorf("the relay service runs on macOS and Linux for now")
+		return fmt.Errorf("the relay service runs on macOS, Linux and Windows")
 	}
 	if err := updaterInstall(); err != nil {
 		fmt.Printf("Couldn't set up automatic updates (%v); update by hand with: cerver update\n", err)
@@ -243,6 +257,8 @@ func relayUninstall() error {
 		exec.Command("systemctl", "--user", "disable", "--now", relayLinuxUnit).Run()
 		os.Remove(relayUnitPath())
 		exec.Command("systemctl", "--user", "daemon-reload").Run()
+	case "windows":
+		winRelayUninstall()
 	}
 	fmt.Println("The relay stopped. This computer left your pool until you install it again.")
 	return nil
@@ -268,6 +284,8 @@ func relayRunning() bool {
 		return err == nil && strings.Contains(string(out), "state = running")
 	case "linux":
 		return exec.Command("systemctl", "--user", "is-active", "--quiet", relayLinuxUnit).Run() == nil
+	case "windows":
+		return relayAnswers()
 	}
 	return false
 }
@@ -284,6 +302,9 @@ func waitGone(target string) {
 // stopStrayRelay stops a relay install.sh started in a terminal (its pid is
 // in ~/.cerver/relay.pid), so two copies don't fight over the same machine.
 func stopStrayRelay() {
+	if runtime.GOOS == "windows" {
+		return
+	}
 	b, err := os.ReadFile(filepath.Join(home(), ".cerver", "relay.pid"))
 	if err != nil {
 		return

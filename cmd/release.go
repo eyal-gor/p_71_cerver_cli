@@ -89,7 +89,7 @@ func fetch(ctx context.Context, url string) ([]byte, error) {
 	return io.ReadAll(io.LimitReader(resp.Body, 200<<20))
 }
 
-func cliAssetName() string { return "cerver-" + runtime.GOOS + "-" + runtime.GOARCH }
+func cliAssetName() string { return "cerver-" + runtime.GOOS + "-" + runtime.GOARCH + exeSuffix() }
 
 // replaceFile swaps in new contents atomically (same folder, then rename), so
 // a running copy keeps working and the next start gets the new one.
@@ -107,6 +107,22 @@ func replaceFile(path string, data []byte) error {
 	if err := os.Chmod(tmp.Name(), 0o755); err != nil {
 		os.Remove(tmp.Name())
 		return err
+	}
+	if runtime.GOOS == "windows" {
+		// Windows won't replace a program that's running, but it will rename it.
+		old := path + ".old"
+		os.Remove(old)
+		if err := os.Rename(path, old); err != nil && !os.IsNotExist(err) {
+			os.Remove(tmp.Name())
+			return err
+		}
+		if err := os.Rename(tmp.Name(), path); err != nil {
+			os.Rename(old, path)
+			os.Remove(tmp.Name())
+			return err
+		}
+		os.Remove(old) // fails while the old copy still runs; the next update clears it
+		return nil
 	}
 	if err := os.Rename(tmp.Name(), path); err != nil {
 		os.Remove(tmp.Name())

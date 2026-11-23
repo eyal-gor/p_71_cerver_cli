@@ -1,6 +1,7 @@
 # Every push to main that changes the program or the Mac app publishes a
-# release: v1.0.<commit count>, with the cerver program for macOS and Linux,
-# the Mac app (Cerver.zip) and SHA256SUMS. Computers running Cerver pick it up
+# release: v1.0.<commit count>, with the cerver program for macOS, Linux and
+# Windows, the Mac app (Cerver.zip), the Windows app (Cerver-windows-*.exe)
+# and SHA256SUMS. Computers running Cerver pick it up
 # on their own (cerver update --auto, every 6 hours; the network service hourly).
 name: release
 on:
@@ -36,6 +37,11 @@ jobs:
             os=${t%/*}; arch=${t#*/}
             cgo=0; [ "$os" = darwin ] && cgo=1
             CGO_ENABLED=$cgo GOOS=$os GOARCH=$arch go build -ldflags "$LD" -o "dist/cerver-$os-$arch" ./cmd/cerver
+          done
+          # Windows: the program, and the app (a tray icon; -H=windowsgui: no console window)
+          for arch in amd64 arm64; do
+            CGO_ENABLED=0 GOOS=windows GOARCH=$arch go build -ldflags "$LD" -o "dist/cerver-windows-$arch.exe" ./cmd/cerver
+            CGO_ENABLED=0 GOOS=windows GOARCH=$arch go build -ldflags "$LD -H=windowsgui" -o "dist/Cerver-windows-$arch.exe" ./cmd/cerverapp
           done
       - name: Build the Mac app
         env:

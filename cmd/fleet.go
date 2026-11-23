@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"os/exec"
+	"runtime"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -3144,6 +3145,10 @@ func shortDur(d time.Duration) string {
 
 // openURL opens a link in the default browser (macOS `open`, else xdg-open).
 func openURL(u string) {
+	if runtime.GOOS == "windows" {
+		_ = exec.Command("rundll32", "url.dll,FileProtocolHandler", u).Start()
+		return
+	}
 	cmd := "open"
 	if _, err := exec.LookPath("xdg-open"); err == nil {
 		cmd = "xdg-open"

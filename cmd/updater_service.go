@@ -31,7 +31,7 @@ func updaterUnitDir() string {
 // cerverBin is the copy of cerver the services should run: the one install.sh
 // put in ~/.cerver/bin (it's the one updates replace).
 func cerverBin() string {
-	p := filepath.Join(home(), ".cerver", "bin", "cerver")
+	p := filepath.Join(home(), ".cerver", "bin", "cerver"+exeSuffix())
 	if _, err := os.Stat(p); err == nil {
 		return p
 	}
@@ -42,6 +42,8 @@ func cerverBin() string {
 func updaterInstall() error {
 	bin := cerverBin()
 	switch runtime.GOOS {
+	case "windows":
+		return nil // the Cerver app checks for updates every 6 hours
 	case "darwin":
 		plist := `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
