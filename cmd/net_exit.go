@@ -35,6 +35,9 @@ import (
 // What was changed is saved in exitStateFile, so a crash or update undoes it
 // at the next start.
 
+// exitDNS: the resolver while using an exit (reached through the tunnel).
+var exitDNS = []string{"1.1.1.1", "1.0.0.1"}
+
 const (
 	exitStateFile = "/var/db/cerver-exit.json"
 	exitAnchor    = "com.apple/250.CerverExit"
@@ -312,7 +315,7 @@ func (e *exitCtl) startUsing(node *wgnet.Node, via string) error {
 	// DNS: a public resolver, reached through the tunnel (Safety already sets one).
 	if getAddons().Level == "off" {
 		for _, s := range networkServices() {
-			run("/usr/sbin/networksetup", "-setdnsservers", s, "1.1.1.1", "1.0.0.1")
+			run("/usr/sbin/networksetup", append([]string{"-setdnsservers", s}, exitDNS...)...)
 		}
 		e.st.DNSSet = true
 	}
@@ -342,7 +345,8 @@ func (e *exitCtl) stopUsing(why string) {
 	for _, r := range e.st.Routes {
 		run("/sbin/route", "-q", "-n", "delete", "-host", r)
 	}
-	if e.st.DNSSet && getAddons().Level == "off" {
+	// Put DNS back unless Safety changed it meanwhile (then it's Safety's).
+	if e.st.DNSSet && strings.Join(getAddons().DNS, " ") == strings.Join(exitDNS, " ") {
 		for _, s := range networkServices() {
 			run("/usr/sbin/networksetup", "-setdnsservers", s, "Empty")
 		}
