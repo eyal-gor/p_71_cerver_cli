@@ -87,6 +87,14 @@ commands:
                cerver addons list               # every computer on your network
                cerver addons mac-mini safety kids
                cerver addons mac-mini focus work_hours youtube x   # off|work_hours|hour|always
+  access     What agents sent here through Cerver may open. Changes ask for this Mac's password.
+               cerver access                       # the rules
+               cerver access allow ~/Code          # may open
+               cerver access ask ~/Documents       # only after you say yes, per task
+               cerver access block ~/.ssh          # never
+               cerver access unlist ~/Code         # no rule
+               cerver access mode own_folder       # as_you | own_folder | vm
+               cerver access start ~/Code          # start folder when none is given (or: default)
   exit       Exit nodes: send a computer's internet through another one (e.g. home).
                cerver exit                                  # who offers, who uses which
                cerver exit offer mac-mini                   # mac-mini becomes an exit node
@@ -240,6 +248,8 @@ func main() {
 		err = cmd.Net(args)
 	case "vm":
 		err = cmd.VM(args)
+	case "access":
+		err = cmd.Access(args)
 	case "exit":
 		err = cmd.Exit(args)
 	case "addons":

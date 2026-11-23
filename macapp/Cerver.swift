@@ -2088,7 +2088,7 @@ struct PermissionsPage: View {
 			summary
 
 			section("1. How much of this Mac can your agents see?")
-			Text("Applies to the agents you start (from the app, Claude Code, or another computer). Other people's agents never see your files.")
+			Text("Applies to agents sent here through Cerver: from this app, Ask Compute Pool, or your other computers. Claude Code you open yourself in Terminal follows its own settings. Other people's agents never see your files.")
 				.font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
 			Card {
 				ForEach(Array(choices.enumerated()), id: \.element.id) { n, ch in
@@ -2128,38 +2128,31 @@ struct PermissionsPage: View {
 						Button("Change…") { if let f = SecurityRules.pick("Start here").first { sec.start = f; saveSec() } }.buttonStyle(.link)
 						if !sec.start.isEmpty { Button("Default") { sec.start = ""; saveSec() }.buttonStyle(.link) }
 					}
-					ForEach(sec.allowed, id: \.self) { f in
-						Divider().padding(.leading, 16)
-						Row(label: "Also allowed: " + folderName(f), note: f) {
-							Button("Remove") { sec.allowed.removeAll { $0 == f }; saveSec() }.buttonStyle(.link)
-						}
-					}
 				}
-				Button { for f in SecurityRules.pick("Allow") where !sec.allowed.contains(f) { sec.allowed.append(f) }; saveSec() } label: {
-					Label("Allow another folder…", systemImage: "plus")
-				}.buttonStyle(.link)
 			}
 
-			section("2. Folders agents may never open")
-			Text("A hard \"no\" for these folders on this Mac, whatever you chose above.")
+			section("2. Folders")
+			Text("Three lists for every agent sent to this Mac through Cerver. A folder is on one list at most.")
 				.font(.callout).foregroundStyle(.secondary)
 			Card {
-				if sec.blocked.isEmpty {
-					Row(label: "No folders blocked") { EmptyView() }
+				if sec.mode == "own_folder" {
+					FolderList(icon: "checkmark.circle.fill", color: .green, title: "Allowed", explain: "may open, besides the folder it works in",
+					           folders: sec.allowed, editable: true, add: { put(\.allowed, "Allow") }, remove: { f in sec.allowed.removeAll { $0 == f }; saveSec() })
+					Divider().padding(.leading, 16)
 				}
-				ForEach(Array(sec.blocked.enumerated()), id: \.element) { n, f in
-					if n > 0 { Divider().padding(.leading, 16) }
-					Row(label: folderName(f), note: f) {
-						Button("Allow again") { sec.blocked.removeAll { $0 == f }; saveSec() }.buttonStyle(.link)
-					}
-				}
+				FolderList(icon: "hand.raised.fill", color: .orange, title: "Ask first", explain: "a dialog here asks you, per task",
+				           folders: sec.ask, editable: true, add: { put(\.ask, "Ask first") }, remove: { f in sec.ask.removeAll { $0 == f }; saveSec() })
+				Divider().padding(.leading, 16)
+				FolderList(icon: "xmark.octagon.fill", color: .red, title: "Never", explain: "closed, whatever else is set",
+				           folders: sec.blocked, editable: true, add: { put(\.blocked, "Never allow") }, remove: { f in sec.blocked.removeAll { $0 == f }; saveSec() })
 			}
 			HStack(spacing: 14) {
-				Button { addFolder() } label: { Label("Block a folder…", systemImage: "plus") }.buttonStyle(.link)
 				ForEach(suggested.filter { !sec.blocked.contains($0) }, id: \.self) { f in
-					Button("Block " + folderName(f)) { sec.blocked.append(f); saveSec() }.buttonStyle(.link).font(.callout)
+					Button("Never " + folderName(f)) { sec.ask.removeAll { $0 == f }; sec.allowed.removeAll { $0 == f }; sec.blocked.append(f); saveSec() }.buttonStyle(.link).font(.callout)
 				}
 			}
+			Text(SecurityRules.guarded ? "Changes ask for this Mac's password, so an agent can't change them by itself." : "Your next change moves these rules into an admin-only file; from then on, changes ask for this Mac's password.")
+				.font(.caption).foregroundStyle(.secondary)
 			if let e = secError { Text(e).font(.callout).foregroundStyle(.red) }
 
 			section("3. Who can use each computer")
@@ -2199,7 +2192,7 @@ struct PermissionsPage: View {
 				.font(.system(size: 22)).foregroundStyle(sec.mode == "as_you" ? Color.orange : Color.green)
 			VStack(alignment: .leading, spacing: 2) {
 				Text("On this Mac, agents see: \(modeTitle(sec.mode).lowercased()).").font(.system(size: 14, weight: .medium))
-				Text("\(sec.blocked.count) blocked folder\(sec.blocked.count == 1 ? "" : "s") · \(shared ? "shared with people you invited" : "not shared with anyone")")
+				Text("\(sec.blocked.count) never · \(sec.ask.count) ask first · \(sec.allowed.count) allowed · \(shared ? "shared with people you invited" : "not shared with anyone")")
 					.font(.callout).foregroundStyle(.secondary)
 			}
 		}
@@ -2256,8 +2249,21 @@ struct PermissionsPage: View {
 		}
 	}
 
+	func put(_ list: WritableKeyPath<SecurityRules, [String]>, _ prompt: String) {
+		let picked = SecurityRules.pick(prompt)
+		guard !picked.isEmpty else { return }
+		for f in picked {
+			sec.allowed.removeAll { $0 == f }; sec.ask.removeAll { $0 == f }; sec.blocked.removeAll { $0 == f }
+			sec[keyPath: list].append(f)
+		}
+		saveSec()
+	}
+
 	func saveSec() {
-		secError = sec.save()
+		sec.commit { err in
+			secError = err?.contains("cancelled") == true ? nil : err
+			sec = SecurityRules.load() // what's really saved (unchanged if cancelled)
+		}
 	}
 
 	func addFolder() {
@@ -3580,6 +3586,8 @@ struct AgentAccess: Decodable {
 	let mode: String?
 	let blocked_folders: [String]?
 	let allowed_folders: [String]?
+	let ask_folders: [String]?
+	let guarded: Bool?
 	let ask_folder: String?
 	let start_folder: String?
 	let enforced_by: String?
@@ -3589,6 +3597,10 @@ struct SecurityRules {
 	var mode = "as_you"
 	var blocked: [String] = []
 	var allowed: [String] = [] // own_folder: folders agents may also open
+	var ask: [String] = []     // only after the owner says yes, per task
+	static let rulesFile = "/Library/Application Support/Cerver/agent-rules.json"
+	/// True once the rules sit in the admin-only file (changes need the password).
+	static var guarded: Bool { FileManager.default.fileExists(atPath: rulesFile) }
 	var start = ""             // where agents start when no folder is given ("" = default)
 	/// The start folder in effect on this Mac.
 	var startShown: String { !start.isEmpty ? start : (mode == "as_you" ? "~ (your home folder)" : SecurityRules.askFolder) }
@@ -3608,18 +3620,32 @@ struct SecurityRules {
 
 	static func load() -> SecurityRules {
 		var r = SecurityRules()
-		guard let d = FileManager.default.contents(atPath: file),
+		guard let d = FileManager.default.contents(atPath: guarded ? rulesFile : file),
 			  let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return r }
 		if let m = o["agent_access"] as? String, ["as_you", "own_folder", "vm"].contains(m) { r.mode = m }
 		r.blocked = (o["blocked_folders"] as? [String]) ?? []
 		r.allowed = (o["allowed_folders"] as? [String]) ?? []
+		r.ask = (o["ask_folders"] as? [String]) ?? []
 		r.start = (o["start_folder"] as? String) ?? ""
 		return r
 	}
 
-	/// nil when saved, else what went wrong.
+	/// Saves through `cerver access set`: macOS asks for this Mac's password
+	/// (the guardrail: an agent can't change the rules by itself). Calls back
+	/// on the main thread with nil when saved, else why not.
+	func commit(_ done: @escaping (String?) -> Void) {
+		var o: [String: Any] = ["agent_access": mode, "blocked_folders": blocked, "allowed_folders": allowed, "ask_folders": ask]
+		if !start.isEmpty { o["start_folder"] = start }
+		let json = String(data: (try? JSONSerialization.data(withJSONObject: o)) ?? Data(), encoding: .utf8) ?? "{}"
+		Task.detached {
+			let (ok, out) = runCerver(["access", "set", json])
+			await MainActor.run { done(ok ? nil : out.trimmingCharacters(in: .whitespacesAndNewlines)) }
+		}
+	}
+
+	/// nil when saved, else what went wrong. (The older per-user file.)
 	func save() -> String? {
-		var o: [String: Any] = ["agent_access": mode, "blocked_folders": blocked, "allowed_folders": allowed]
+		var o: [String: Any] = ["agent_access": mode, "blocked_folders": blocked, "allowed_folders": allowed, "ask_folders": ask]
 		if !start.isEmpty { o["start_folder"] = start }
 		do {
 			try FileManager.default.createDirectory(atPath: NSHomeDirectory() + "/.cerver", withIntermediateDirectories: true)
@@ -3838,6 +3864,49 @@ extension EnvironmentValues {
 	}
 }
 
+/// One list of folders (Allowed / Ask first / Never), editable or view-only.
+struct FolderList: View {
+	let icon: String
+	let color: Color
+	let title: String
+	let explain: String
+	let folders: [String]
+	let editable: Bool
+	var add: () -> Void = {}
+	var remove: (String) -> Void = { _ in }
+	var body: some View {
+		HStack(alignment: .firstTextBaseline, spacing: 10) {
+			Image(systemName: icon).foregroundStyle(color).frame(width: 16)
+			VStack(alignment: .leading, spacing: 6) {
+				HStack(spacing: 6) {
+					Text(title).font(.system(size: 13, weight: .semibold))
+					Text(explain).font(.callout).foregroundStyle(.secondary)
+				}
+				Flow(spacing: 6) {
+					if folders.isEmpty { Text("none").font(.callout).foregroundStyle(.tertiary) }
+					ForEach(folders, id: \.self) { f in
+						HStack(spacing: 5) {
+							Image(systemName: "folder").font(.system(size: 11))
+							Text(f).font(.system(size: 12, design: .monospaced))
+							if editable {
+								Button { remove(f) } label: { Image(systemName: "xmark").font(.system(size: 9, weight: .bold)) }
+									.buttonStyle(.plain).foregroundStyle(.secondary).help("Take it off this list")
+							}
+						}
+						.padding(.horizontal, 8).padding(.vertical, 4)
+						.background(Capsule().fill(color.opacity(0.12)))
+					}
+					if editable {
+						Button { add() } label: { Label("Add…", systemImage: "plus").font(.callout) }.buttonStyle(.link)
+					}
+				}
+			}
+			Spacer()
+		}
+		.padding(.horizontal, 16).padding(.vertical, 8)
+	}
+}
+
 /// One computer's rules in plain words: what agents may and may not touch,
 /// and what's allowed or blocked for the people using it.
 struct AccessSection: View {
@@ -3847,9 +3916,37 @@ struct AccessSection: View {
 	@Environment(\.openPage) private var openPage
 
 	@State private var sec = SecurityRules.load()
+	func commit() { sec.commit { _ in sec = SecurityRules.load() } }
 	var mode: String? { c.isThisMac ? sec.mode : c.spec?.agent_access?.mode }
 	var blocked: [String] { c.isThisMac ? sec.blocked : (c.spec?.agent_access?.blocked_folders ?? []) }
 	var allowed: [String] { c.isThisMac ? sec.allowed : (c.spec?.agent_access?.allowed_folders ?? []) }
+	var askList: [String] { c.isThisMac ? sec.ask : (c.spec?.agent_access?.ask_folders ?? []) }
+
+	/// Put picked folders on one list (and off the others), then save (password).
+	func put(_ list: WritableKeyPath<SecurityRules, [String]>, _ prompt: String) {
+		let picked = SecurityRules.pick(prompt)
+		guard !picked.isEmpty else { return }
+		for f in picked {
+			sec.allowed.removeAll { $0 == f }; sec.ask.removeAll { $0 == f }; sec.blocked.removeAll { $0 == f }
+			sec[keyPath: list].append(f)
+		}
+		commit()
+	}
+
+	@ViewBuilder var folderLists: some View {
+		if mode == "own_folder" {
+			FolderList(icon: "checkmark.circle.fill", color: .green, title: "Allowed", explain: "may open, besides the folder it works in",
+			           folders: allowed, editable: c.isThisMac, add: { put(\.allowed, "Allow") }, remove: { f in sec.allowed.removeAll { $0 == f }; commit() })
+		}
+		FolderList(icon: "hand.raised.fill", color: .orange, title: "Ask first", explain: "a dialog here asks you, per task",
+		           folders: askList, editable: c.isThisMac, add: { put(\.ask, "Ask first") }, remove: { f in sec.ask.removeAll { $0 == f }; commit() })
+		FolderList(icon: "xmark.octagon.fill", color: .red, title: "Never", explain: "closed, whatever else is set",
+		           folders: blocked, editable: c.isThisMac, add: { put(\.blocked, "Never allow") }, remove: { f in sec.blocked.removeAll { $0 == f }; commit() })
+		if c.isThisMac {
+			Text(SecurityRules.guarded ? "Changes ask for this Mac's password, so an agent can't change them by itself." : "Your next change moves these rules into an admin-only file; from then on, changes ask for this Mac's password.")
+				.font(.caption).foregroundStyle(.secondary).padding(.horizontal, 16)
+		}
+	}
 	func tilde(_ p: String) -> String { p.replacingOccurrences(of: #"^/Users/[^/]+"#, with: "~", options: .regularExpression) }
 	var startFolder: String { c.isThisMac ? sec.startShown : (c.spec?.agent_access?.start_folder.map(tilde) ?? "not reported yet") }
 
@@ -3864,8 +3961,8 @@ struct AccessSection: View {
 			}
 			Spacer()
 			if c.isThisMac {
-				Button("Change…") { if let f = SecurityRules.pick("Start here").first { sec.start = f; _ = sec.save() } }.buttonStyle(.link)
-				if !sec.start.isEmpty { Button("Default") { sec.start = ""; _ = sec.save() }.buttonStyle(.link) }
+				Button("Change…") { if let f = SecurityRules.pick("Start here").first { sec.start = f; commit() } }.buttonStyle(.link)
+				if !sec.start.isEmpty { Button("Default") { sec.start = ""; commit() }.buttonStyle(.link) }
 			}
 		}
 		.padding(.horizontal, 16).padding(.vertical, 8)
@@ -3915,30 +4012,6 @@ struct AccessSection: View {
 				case "own_folder":
 					startLine
 					line(true, "May open the folder it works in", "The start folder above, or the project folder the task names.")
-					HStack(alignment: .firstTextBaseline, spacing: 10) {
-						Image(systemName: allowed.isEmpty ? "minus.circle" : "checkmark.circle.fill")
-							.foregroundStyle(allowed.isEmpty ? Color.secondary : Color.green).frame(width: 16)
-						VStack(alignment: .leading, spacing: 6) {
-							Text(allowed.isEmpty ? "No other folders allowed" : "Also may open").font(.system(size: 13, weight: .medium))
-							ForEach(allowed, id: \.self) { f in
-								HStack(spacing: 6) {
-									Image(systemName: "folder").foregroundStyle(.secondary)
-									Text(f).font(.system(size: 12, design: .monospaced))
-									if c.isThisMac {
-										Button { sec.allowed.removeAll { $0 == f }; _ = sec.save() } label: { Image(systemName: "xmark.circle.fill") }
-											.buttonStyle(.plain).foregroundStyle(.secondary).help("Stop allowing it")
-									}
-								}
-							}
-							if c.isThisMac {
-								Button { for f in SecurityRules.pick("Allow") where !sec.allowed.contains(f) { sec.allowed.append(f) }; _ = sec.save() } label: {
-									Label("Allow a folder…", systemImage: "plus")
-								}.buttonStyle(.link).font(.callout)
-							}
-						}
-						Spacer()
-					}
-					.padding(.horizontal, 16).padding(.vertical, 8)
 					line(false, "Can't open the rest of your files", "Documents, Desktop, other projects: hidden from it.")
 				case "vm":
 					line(true, "Works in a separate sandbox computer", "A small Linux VM that sees only its folder.")
@@ -3946,11 +4019,8 @@ struct AccessSection: View {
 				default:
 					line(nil, "Not reported yet", "\(c.name) hasn't said what tasks may open there.")
 				}
-				if blocked.isEmpty {
-					line(nil, "No folders blocked", "")
-				} else {
-					line(false, "Never opens: " + blocked.map { ($0 as NSString).lastPathComponent }.joined(separator: ", "), blocked.joined(separator: "  ·  "))
-				}
+				Divider().padding(.leading, 16).padding(.vertical, 4)
+				folderLists
 				if !c.isThisMac {
 					Text("Change these in Cerver on \(c.name).").font(.callout).foregroundStyle(.secondary).padding(.horizontal, 16)
 				}
