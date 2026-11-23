@@ -3890,22 +3890,31 @@ struct AccessSection: View {
 		HStack {
 			Label(title, systemImage: icon).font(.system(size: 14, weight: .semibold))
 			Spacer()
-			Button(change) { openPage.go(to) }.buttonStyle(.link).font(.callout)
+			if !change.isEmpty { Button(change) { openPage.go(to) }.buttonStyle(.link).font(.callout) }
 		}
 		.padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 4)
 	}
 
 	var body: some View {
 		VStack(alignment: .leading, spacing: 14) {
+			let others = m.computers.filter { $0.id != c.id && !$0.isPhone }.map(\.name)
 			Card {
-				header("Agents", "cpu", change: "Change in Security", .permissions)
+				header("Agents you open yourself on \(c.isThisMac ? "this Mac" : c.name)", "terminal", change: "", .permissions)
+				line(nil, "Cerver doesn't limit these", "Claude Code or Codex that you start in Terminal here follow their own permission settings, as you.")
+				Spacer().frame(height: 6)
+			}
+			Card {
+				header("Tasks sent here through Cerver", "arrow.down.circle", change: c.isThisMac ? "Change in Security" : "", .permissions)
+				Text("From " + (others.isEmpty ? "your other computers" : others.joined(separator: ", ")) + ", Ask Compute Pool, or `cerver run`. \(c.isThisMac ? "This Mac" : c.name)'s rules decide, wherever the task came from.")
+					.font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+					.padding(.horizontal, 16).padding(.bottom, 4)
 				switch mode {
 				case "as_you":
 					startLine
 					line(true, "May open everything you can open", "Your files, apps and logins on \(c.name).")
 				case "own_folder":
 					startLine
-					line(true, "May open the folder it works in", "The start folder above, or the project folder a request names.")
+					line(true, "May open the folder it works in", "The start folder above, or the project folder the task names.")
 					HStack(alignment: .firstTextBaseline, spacing: 10) {
 						Image(systemName: allowed.isEmpty ? "minus.circle" : "checkmark.circle.fill")
 							.foregroundStyle(allowed.isEmpty ? Color.secondary : Color.green).frame(width: 16)
@@ -3925,8 +3934,6 @@ struct AccessSection: View {
 								Button { for f in SecurityRules.pick("Allow") where !sec.allowed.contains(f) { sec.allowed.append(f) }; _ = sec.save() } label: {
 									Label("Allow a folder…", systemImage: "plus")
 								}.buttonStyle(.link).font(.callout)
-							} else {
-								Text("Change it in Cerver on \(c.name).").font(.callout).foregroundStyle(.secondary)
 							}
 						}
 						Spacer()
@@ -3935,17 +3942,28 @@ struct AccessSection: View {
 					line(false, "Can't open the rest of your files", "Documents, Desktop, other projects: hidden from it.")
 				case "vm":
 					line(true, "Works in a separate sandbox computer", "A small Linux VM that sees only its folder.")
-					line(false, "Can't touch this computer itself", "")
+					line(false, "Can't touch \(c.isThisMac ? "this Mac" : c.name) itself", "")
 				default:
-					line(nil, "Not reported yet", "This computer hasn't said what its agents may open.")
+					line(nil, "Not reported yet", "\(c.name) hasn't said what tasks may open there.")
 				}
 				if blocked.isEmpty {
 					line(nil, "No folders blocked", "")
 				} else {
 					line(false, "Never opens: " + blocked.map { ($0 as NSString).lastPathComponent }.joined(separator: ", "), blocked.joined(separator: "  ·  "))
 				}
-				line(true, c.pool?.shared == true ? "Who starts agents here: you and people you invited" : "Who starts agents here: only you",
-				     c.pool?.shared == true ? "Invited people's agents are always fenced off from your files." : "")
+				if !c.isThisMac {
+					Text("Change these in Cerver on \(c.name).").font(.callout).foregroundStyle(.secondary).padding(.horizontal, 16)
+				}
+				Spacer().frame(height: 6)
+			}
+			Card {
+				header("Tasks from people you invite", "person.2", change: "", .people)
+				if c.pool?.shared == true {
+					line(true, "Allowed", "People you approved in your pool can send tasks here.")
+					line(false, "Always fenced off from your files", "Each task gets its own empty folder (and ~/CerverShared, if you made one). Your home folder, logins and keys are hidden. Your rules above can't loosen this.")
+				} else {
+					line(false, "Not allowed", "Only your own computers can send tasks here. Turn on \"Share with people you invite\" in Overview to allow it.")
+				}
 				Spacer().frame(height: 6)
 			}
 			Card {
