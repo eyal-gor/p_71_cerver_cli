@@ -217,7 +217,8 @@ func Run(args []string) error {
 	reply := s.LastAssistantText()
 	for i := 0; reply == "" && i < 10; i++ {
 		time.Sleep(700 * time.Millisecond)
-		if again, err := gw.GetSession(ctx, sessionID); err == nil {
+		// The plain read carries no transcript; the tail does.
+		if again, err := gw.GetSessionTail(ctx, sessionID, 20); err == nil {
 			s, reply = again, again.LastAssistantText()
 		}
 	}
