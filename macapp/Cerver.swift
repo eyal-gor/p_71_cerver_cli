@@ -1043,16 +1043,6 @@ struct MainWindow: View {
 			.help("Your profile and plan")
 			Spacer(minLength: 0)
 
-			if m.updateAvailable {
-				Button {
-					m.updateNow()
-				} label: {
-					if m.updating { ProgressView().controlSize(.mini) } else { Text("Update").font(.system(size: 11, weight: .semibold)) }
-				}
-				.buttonStyle(.borderedProminent).controlSize(.small).clipShape(Capsule())
-				.disabled(m.updating)
-				.help("Cerver \(m.updates?.latest ?? "") is out")
-			}
 		}
 		.padding(.horizontal, 14).padding(.vertical, 10)
 		.overlay(alignment: .top) { Divider().padding(.horizontal, 12) }
@@ -2416,11 +2406,13 @@ struct SettingsPage: View {
 	@ObservedObject var m: Model
 
 	var body: some View {
-		PageLayout(title: "Settings", subtitle: m.email.map { "Signed in as " + $0 } ?? "Not signed in") {
-			Picker("", selection: $tab) {
-				ForEach(["General", "Updates", "Terminal", "Your agent"], id: \.self) { Text($0).tag($0) }
+		PageLayout(title: only ? "Updates" : "Settings", subtitle: only ? "Cerver \(m.updates?.latest ?? "") is the newest version." : (m.email.map { "Signed in as " + $0 } ?? "Not signed in")) {
+			if !only {
+				Picker("", selection: $tab) {
+					ForEach(["General", "Terminal", "Your agent"], id: \.self) { Text($0).tag($0) }
+				}
+				.pickerStyle(.segmented).labelsHidden().fixedSize()
 			}
-			.pickerStyle(.segmented).labelsHidden().fixedSize()
 			switch tab {
 			case "Updates": updates
 			case "Terminal": terminal
@@ -2432,6 +2424,8 @@ struct SettingsPage: View {
 	}
 
 	@State var tab = "General"
+	/// Opened from the sidebar's Updates item: just the updates.
+	var only: Bool { tab == "Updates" }
 	@State private var skillInstalled = false
 	@State private var installingSkill = false
 	let skillFile = NSHomeDirectory() + "/.claude/skills/cerver/SKILL.md"
