@@ -231,6 +231,11 @@ func netUp(args []string) error {
 				fmt.Printf("Couldn't reach Cerver (%v); keeping current peers.\n", err)
 			} else {
 				updateNames(*name, node)
+				// The gateway can change how often to check in (5 s since add-ons).
+				if p := time.Duration(max(5, node.Answer.PollSeconds)) * time.Second; p != poll {
+					poll = p
+					tick.Reset(poll)
+				}
 			}
 			for _, s := range node.Status() {
 				if s.Connected && !shown[s.IP] {
