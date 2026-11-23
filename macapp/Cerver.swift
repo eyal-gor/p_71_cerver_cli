@@ -3783,9 +3783,10 @@ struct AddonsPage: View {
 			let applied = n.addons_applied
 			let pending = n.addons != nil && (applied?.level != n.addons?.level || applied?.focus?.policy != n.addons?.focus.policy || Set(applied?.focus?.sites ?? []) != Set(n.addons?.focus.sites ?? []))
 			HStack(spacing: 6) {
-				Circle().fill(!n.online ? Color.secondary.opacity(0.4) : pending ? Color.orange : Color.green).frame(width: 8, height: 8)
+				Circle().fill(!n.online ? Color.secondary.opacity(0.4) : (pending || applied == nil) ? Color.orange : Color.green).frame(width: 8, height: 8)
 				Text(!n.online ? "\(n.name) is offline; it applies your choice when it's back."
-					: pending ? (applied == nil ? "Waiting for \(n.name): its Cerver needs an update to use add-ons." : "Applying on \(n.name)…")
+					: applied == nil ? "\(n.name)'s Cerver needs an update to use add-ons (it updates itself within the hour)."
+					: pending ? "Applying on \(n.name)…"
 					: "In effect on \(n.name)" + ((applied?.focus?.blocking ?? false) ? " · Focus is blocking now." : "."))
 					.font(.callout).foregroundStyle(.secondary)
 			}
