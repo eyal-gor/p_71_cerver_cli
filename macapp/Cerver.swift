@@ -1106,9 +1106,9 @@ struct MainWindow: View {
 			case .exitNode: ExitNodePage(m: m, a: addons)
 			case .focus: FocusPage(m: m, a: addons)
 			case .cleanup: CleanupPage(m: m).environment(\.askAgent, askAgent)
-			case .thisMac: ThisMacPage(m: m, nav: nav).environment(\.askAgent, askAgent)
+			case .thisMac: ThisMacPage(m: m, nav: nav).environment(\.askAgent, askAgent).environment(\.openPage, OpenPage { page = $0 })
 			case .computer(let id):
-				if let c = m.computers.first(where: { $0.id == id }) { ComputerPage(m: m, c: c, nav: nav).environment(\.askAgent, askAgent) } else { PoolPage(m: m, open: { page = $0 }) }
+				if let c = m.computers.first(where: { $0.id == id }) { ComputerPage(m: m, c: c, nav: nav).environment(\.askAgent, askAgent).environment(\.openPage, OpenPage { page = $0 }) } else { PoolPage(m: m, open: { page = $0 }) }
 			case .add: AddPage(m: m)
 			case .settings: SettingsPage(m: m)
 			case .profile: ProfilePage(m: m)
@@ -1698,10 +1698,10 @@ struct PoolPage: View {
 // MARK: Tabs for a computer's page
 
 enum Tab: String, CaseIterable, Identifiable {
-	case overview = "Overview", agents = "Agents", network = "Network", software = "Software", hardware = "Hardware", settings = "Settings"
+	case overview = "Overview", access = "Access", agents = "Agents", network = "Network", software = "Software", hardware = "Hardware", settings = "Settings"
 	var id: String { rawValue }
 	/// The parts of a computer's page, top to bottom.
-	static let page: [Tab] = [.overview, .agents, .network, .software, .hardware]
+	static let page: [Tab] = [.overview, .access, .agents, .network, .software, .hardware]
 }
 
 /// Segmented tabs under the title (like System Settings), only the ones given.
@@ -1743,6 +1743,7 @@ struct ThisMacPage: View {
 			SectionedPage(nav: nav) { t in
 				switch t {
 				case .overview: overview
+				case .access: AccessSection(c: me ?? Computer(name: m.relayName, pool: nil, net: nil, isThisMac: true), m: m)
 				case .agents: agents
 				case .network: network
 				case .software:
@@ -1881,6 +1882,7 @@ struct ComputerPage: View {
 			SectionedPage(nav: nav) { t in
 				switch t {
 				case .overview: overview
+				case .access: AccessSection(c: c, m: m)
 				case .agents: agents
 				case .network: network
 				case .software:
@@ -2115,6 +2117,26 @@ struct PermissionsPage: View {
 					Text("\(c.name): \(modeTitle(c.spec?.agent_access?.mode)). To change it, open Cerver on \(c.name).")
 						.font(.caption).foregroundStyle(.secondary)
 				}
+			}
+
+			if sec.mode == "own_folder" {
+				Text("Where agents work on this Mac").font(.system(size: 13, weight: .semibold)).padding(.top, 4)
+				Card {
+					Row(label: "The folder each agent is started in", note: "Usually a project, e.g. the folder you open in Claude Code.") { EmptyView() }
+					Divider().padding(.leading, 16)
+					Row(label: "Questions from Ask Compute Pool", note: SecurityRules.askFolder) {
+						Button("Show") { NSWorkspace.shared.open(URL(fileURLWithPath: (SecurityRules.askFolder as NSString).expandingTildeInPath)) }.buttonStyle(.link)
+					}
+					ForEach(sec.allowed, id: \.self) { f in
+						Divider().padding(.leading, 16)
+						Row(label: "Also allowed: " + folderName(f), note: f) {
+							Button("Remove") { sec.allowed.removeAll { $0 == f }; saveSec() }.buttonStyle(.link)
+						}
+					}
+				}
+				Button { for f in SecurityRules.pick("Allow") where !sec.allowed.contains(f) { sec.allowed.append(f) }; saveSec() } label: {
+					Label("Allow another folder…", systemImage: "plus")
+				}.buttonStyle(.link)
 			}
 
 			section("2. Folders agents may never open")
@@ -3556,13 +3578,28 @@ struct RenameSheet: View {
 struct AgentAccess: Decodable {
 	let mode: String?
 	let blocked_folders: [String]?
+	let allowed_folders: [String]?
+	let ask_folder: String?
 	let enforced_by: String?
 }
 
 struct SecurityRules {
 	var mode = "as_you"
 	var blocked: [String] = []
+	var allowed: [String] = [] // own_folder: folders agents may also open
 	static let file = NSHomeDirectory() + "/.cerver/security.json"
+	static let askFolder = "~/.cerver/work/ask"
+
+	/// Folders picked in a standard Open panel, as ~/… paths.
+	static func pick(_ prompt: String) -> [String] {
+		let p = NSOpenPanel()
+		p.canChooseDirectories = true; p.canChooseFiles = false; p.allowsMultipleSelection = true
+		p.directoryURL = URL(fileURLWithPath: NSHomeDirectory())
+		p.prompt = prompt
+		guard p.runModal() == .OK else { return [] }
+		let home = NSHomeDirectory()
+		return p.urls.map { $0.path.hasPrefix(home) ? "~" + $0.path.dropFirst(home.count) : $0.path }
+	}
 
 	static func load() -> SecurityRules {
 		var r = SecurityRules()
@@ -3570,12 +3607,13 @@ struct SecurityRules {
 			  let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return r }
 		if let m = o["agent_access"] as? String, ["as_you", "own_folder", "vm"].contains(m) { r.mode = m }
 		r.blocked = (o["blocked_folders"] as? [String]) ?? []
+		r.allowed = (o["allowed_folders"] as? [String]) ?? []
 		return r
 	}
 
 	/// nil when saved, else what went wrong.
 	func save() -> String? {
-		let o: [String: Any] = ["agent_access": mode, "blocked_folders": blocked]
+		let o: [String: Any] = ["agent_access": mode, "blocked_folders": blocked, "allowed_folders": allowed]
 		do {
 			try FileManager.default.createDirectory(atPath: NSHomeDirectory() + "/.cerver", withIntermediateDirectories: true)
 			let d = try JSONSerialization.data(withJSONObject: o, options: [.prettyPrinted, .sortedKeys])
@@ -3783,6 +3821,140 @@ struct ThisMacVM: View {
 }
 
 
+/// Opens another page of the app — set by the main window.
+struct OpenPage { var go: (Page) -> Void = { _ in } }
+private struct OpenPageKey: EnvironmentKey { static let defaultValue = OpenPage() }
+extension EnvironmentValues {
+	var openPage: OpenPage {
+		get { self[OpenPageKey.self] }
+		set { self[OpenPageKey.self] = newValue }
+	}
+}
+
+/// One computer's rules in plain words: what agents may and may not touch,
+/// and what's allowed or blocked for the people using it.
+struct AccessSection: View {
+	let c: Computer
+	@ObservedObject var m: Model
+	@StateObject private var a = AddonsModel()
+	@Environment(\.openPage) private var openPage
+
+	@State private var sec = SecurityRules.load()
+	var mode: String? { c.isThisMac ? sec.mode : c.spec?.agent_access?.mode }
+	var blocked: [String] { c.isThisMac ? sec.blocked : (c.spec?.agent_access?.blocked_folders ?? []) }
+	var allowed: [String] { c.isThisMac ? sec.allowed : (c.spec?.agent_access?.allowed_folders ?? []) }
+	var askFolder: String { c.isThisMac ? SecurityRules.askFolder : (c.spec?.agent_access?.ask_folder.map { $0.replacingOccurrences(of: #"^/Users/[^/]+"#, with: "~", options: .regularExpression) } ?? SecurityRules.askFolder) }
+	var node: NetNodeAddons? { a.nodes.first { $0.ip == c.net?.ip || $0.name.lowercased() == c.name.lowercased() } }
+
+	func line(_ ok: Bool?, _ title: String, _ detail: String) -> some View {
+		HStack(alignment: .firstTextBaseline, spacing: 10) {
+			Image(systemName: ok == nil ? "minus.circle" : (ok! ? "checkmark.circle.fill" : "xmark.octagon.fill"))
+				.foregroundStyle(ok == nil ? Color.secondary : (ok! ? Color.green : Color.red))
+				.frame(width: 16)
+			VStack(alignment: .leading, spacing: 2) {
+				Text(title).font(.system(size: 13, weight: .medium))
+				if !detail.isEmpty { Text(detail).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
+			}
+			Spacer()
+		}
+		.padding(.horizontal, 16).padding(.vertical, 8)
+	}
+
+	func header(_ title: String, _ icon: String, change: String, _ to: Page) -> some View {
+		HStack {
+			Label(title, systemImage: icon).font(.system(size: 14, weight: .semibold))
+			Spacer()
+			Button(change) { openPage.go(to) }.buttonStyle(.link).font(.callout)
+		}
+		.padding(.horizontal, 16).padding(.top, 14).padding(.bottom, 4)
+	}
+
+	var body: some View {
+		VStack(alignment: .leading, spacing: 14) {
+			Card {
+				header("Agents", "cpu", change: "Change in Security", .permissions)
+				switch mode {
+				case "as_you":
+					line(true, "May open everything you can open", "Your files, apps and logins on \(c.name).")
+				case "own_folder":
+					line(true, "Works in the folder it's started in", "Usually a project. Questions from Ask Compute Pool work in \(askFolder).")
+					HStack(alignment: .firstTextBaseline, spacing: 10) {
+						Image(systemName: allowed.isEmpty ? "minus.circle" : "checkmark.circle.fill")
+							.foregroundStyle(allowed.isEmpty ? Color.secondary : Color.green).frame(width: 16)
+						VStack(alignment: .leading, spacing: 6) {
+							Text(allowed.isEmpty ? "No other folders allowed" : "Also may open").font(.system(size: 13, weight: .medium))
+							ForEach(allowed, id: \.self) { f in
+								HStack(spacing: 6) {
+									Image(systemName: "folder").foregroundStyle(.secondary)
+									Text(f).font(.system(size: 12, design: .monospaced))
+									if c.isThisMac {
+										Button { sec.allowed.removeAll { $0 == f }; _ = sec.save() } label: { Image(systemName: "xmark.circle.fill") }
+											.buttonStyle(.plain).foregroundStyle(.secondary).help("Stop allowing it")
+									}
+								}
+							}
+							if c.isThisMac {
+								Button { for f in SecurityRules.pick("Allow") where !sec.allowed.contains(f) { sec.allowed.append(f) }; _ = sec.save() } label: {
+									Label("Allow a folder…", systemImage: "plus")
+								}.buttonStyle(.link).font(.callout)
+							} else {
+								Text("Change it in Cerver on \(c.name).").font(.callout).foregroundStyle(.secondary)
+							}
+						}
+						Spacer()
+					}
+					.padding(.horizontal, 16).padding(.vertical, 8)
+					line(false, "Can't open the rest of your files", "Documents, Desktop, other projects: hidden from it.")
+				case "vm":
+					line(true, "Works in a separate sandbox computer", "A small Linux VM that sees only its folder.")
+					line(false, "Can't touch this computer itself", "")
+				default:
+					line(nil, "Not reported yet", "This computer hasn't said what its agents may open.")
+				}
+				if blocked.isEmpty {
+					line(nil, "No folders blocked", "")
+				} else {
+					line(false, "Never opens: " + blocked.map { ($0 as NSString).lastPathComponent }.joined(separator: ", "), blocked.joined(separator: "  ·  "))
+				}
+				line(true, c.pool?.shared == true ? "Who starts agents here: you and people you invited" : "Who starts agents here: only you",
+				     c.pool?.shared == true ? "Invited people's agents are always fenced off from your files." : "")
+				Spacer().frame(height: 6)
+			}
+			Card {
+				header("People using it", "person", change: "Change in Add-ons", .addons)
+				if let n = node {
+					let lvl = a.level(n)
+					line(lvl == "off" ? nil : false, lvl == "off" ? "Websites: nothing filtered" : "Blocked: " + ["malware": "malware and phishing", "adult": "adult sites, malware", "kids": "adult sites, proxies and VPNs; SafeSearch forced"][lvl, default: lvl], "Safety")
+					let rules = a.rules(n).filter { $0.policy != "off" && !$0.sites.isEmpty }
+					if rules.isEmpty {
+						line(nil, "No distracting sites blocked", "Focus")
+					} else {
+						let on = Dictionary((n.addons_applied?.focus?.rules ?? []).map { ($0.name ?? "", $0.on) }, uniquingKeysWith: { x, _ in x })
+						ForEach(Array(rules.enumerated()), id: \.offset) { _, r in
+							line((on[r.name ?? ""] ?? false) ? false : nil,
+							     ((on[r.name ?? ""] ?? false) ? "Blocked now: " : "Blocked at set times: ") + FocusRule.names(r.sites),
+							     "Focus · " + (r.name ?? "Focus") + " · " + ["always": "always", "work_hours": "Mon–Fri 9:00–18:00", "until": "for an hour", "schedule": "on a schedule"][r.policy, default: r.policy])
+						}
+					}
+					if let via = n.exit_via, let ex = a.nodes.first(where: { $0.ip == via }) {
+						line(true, "Internet goes through \(ex.name)", "Exit node: encrypted to there; the local network sees nothing.")
+					} else if n.exit_offer == true {
+						line(true, "Other computers may send their internet through this one", "Exit node")
+					} else {
+						line(nil, "Internet goes directly", "Exit node off")
+					}
+				} else if c.net == nil {
+					line(nil, "Not on your private network", "Add-ons (Safety, Focus, exit node) need Cerver's network on this computer.")
+				} else {
+					line(nil, "Loading…", "")
+				}
+				Spacer().frame(height: 6)
+			}
+		}
+		.task { await a.load() }
+	}
+}
+
 /// "Hand this task to an agent on that computer" — set by the main window.
 struct AskAgent { var run: (String, String, Bool) -> Void = { _, _, _ in } }
 private struct AskAgentKey: EnvironmentKey { static let defaultValue = AskAgent() }
@@ -3871,6 +4043,19 @@ struct FocusRule: Codable, Equatable, Identifiable {
 	var schedule: [Entry]?
 	var days: [Int]?
 	var id: String { name ?? "Focus" }
+
+	/// "facebook.com, m.facebook.com, x" → "Facebook, X".
+	static func names(_ sites: [String]) -> String {
+		let labels = ["facebook": "Facebook", "instagram": "Instagram", "youtube": "YouTube", "x": "X", "tiktok": "TikTok", "reddit": "Reddit", "netflix": "Netflix", "linkedin": "LinkedIn"]
+		var out: [String] = []
+		for s in sites {
+			let d = s.lowercased()
+			let g = groupDomains.first { $0.value.contains(d) }?.key ?? d
+			let l = labels[g] ?? g
+			if !out.contains(l) { out.append(l) }
+		}
+		return out.joined(separator: ", ")
+	}
 
 	/// The same groups as cerver's focusGroups.
 	static let groupDomains: [String: [String]] = [
