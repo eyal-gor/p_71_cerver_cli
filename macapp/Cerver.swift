@@ -5119,6 +5119,8 @@ struct AgentsPage: View {
 
 	var body: some View {
 		PageLayout(title: "Agents", subtitle: "What Cerver's agent runner (the relay) on this Mac is doing: jobs it received and the work it did.") {
+			Link("Every agent run, on all your computers: open the web dashboard →", destination: URL(string: "https://cerver.ai/dashboard/sessions")!)
+				.font(.callout)
 			Card {
 				Row(label: "Relay", note: w.up == false ? "Not running, so this Mac can't take agent jobs." : (w.stats?.home_directory).map { "Works in " + (($0 as NSString).abbreviatingWithTildeInPath) + " when a job names no folder" }) {
 					HStack(spacing: 10) {
