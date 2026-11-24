@@ -82,6 +82,7 @@ type Peer struct {
 	IP        string   `json:"ip"`
 	Endpoints []string `json:"endpoints"`
 	Online    bool     `json:"online"`
+	OS        string   `json:"os"`
 }
 
 // CheckInRequest and CheckInAnswer are POST /v2/net/nodes.
@@ -301,6 +302,12 @@ func (n *Node) apply(peers []Peer) error {
 		}
 		st.peer = p
 		st.candidates = Order(p.Endpoints, n.public)
+		if p.OS == "phone" {
+			// A phone runs plain WireGuard: it calls us, never through the
+			// backup route, and has no address to call. Wait for it to call.
+			fmt.Fprintf(&cfg, "public_key=%s\nreplace_allowed_ips=true\nallowed_ip=%s/32\n", hexKey, p.IP)
+			continue
+		}
 		if n.DirectOff {
 			st.candidates = nil
 		}

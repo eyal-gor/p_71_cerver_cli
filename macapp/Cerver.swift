@@ -1356,6 +1356,7 @@ struct CommandBox: View {
 // MARK: Computer status words (shared by the list and each computer's page)
 
 func agentsStatus(_ c: Computer) -> (String, Color) {
+	if c.isPhone { return ("Phone", .gray) }
 	guard let p = c.pool else { return ("Not in pool", .gray) }
 	if !p.online { return ("Offline", .gray) }
 	if p.state == "busy" { return ("Busy", .orange) }
@@ -1567,7 +1568,7 @@ struct PoolPage: View {
 							Divider().gridCellColumns(3)
 							GridRow {
 								HStack(spacing: 8) {
-									Image(systemName: c.isThisMac ? "laptopcomputer" : "desktopcomputer").foregroundStyle(.secondary)
+									Image(systemName: c.icon).foregroundStyle(.secondary)
 									VStack(alignment: .leading, spacing: 1) {
 										Text(c.name).font(.system(size: 14, weight: .medium)).lineLimit(1)
 										let sub = ([c.isThisMac ? "This Mac" : nil, c.spec?.short, c.spec?.disk_free_gb.map { gb($0) + " free" }].compactMap { $0 }).joined(separator: " · ")
@@ -1579,7 +1580,7 @@ struct PoolPage: View {
 								}
 								VStack(alignment: .leading, spacing: 3) {
 									StatusPill(text: agentsStatus(c).0, color: agentsStatus(c).1).fixedSize()
-									Text(running(c)).font(.system(size: 11).monospacedDigit()).foregroundStyle(.secondary).fixedSize()
+									Text(c.isPhone ? "reaches your computers" : running(c)).font(.system(size: 11).monospacedDigit()).foregroundStyle(.secondary).fixedSize()
 								}
 								VStack(alignment: .leading, spacing: 3) {
 									StatusPill(text: networkStatus(c, peer: peer(c)).0.hasPrefix("On") ? "On" : "Off", color: networkStatus(c, peer: peer(c)).1).fixedSize()
@@ -1601,8 +1602,10 @@ struct PoolPage: View {
 			section("Network between your computers")
 			Card {
 				Row(label: "Private network") {
-					let on = m.computers.filter { $0.net?.online == true }.count
-					Text("\(on) of \(m.computers.count) computers on it").foregroundStyle(.secondary)
+					let pcs = m.computers.filter { !$0.isPhone }
+					let phones = m.computers.count - pcs.count
+					let on = pcs.filter { $0.net?.online == true }.count
+					Text("\(on) of \(pcs.count) computers on it" + (phones > 0 ? ", \(phones) phone\(phones == 1 ? "" : "s")" : "")).foregroundStyle(.secondary)
 				}
 				Divider().padding(.leading, 16)
 				Row(label: "Connections") {
@@ -1651,7 +1654,7 @@ struct PoolPage: View {
 			Text("this Mac").font(.system(size: 11)).foregroundStyle(.secondary)
 		} else if let ip = c.net?.ip, let ms = pings[ip] {
 			if ms < 0 {
-				Text("no reply").font(.system(size: 11)).foregroundStyle(.red)
+				Text(c.isPhone ? "app off or away" : "no reply").font(.system(size: 11)).foregroundStyle(c.isPhone ? Color.secondary : Color.red)
 			} else {
 				(Text(ms < 10 ? String(format: "%.1f ms", ms) : "\(Int(ms.rounded())) ms").foregroundColor(pingColor(ms)).fontWeight(.medium)
 				 + Text(route.map { " · " + $0 } ?? "").foregroundColor(.secondary))
