@@ -6,8 +6,8 @@
     <application
         android:name=".App"
         android:label="Cerver"
-        android:icon="@drawable/ic_cerver"
-        android:roundIcon="@drawable/ic_cerver"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher"
         android:theme="@android:style/Theme.Material.NoActionBar"
         android:allowBackup="false">
         <activity

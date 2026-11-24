@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Cerver's coloured squares (same as the site favicon and the Mac app icon). -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#667CF9" android:pathData="M0,0H36V36H0Z" />
+    <path android:fillColor="#857CF5" android:pathData="M36,0H54V36H36Z" />
+    <path android:fillColor="#B07CEF" android:pathData="M54,0H72V36H54Z" />
+    <path android:fillColor="#C477B2" android:pathData="M72,0H108V36H72Z" />
+    <path android:fillColor="#578FE4" android:pathData="M0,36H36V54H0Z" />
+    <path android:fillColor="#667CF9" android:pathData="M36,36H54V54H36Z" />
+    <path android:fillColor="#C477B2" android:pathData="M54,36H72V54H54Z" />
+    <path android:fillColor="#D77275" android:pathData="M72,36H108V54H72Z" />
+    <path android:fillColor="#50B6B6" android:pathData="M0,54H36V72H0Z" />
+    <path android:fillColor="#61C996" android:pathData="M36,54H54V72H36Z" />
+    <path android:fillColor="#ECA74B" android:pathData="M54,54H72V72H54Z" />
+    <path android:fillColor="#E8864B" android:pathData="M72,54H108V72H72Z" />
+    <path android:fillColor="#61C996" android:pathData="M0,72H36V108H0Z" />
+    <path android:fillColor="#9DC977" android:pathData="M36,72H54V108H36Z" />
+    <path android:fillColor="#F0C84C" android:pathData="M54,72H72V108H54Z" />
+    <path android:fillColor="#ECA74B" android:pathData="M72,72H108V108H72Z" />
+</vector>
