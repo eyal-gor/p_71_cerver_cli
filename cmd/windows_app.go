@@ -14,7 +14,7 @@ import (
 )
 
 // On Windows there is no launchd or systemd for the relay. The Cerver app
-// (Cerver.exe, a tray icon) does that job: it starts with Windows (a "Run"
+// (CerverApp.exe, a tray icon) does that job: it starts with Windows (a "Run"
 // entry for this user), runs the relay with no window, restarts it when it
 // stops, and checks for updates every 6 hours.
 //
@@ -30,14 +30,14 @@ func exeSuffix() string {
 	return ""
 }
 
-// winAppPath: where install.ps1 puts the app. Not in ~/.cerver/bin: Windows
-// file names ignore case, so Cerver.exe and cerver.exe can't share a folder.
+// winAppPath: where install.ps1 puts the app. CerverApp.exe, not Cerver.exe:
+// Windows ignores case, and Cerver.exe would be taken for cerver.exe.
 func winAppPath() string {
 	base := os.Getenv("LOCALAPPDATA")
 	if base == "" {
 		base = filepath.Join(home(), "AppData", "Local")
 	}
-	return filepath.Join(base, "Programs", "Cerver", "Cerver.exe")
+	return filepath.Join(base, "Programs", "Cerver", "CerverApp.exe")
 }
 
 func winRelayFile() string { return filepath.Join(home(), ".cerver", "relay-windows.json") }
@@ -71,7 +71,7 @@ func winRelayInstall(args []string, dir, name string) error {
 func winRelayUninstall() {
 	exec.Command("reg", "delete", winRunKey, "/v", "Cerver", "/f").Run()
 	os.Remove(winRelayFile())
-	exec.Command("taskkill", "/IM", "Cerver.exe", "/F").Run()
+	exec.Command("taskkill", "/IM", "CerverApp.exe", "/F").Run()
 	winKillRelay()
 }
 
@@ -89,8 +89,9 @@ func winKillRelay() error {
 }
 
 func winAppOpen() bool {
-	out, _ := exec.Command("tasklist", "/FI", "IMAGENAME eq Cerver.exe", "/NH").Output()
-	return strings.Contains(strings.ToLower(string(out)), "cerver.exe")
+	// Not "Cerver.exe": Windows ignores case, and that would match cerver.exe (this program).
+	out, _ := exec.Command("tasklist", "/FI", "IMAGENAME eq CerverApp.exe", "/NH").Output()
+	return strings.Contains(strings.ToLower(string(out)), "cerverapp.exe")
 }
 
 func winAppVersion() string {

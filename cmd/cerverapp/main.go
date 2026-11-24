@@ -1,6 +1,6 @@
 //go:build windows
 
-// Cerver.exe: the Cerver app for Windows. A tray icon that
+// CerverApp.exe: the Cerver app for Windows. A tray icon that
 //
 //   - keeps the relay running (no window), restarting it when it stops,
 //   - starts with Windows (a Run entry, set by `cerver relay install`),
@@ -325,7 +325,7 @@ func updates(s *supervisor) {
 	time.Sleep(2 * time.Minute)
 	for {
 		runUpdate()
-		// A new Cerver.exe was put in place: start it and step aside, between jobs.
+		// A new CerverApp.exe was put in place: start it and step aside, between jobs.
 		if t := modTime(exe); !t.IsZero() && t.After(mine) {
 			if st, _ := state(s); st != "working" {
 				relaunch(s, exe)
