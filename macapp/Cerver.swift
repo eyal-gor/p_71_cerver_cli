@@ -318,6 +318,11 @@ final class Model: ObservableObject {
 	// Your computers as Cerver sees them: the pool (agents, shared) and the
 	// network (reachable), joined by name.
 	@Published var computers: [Computer] = []
+	/// A network device's name as you named it in your pool (the network keeps
+	/// the name the device joined with, which SSH and Copy Name still use).
+	func shown(_ ip: String, _ fallback: String) -> String {
+		computers.first { $0.net?.ip == ip }?.name ?? fallback
+	}
 	@Published var poolChecked = false
 	@Published var sharing: Set<String> = []  // compute ids being switched right now
 	private var lastPoolFetch = Date.distantPast
@@ -2898,7 +2903,7 @@ struct MenuView: View {
 					Text("No other computers yet")
 				}
 				ForEach(s.peers) { p in
-					Menu("\(p.connected ? "●" : "○")  \(p.name)   \(howConnected(p))") {
+					Menu("\(p.connected ? "●" : "○")  \(m.shown(p.ip, p.name))   \(howConnected(p))") {
 						Button("Copy Name (\(p.name))") { m.copy(p.name) }
 						Button("Copy Address (\(p.ip))") { m.copy(p.ip) }
 						Button("Open SSH in Terminal") { openSSH(p.name) }
@@ -4456,7 +4461,7 @@ struct SafetyPage: View {
 			ForEach(a.nodes) { n in
 				Card {
 					HStack {
-						Text(n.name + (n.ip == m.status?.ip ? "  (this Mac)" : "")).font(.system(size: 15, weight: .semibold))
+						Text(m.shown(n.ip, n.name) + (n.ip == m.status?.ip ? "  (this Mac)" : "")).font(.system(size: 15, weight: .semibold))
 						Spacer()
 						let st = a.status(n, thisMac: n.ip == m.status?.ip)
 						if a.saving.contains(n.ip) { ProgressView().controlSize(.small) }
@@ -4502,15 +4507,16 @@ struct ExitNodePage: View {
 		PageLayout(title: "VPN, through your own computers", subtitle: "Send a computer's internet through another one of yours, encrypted. From café Wi-Fi, the café sees only one scrambled connection, and websites see your home's address. Unlike a VPN company, nobody else's servers are in between.") {
 			if let me = a.nodes.first(where: { $0.ip == m.status?.ip }) {
 				let via = a.nodes.first { $0.ip == me.exit_via }
-				let home = via?.name ?? a.nodes.first { $0.exit_offer == true && $0.ip != me.ip }?.name ?? a.nodes.first { $0.ip != me.ip && $0.os != "phone" }?.name ?? "Your home computer"
-				Card { VPNPicture(on: me.exit_via != nil, me: me.name, home: home) }
+				let other = via ?? a.nodes.first { $0.exit_offer == true && $0.ip != me.ip } ?? a.nodes.first { $0.ip != me.ip && $0.os != "phone" }
+				let home = other.map { m.shown($0.ip, $0.name) } ?? "Your home computer"
+				Card { VPNPicture(on: me.exit_via != nil, me: m.shown(me.ip, me.name), home: home) }
 			}
 			if a.nodes.isEmpty { Text(a.problem ?? "Loading your computers…").foregroundStyle(.secondary) }
 			ForEach(a.nodes) { n in
 				let exits = a.nodes.filter { $0.exit_offer == true && $0.ip != n.ip }
 				Card {
 					HStack {
-						Text(n.name + (n.ip == m.status?.ip ? "  (this Mac)" : "")).font(.system(size: 15, weight: .semibold))
+						Text(m.shown(n.ip, n.name) + (n.ip == m.status?.ip ? "  (this Mac)" : "")).font(.system(size: 15, weight: .semibold))
 						Spacer()
 						if a.saving.contains(n.ip) { ProgressView().controlSize(.small) }
 						let st = now(n)
@@ -4528,7 +4534,7 @@ struct ExitNodePage: View {
 					Row(label: "Internet goes") {
 						Picker("", selection: Binding(get: { n.exit_via ?? "" }, set: { v in a.saveExit(n, ["via": v.isEmpty ? NSNull() : v]) })) {
 							Text("Directly").tag("")
-							ForEach(exits) { e in Text("Through \(e.name)").tag(e.ip) }
+							ForEach(exits) { e in Text("Through \(m.shown(e.ip, e.name))").tag(e.ip) }
 						}
 						.labelsHidden().frame(maxWidth: 260)
 						.disabled(n.exit_offer == true || (exits.isEmpty && n.exit_via == nil))
@@ -4662,7 +4668,7 @@ struct FocusPage: View {
 		let on = Dictionary((n.addons_applied?.focus?.rules ?? []).map { ($0.name ?? "", $0.on) }, uniquingKeysWith: { x, _ in x })
 		return Card {
 			HStack {
-				Text(n.name + (n.ip == m.status?.ip ? "  (this Mac)" : "")).font(.system(size: 15, weight: .semibold))
+				Text(m.shown(n.ip, n.name) + (n.ip == m.status?.ip ? "  (this Mac)" : "")).font(.system(size: 15, weight: .semibold))
 				Spacer()
 				let st = a.status(n, thisMac: n.ip == m.status?.ip)
 				if a.saving.contains(n.ip) { ProgressView().controlSize(.small) }
