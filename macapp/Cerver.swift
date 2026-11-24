@@ -188,6 +188,7 @@ final class Model: ObservableObject {
 				self.refreshRelay()
 				self.refreshPool()
 				self.checkUpdates()
+				self.refreshJobs()
 			}
 		}
 	}
@@ -267,6 +268,29 @@ final class Model: ObservableObject {
 	@Published var relay: RelayState = .off
 	@Published var relayName = ""
 	private var relayBusy = false
+
+	/// For the menu: what the relay is doing (its local service, every 5 s).
+	@Published var relayJobs: RelayJobs?
+	@Published var relayLoad: RelayStats.Compute?
+	/// The menu asks the window to show a page.
+	@Published var openPage: Page?
+	private var lastJobsFetch = Date.distantPast
+	func refreshJobs() {
+		guard relay == .running else { relayJobs = nil; relayLoad = nil; return }
+		guard Date().timeIntervalSince(lastJobsFetch) > 5 else { return }
+		lastJobsFetch = Date()
+		Task.detached {
+			func get<T: Decodable>(_ path: String, _ t: T.Type) async -> T? {
+				guard let u = URL(string: "http://127.0.0.1:18081" + path) else { return nil }
+				var r = URLRequest(url: u); r.timeoutInterval = 2
+				guard let (d, resp) = try? await URLSession.shared.data(for: r), (resp as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+				return try? JSONDecoder().decode(T.self, from: d)
+			}
+			let j = await get("/api/cerver/jobs?n=5", RelayJobs.self)
+			let st = await get("/api/local-claude/stats", RelayStats.self)
+			await MainActor.run { self.relayJobs = j; self.relayLoad = st?.compute }
+		}
+	}
 
 	/// Reads the relay service's state from launchd (it runs as you, so no password).
 	func refreshRelay() {
@@ -847,6 +871,8 @@ struct MainWindow: View {
 		}
 		.frame(minWidth: 760, minHeight: 540)
 		.onChange(of: m.openSettings) { _ in page = .settings }
+		.onChange(of: m.openPage) { p in if let p { page = p; m.openPage = nil } }
+		.onAppear { if let p = m.openPage { page = p; m.openPage = nil } }
 		.onChange(of: m.computers.map(\.id)) { ids in
 			// The computer on screen left: go back to the list.
 			if case .computer(let id) = page, !ids.contains(id) { page = .pool }
@@ -2878,6 +2904,10 @@ struct MenuView: View {
 						Button("Open SSH in Terminal") { openSSH(p.name) }
 					}
 				}
+				if !m.computers.isEmpty {
+					let online = m.computers.filter { ($0.pool?.online ?? false) || ($0.net?.online ?? false) }.count
+					Button("Your Computers: \(m.computers.count), \(online) online…") { go(.pool) }
+				}
 				Divider()
 				Button("Disconnect This Mac") { m.turnOff() }
 			}
@@ -2894,7 +2924,20 @@ struct MenuView: View {
 		Divider()
 		switch m.relay {
 		case .running, .starting:
-			Text(m.relay == .running ? "Agents can run on this Mac" : "Agents: starting…")
+			if m.relay == .starting {
+				Text("Agents: starting…")
+			} else if let j = m.relayJobs {
+				Text("Agents: \(j.running.isEmpty ? "ready" : "working") · \(jobsLine(j.today))")
+				ForEach(j.running) { r in
+					Button("    ▸ \(short(r.task ?? "A job"))  ·  \(since(r.at))") { go(.agents) }
+				}
+			} else {
+				Text("Agents can run on this Mac")
+			}
+			if let c = m.relayLoad {
+				Text([c.cpu_percent.map { "CPU \(Int($0))%" }, c.memory.map { "memory \(Int($0.percent))%" }, c.disk.map { "\(Int($0.free_bytes / 1e9)) GB free" }].compactMap { $0 }.joined(separator: " · "))
+			}
+			Button("Agents and Jobs…") { go(.agents) }
 			Button("Stop Agents on This Mac") { m.relayOff() }
 		case .off, .failed:
 			Text("Agents can't run on this Mac")
@@ -2903,7 +2946,14 @@ struct MenuView: View {
 			Text(w)
 		}
 		Divider()
+		if m.updateAvailable, let u = m.updates {
+			Button(m.updating ? "Updating…" : "Install Update (\(u.latest))") { m.updateNow() }.disabled(m.updating)
+			Divider()
+		}
+		if let e = m.email { Text("Signed in as \(e)") }
 		Button("Open Cerver…") { show() }
+		Button("Settings…") { m.openSettings += 1; show() }
+		Button("Web Dashboard…") { NSWorkspace.shared.open(URL(string: "https://cerver.ai/dashboard")!) }
 		Button("Show Log") { NSWorkspace.shared.open(URL(fileURLWithPath: logFile)) }
 		Toggle("Open at Login", isOn: Binding(get: { m.openAtLogin }, set: { m.setOpenAtLogin($0) }))
 		Button("Quit") { NSApp.terminate(nil) }
@@ -2912,6 +2962,22 @@ struct MenuView: View {
 	func show() {
 		openWindow(id: "main")
 		NSApp.activate(ignoringOtherApps: true)
+	}
+	func go(_ p: Page) { m.openPage = p; show() }
+
+	func jobsLine(_ t: RelayJobs.Today) -> String {
+		if t.jobs == 0 { return "no jobs today" }
+		var s = "\(t.jobs) job\(t.jobs == 1 ? "" : "s") today, \(t.done) done"
+		if t.failed > 0 { s += ", \(t.failed) failed" }
+		return s
+	}
+	func short(_ s: String) -> String {
+		let one = s.split(whereSeparator: \.isNewline).first.map(String.init) ?? s
+		return one.count > 40 ? String(one.prefix(39)) + "…" : one
+	}
+	func since(_ t: Double) -> String {
+		let s = Int(Date().timeIntervalSince1970 - t)
+		return s < 60 ? "\(s) s" : (s < 3600 ? "\(s / 60) min" : String(format: "%.1f h", Double(s) / 3600))
 	}
 }
 
