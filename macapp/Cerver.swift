@@ -4500,6 +4500,11 @@ struct ExitNodePage: View {
 
 	var body: some View {
 		PageLayout(title: "VPN, through your own computers", subtitle: "Send a computer's internet through another one of yours, encrypted. From café Wi-Fi, the café sees only one scrambled connection, and websites see your home's address. Unlike a VPN company, nobody else's servers are in between.") {
+			if let me = a.nodes.first(where: { $0.ip == m.status?.ip }) {
+				let via = a.nodes.first { $0.ip == me.exit_via }
+				let home = via?.name ?? a.nodes.first { $0.exit_offer == true && $0.ip != me.ip }?.name ?? a.nodes.first { $0.ip != me.ip && $0.os != "phone" }?.name ?? "Your home computer"
+				Card { VPNPicture(on: me.exit_via != nil, me: me.name, home: home) }
+			}
 			if a.nodes.isEmpty { Text(a.problem ?? "Loading your computers…").foregroundStyle(.secondary) }
 			ForEach(a.nodes) { n in
 				let exits = a.nodes.filter { $0.exit_offer == true && $0.ip != n.ip }
@@ -4535,6 +4540,97 @@ struct ExitNodePage: View {
 				.font(.caption).foregroundStyle(.secondary)
 		}
 		.task { while !Task.isCancelled { await a.load(); try? await Task.sleep(nanoseconds: 4_000_000_000) } }
+	}
+}
+
+/// The VPN, drawn: this Mac's internet going straight out, or through the
+/// tunnel to your computer at home. Follows the real setting.
+struct VPNPicture: View {
+	let on: Bool
+	let me: String
+	let home: String
+	@Environment(\.accessibilityReduceMotion) private var still
+	let tunnel = Color(red: 0.16, green: 0.62, blue: 0.47)
+
+	var body: some View {
+		VStack(alignment: .leading, spacing: 10) {
+			HStack(spacing: 8) {
+				Circle().fill(on ? tunnel : Color.orange).frame(width: 10, height: 10)
+				Text(on ? "VPN on" : "VPN off").font(.system(size: 15, weight: .semibold))
+			}
+			TimelineView(.animation(paused: still)) { tl in
+				Canvas { ctx, size in draw(&ctx, size, t: still ? 0 : tl.date.timeIntervalSinceReferenceDate) }
+			}
+			.frame(height: 230)
+			Text(on ? "Websites see your home. The network you're on only sees scrambled data going to \(home)."
+			        : "Websites see wherever you are. The café, hotel or phone carrier can see which sites you visit.")
+				.font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+		}
+		.padding(16)
+	}
+
+	func draw(_ c: inout GraphicsContext, _ size: CGSize, t: Double) {
+		let s = min(size.width / 520, size.height / 230)
+		c.translateBy(x: (size.width - 520 * s) / 2, y: 0)
+		c.scaleBy(x: s, y: s)
+		let fg = GraphicsContext.Shading.foreground
+		let dim = GraphicsContext.Shading.color(.secondary)
+		let phase = CGFloat(t.truncatingRemainder(dividingBy: 1.2) / 1.2 * -12)
+		func text(_ str: String, _ x: CGFloat, _ y: CGFloat, bold: Bool = true, color: Color? = nil) {
+			var tx = Text(str).font(.system(size: bold ? 13 : 12, weight: bold ? .semibold : .regular))
+			if let color { tx = tx.foregroundColor(color) } else if !bold { tx = tx.foregroundColor(.secondary) }
+			c.draw(tx, at: CGPoint(x: x, y: y), anchor: .center)
+		}
+		func arrow(_ a: CGPoint, _ b: CGPoint, _ color: Color, flow: Bool) {
+			var p = Path(); p.move(to: a); p.addLine(to: b)
+			c.stroke(p, with: .color(color), lineWidth: 3)
+			if flow { c.stroke(p, with: .color(Color(nsColor: .windowBackgroundColor)), style: StrokeStyle(lineWidth: 3, lineCap: .round, dash: [2, 10], dashPhase: phase)) }
+			let ang = atan2(b.y - a.y, b.x - a.x), l: CGFloat = 11
+			var h = Path()
+			h.move(to: CGPoint(x: b.x + 4 * cos(ang), y: b.y + 4 * sin(ang)))
+			h.addLine(to: CGPoint(x: b.x - l * cos(ang - 0.45), y: b.y - l * sin(ang - 0.45)))
+			h.addLine(to: CGPoint(x: b.x - l * cos(ang + 0.45), y: b.y - l * sin(ang + 0.45)))
+			h.closeSubpath()
+			c.fill(h, with: .color(color))
+		}
+		// Websites
+		let g = CGPoint(x: 260, y: 58)
+		c.stroke(Path(ellipseIn: CGRect(x: g.x - 26, y: g.y - 26, width: 52, height: 52)), with: fg, lineWidth: 2)
+		c.stroke(Path(ellipseIn: CGRect(x: g.x - 11, y: g.y - 26, width: 22, height: 52)), with: fg, lineWidth: 1.5)
+		var eq = Path(); eq.move(to: CGPoint(x: g.x - 26, y: g.y)); eq.addLine(to: CGPoint(x: g.x + 26, y: g.y))
+		c.stroke(eq, with: fg, lineWidth: 1.5)
+		text("Websites", g.x, 18)
+		text(on ? "see: your home" : "see: where you are", g.x, 100, bold: false)
+		// This Mac (laptop)
+		c.stroke(Path(roundedRect: CGRect(x: 48, y: 136, width: 64, height: 42), cornerRadius: 5), with: fg, lineWidth: 2)
+		var base = Path()
+		base.move(to: CGPoint(x: 38, y: 182)); base.addLine(to: CGPoint(x: 122, y: 182))
+		base.addLine(to: CGPoint(x: 116, y: 189)); base.addLine(to: CGPoint(x: 44, y: 189)); base.closeSubpath()
+		c.fill(base, with: fg)
+		text(me, 80, 206)
+		text("where you are", 80, 222, bold: false)
+		// Home computer (Mac mini)
+		c.stroke(Path(roundedRect: CGRect(x: 400, y: 166, width: 80, height: 22), cornerRadius: 7), with: fg, lineWidth: 2)
+		c.fill(Path(ellipseIn: CGRect(x: 462, y: 175, width: 4, height: 4)), with: fg)
+		text(home, 440, 206)
+		text("at home", 440, 222, bold: false)
+		if on {
+			var direct = Path(); direct.move(to: CGPoint(x: 100, y: 130)); direct.addLine(to: CGPoint(x: 236, y: 76))
+			c.stroke(direct, with: dim, style: StrokeStyle(lineWidth: 1.5, dash: [3, 5]))
+			let cap = Path(roundedRect: CGRect(x: 128, y: 164, width: 264, height: 26), cornerRadius: 13)
+			c.fill(cap, with: .color(tunnel.opacity(0.15)))
+			c.stroke(cap, with: .color(tunnel), lineWidth: 2)
+			arrow(CGPoint(x: 142, y: 177), CGPoint(x: 380, y: 177), tunnel, flow: true)
+			text("encrypted tunnel", 260, 206, color: tunnel)
+			arrow(CGPoint(x: 428, y: 158), CGPoint(x: 284, y: 72), tunnel, flow: true)
+			text("home internet", 395, 104, color: tunnel)
+		} else {
+			arrow(CGPoint(x: 100, y: 130), CGPoint(x: 236, y: 76), .orange, flow: true)
+			text("straight out", 132, 92, color: .orange)
+			var net = Path(); net.move(to: CGPoint(x: 130, y: 177)); net.addLine(to: CGPoint(x: 392, y: 177))
+			c.stroke(net, with: .color(tunnel), style: StrokeStyle(lineWidth: 2, dash: [6, 6]))
+			text("private network · connected", 260, 160, bold: false)
+		}
 	}
 }
 
