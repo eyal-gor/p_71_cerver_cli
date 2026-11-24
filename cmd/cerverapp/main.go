@@ -17,10 +17,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"sync"
 	"syscall"
@@ -56,11 +58,19 @@ func main() {
 		return
 	}
 	os.MkdirAll(cdir(), 0o700)
+	// The app has no console: what it says, and any crash, goes to app.log.
+	if f, err := os.OpenFile(filepath.Join(cdir(), "app.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600); err == nil {
+		log.SetOutput(f)
+		debug.SetCrashOutput(f, debug.CrashOptions{})
+	}
+	exe, _ := os.Executable()
+	log.Printf("Cerver %s started (%s)", version.Version, exe)
 	sup := &supervisor{}
 	go sup.run()
 	go servePage(sup)
 	go updates(sup)
 	systray.Run(func() { tray(sup) }, nil)
+	log.Printf("tray loop ended (quit chosen: %v)", leaving)
 	if !leaving {
 		// No tray here (a PC with no desktop session): keep the relay and
 		// the page running anyway.
@@ -104,27 +114,29 @@ func (s *supervisor) run() {
 			time.Sleep(5 * time.Second)
 			continue
 		}
-		log, _ := os.OpenFile(filepath.Join(cdir(), "relay.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		rlog, _ := os.OpenFile(filepath.Join(cdir(), "relay.log"), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 		c := exec.Command(spec.Args[0], spec.Args[1:]...)
 		c.Dir = spec.Dir
-		c.Stdout, c.Stderr = log, log
+		c.Stdout, c.Stderr = rlog, rlog
 		c.Env = append(os.Environ(), "PYTHONIOENCODING=utf-8", "PYTHONUTF8=1")
 		c.SysProcAttr = &syscall.SysProcAttr{HideWindow: true, CreationFlags: noWindow}
 		if err := c.Start(); err != nil {
 			s.setProblem("Couldn't start the relay: " + err.Error())
-			if log != nil {
-				log.Close()
+			if rlog != nil {
+				rlog.Close()
 			}
 			time.Sleep(wait)
 			continue
 		}
 		os.WriteFile(filepath.Join(cdir(), "relay.pid"), []byte(strconv.Itoa(c.Process.Pid)), 0o600)
+		log.Printf("relay started (pid %d)", c.Process.Pid)
 		s.mu.Lock()
 		s.cmd, s.started, s.problem = c, time.Now(), ""
 		s.mu.Unlock()
-		c.Wait()
-		if log != nil {
-			log.Close()
+		werr := c.Wait()
+		log.Printf("relay stopped (%v)", werr)
+		if rlog != nil {
+			rlog.Close()
 		}
 		s.mu.Lock()
 		s.cmd = nil
@@ -141,7 +153,14 @@ func (s *supervisor) run() {
 	}
 }
 
-func (s *supervisor) setProblem(p string) { s.mu.Lock(); s.problem = p; s.mu.Unlock() }
+func (s *supervisor) setProblem(p string) {
+	s.mu.Lock()
+	if p != s.problem {
+		log.Print(p)
+	}
+	s.problem = p
+	s.mu.Unlock()
+}
 
 // restart stops the relay and the agents it started; run() starts it again.
 func (s *supervisor) restart() {

@@ -53,6 +53,8 @@ jobs:
             try { Invoke-RestMethod http://127.0.0.1:18081/health -TimeoutSec 3 | Out-Null; $ok = $true; break } catch {}
           }
           Get-Process Cerver -ErrorAction SilentlyContinue | Format-Table Id, ProcessName, StartTime | Out-String | Write-Host
+          Write-Host "---- app.log ----"; Get-Content "$HOME\.cerver\app.log" -ErrorAction SilentlyContinue | Select-Object -Last 60
+          Write-Host "app file: $(Test-Path "$env:LOCALAPPDATA\Programs\Cerver\Cerver.exe")  relay-windows.json: $(Test-Path "$HOME\.cerver\relay-windows.json")"
           Write-Host "---- relay.log ----"; Get-Content "$HOME\.cerver\relay.log" -ErrorAction SilentlyContinue | Select-Object -Last 40
           if (-not $ok) { throw "the relay never answered" }
           $st = Invoke-RestMethod http://127.0.0.1:18090/app/state
