@@ -95,6 +95,9 @@ commands:
                cerver access unlist ~/Code         # no rule
                cerver access mode own_folder       # as_you | own_folder | vm
                cerver access start ~/Code          # start folder when none is given (or: default)
+  awake      Keep this computer awake for agents, and get an email if it goes offline.
+               cerver awake                        # on or off (desktops on, laptops off by default)
+               cerver awake on | off
   vpn        VPN through your own computers: send a computer's internet through another (e.g. home).
                cerver vpn                                   # who offers, who uses which
                cerver vpn offer mac-mini                    # mac-mini can be your VPN
@@ -251,6 +254,8 @@ func main() {
 		err = cmd.VM(args)
 	case "access":
 		err = cmd.Access(args)
+	case "awake":
+		err = cmd.Awake(args)
 	case "exit", "vpn":
 		err = cmd.Exit(args)
 	case "addons":

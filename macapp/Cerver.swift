@@ -5086,6 +5086,20 @@ struct AgentsPage: View {
 	@ObservedObject var m: Model
 	@StateObject private var w = RelayWatch()
 	@State private var showLog = false
+	@State private var awake = AgentsPage.readAwake()
+
+	static let awakeFile = NSHomeDirectory() + "/.cerver/awake.json"
+	/// ~/.cerver/awake.json, or the relay's default: desktops on, laptops off.
+	static func readAwake() -> Bool {
+		struct S: Decodable { let keep_awake: Bool? }
+		if let d = FileManager.default.contents(atPath: awakeFile), let v = (try? JSONDecoder().decode(S.self, from: d))?.keep_awake { return v }
+		return !shell("pmset -g batt").contains("InternalBattery")
+	}
+	func setAwake(_ on: Bool) {
+		awake = on
+		try? FileManager.default.createDirectory(atPath: NSHomeDirectory() + "/.cerver", withIntermediateDirectories: true)
+		try? Data("{\"keep_awake\": \(on)}".utf8).write(to: URL(fileURLWithPath: AgentsPage.awakeFile))
+	}
 
 	func ago(_ t: Double) -> String {
 		let s = Int(Date().timeIntervalSince1970 - t)
@@ -5110,6 +5124,10 @@ struct AgentsPage: View {
 						}
 						Button(w.restarting ? "Restarting…" : "Restart") { w.restart() }.buttonStyle(.link).disabled(w.restarting)
 					}
+				}
+				Divider().padding(.leading, 16)
+				Row(label: "Keep awake", note: "Doesn't sleep while plugged in, so agents can always reach it. You get an email if it goes offline.") {
+					Toggle("", isOn: Binding(get: { awake }, set: { setAwake($0) })).toggleStyle(.switch).labelsHidden()
 				}
 				if let c = w.stats?.compute {
 					Divider().padding(.leading, 16)
