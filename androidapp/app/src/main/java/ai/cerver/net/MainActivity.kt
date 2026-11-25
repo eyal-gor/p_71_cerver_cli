@@ -74,6 +74,7 @@ class MainActivity : ComponentActivity() {
     override fun onResume() {
         super.onResume()
         if (Net.state.value.signedIn) Net.refresh()
+        Updater.check()
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -92,16 +93,44 @@ class MainActivity : ComponentActivity() {
                         verticalArrangement = Arrangement.spacedBy(16.dp),
                     ) {
                         Text("Cerver", fontSize = 30.sp, fontWeight = FontWeight.ExtraBold)
+                        UpdateBar()
                         when {
                             !s.signedIn && s.userCode != null -> Waiting(s)
                             !s.signedIn -> SignedOut(s)
                             else -> SignedIn(s)
                         }
                         s.error?.let { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 14.sp) }
+                        UpdateFooter()
                     }
                 }
             }
         }
+    }
+
+    @Composable
+    private fun UpdateBar() {
+        val u by Updater.state.collectAsState()
+        val latest = u.latest ?: return
+        Row(
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.14f)).padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Column(Modifier.weight(1f)) {
+                Text("Update available: $latest", fontWeight = FontWeight.SemiBold)
+                Text(u.progress?.let { "Downloading… $it%" } ?: "You have ${Updater.current}", fontSize = 13.sp)
+            }
+            Button(onClick = { Updater.update(this@MainActivity) }, enabled = u.progress == null) { Text("Update") }
+        }
+    }
+
+    @Composable
+    private fun UpdateFooter() {
+        val u by Updater.state.collectAsState()
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text("Cerver ${Updater.current}", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+            TextButton(onClick = { Updater.check(quiet = false) }) { Text("Check for updates", fontSize = 12.sp) }
+        }
+        u.message?.let { Text(it, fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f)) }
     }
 
     @Composable
