@@ -41,9 +41,9 @@ func ask(t *testing.T, d *dnsTUN, name string, typ dnsmessage.Type) (dnsmessage.
 
 func TestNames(t *testing.T) {
 	nm := &names{}
-	nm.set(map[string]netip.Addr{"mac-mini": netip.MustParseAddr("100.96.0.1"), "eyals-mac-mini": netip.MustParseAddr("100.96.0.1")})
+	nm.set(map[string]netip.Addr{"mac-mini": netip.MustParseAddr("100.96.0.1")})
 	d := &dnsTUN{names: nm}
-	for _, n := range []string{"mac-mini.cerver.", "Eyals-Mac-Mini.cerver.", "mac-mini."} {
+	for _, n := range []string{"mac-mini.cerver.", "Mac-Mini.cerver.", "mac-mini."} {
 		rc, a := ask(t, d, n, dnsmessage.TypeA)
 		if rc != dnsmessage.RCodeSuccess || len(a) != 1 || a[0].String() != "100.96.0.1" {
 			t.Fatalf("%s: %v %v", n, rc, a)

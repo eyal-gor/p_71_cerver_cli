@@ -145,11 +145,9 @@ func nameMap(a *wgnet.CheckInAnswer) map[string]netip.Addr {
 		if err != nil {
 			continue
 		}
-		for _, n := range []string{p.Label, p.Name} {
-			if h := wgnet.HostName(n); h != "" {
-				if _, taken := m[h]; !taken {
-					m[h] = ip
-				}
+		if h := wgnet.HostName(wgnet.ShownName(p)); h != "" {
+			if _, taken := m[h]; !taken {
+				m[h] = ip
 			}
 		}
 	}
@@ -204,10 +202,7 @@ func Status() string {
 					via = "backup route"
 				}
 			}
-			host := wgnet.HostName(p.Label) // the name you gave it, if any; the network name works too
-			if host == "" {
-				host = wgnet.HostName(p.Name)
-			}
+			host := wgnet.HostName(wgnet.ShownName(p)) // only the current name works
 			out.Peers = append(out.Peers, peer{p.Name, p.Label, p.IP, p.OS, p.Online, s.Connected, via, host})
 		}
 	}

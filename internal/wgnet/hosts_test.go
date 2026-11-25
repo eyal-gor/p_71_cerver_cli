@@ -53,3 +53,10 @@ func TestHostsBlockKeepsTheRestOfTheFile(t *testing.T) {
 		t.Fatalf("not restored:\n%q", got)
 	}
 }
+
+func TestRenamedOnlyNewName(t *testing.T) {
+	b := HostsBlockNames(map[string][]string{"100.96.0.1": {ShownName(Peer{Name: "eyals-mac-mini", Label: "Mac-mini"})}})
+	if !strings.Contains(b, "mac-mini mac-mini.cerver") || strings.Contains(b, "eyals-mac-mini") {
+		t.Fatal(b)
+	}
+}

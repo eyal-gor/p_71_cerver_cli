@@ -369,7 +369,7 @@ func updateNames(self string, node *wgnet.Node) {
 	}
 	devices := map[string][]string{node.Answer.IP: {self}}
 	for _, p := range node.Answer.Peers {
-		devices[p.IP] = []string{p.Label, p.Name} // the name you gave it first; both work
+		devices[p.IP] = []string{wgnet.ShownName(p)} // renamed in the app: only the new name works
 	}
 	before, _ := os.ReadFile(hostsFile)
 	if err := wgnet.WriteHosts(hostsFile, wgnet.HostsBlockNames(devices)); err != nil {

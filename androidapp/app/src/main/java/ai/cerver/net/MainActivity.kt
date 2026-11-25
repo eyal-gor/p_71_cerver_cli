@@ -176,7 +176,24 @@ class MainActivity : ComponentActivity() {
             }
         }
 
-        Text("Your computers", fontSize = 19.sp, fontWeight = FontWeight.Bold)
+        Text("Your network", fontSize = 19.sp, fontWeight = FontWeight.Bold)
+        // This phone first, like "you" in the Mac app.
+        Row(
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surface).padding(14.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Box(Modifier.size(10.dp).clip(CircleShape).background(if (s.connected) green else Color.Gray))
+            Spacer(Modifier.size(12.dp))
+            Column(Modifier.weight(1f)) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Text(s.name, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
+                    Text("  this phone", fontSize = 12.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
+                }
+                Text("Phone · Access Only", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
+            }
+            Text(s.ip ?: "", fontFamily = FontFamily.Monospace, fontSize = 14.sp)
+        }
+        Text("Computers", fontSize = 13.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f))
         if (s.computers.isEmpty()) {
             Text("None yet. Install Cerver on a computer and run: sudo cerver net up", fontSize = 15.sp)
         }
@@ -214,6 +231,5 @@ class MainActivity : ComponentActivity() {
                 colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
             ) { Text("Remove this phone and sign out") }
         }
-        Text("This phone: ${s.name}", fontSize = 12.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f))
     }
 }

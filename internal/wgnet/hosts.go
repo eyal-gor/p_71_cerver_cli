@@ -45,8 +45,16 @@ func HostsBlock(devices map[string]string) string {
 	return HostsBlockNames(m)
 }
 
-// HostsBlockNames is HostsBlock with several names per address: the name you
-// gave a device in the app, then its network name. Both work.
+// ShownName is a device's one name on the network: the name you gave it in
+// the app, or else its own. After a rename the old name stops working.
+func ShownName(p Peer) string {
+	if p.Label != "" {
+		return p.Label
+	}
+	return p.Name
+}
+
+// HostsBlockNames is HostsBlock with several names per address.
 func HostsBlockNames(devices map[string][]string) string {
 	var ips []string
 	for ip := range devices {
