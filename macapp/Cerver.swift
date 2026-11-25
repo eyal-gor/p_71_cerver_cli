@@ -624,6 +624,7 @@ struct NetNode: Decodable {
 	let ip: String
 	let online: Bool
 	var os: String? = nil
+	var label: String? = nil   // the name you gave it in the app; name stays its network name
 }
 
 /// One of your computers: its place in the pool and/or on the network.
@@ -658,7 +659,7 @@ func fetchComputers(thisMac: String, thisMacNet: String?) async -> [Computer]? {
 		out.append(Computer(name: m.name, pool: m, net: node, isThisMac: me, spec: spec))
 	}
 	for n in nodes where !used.contains(n.ip) {
-		out.append(Computer(name: n.name, pool: nil, net: n, isThisMac: n.name == thisMacNet))
+		out.append(Computer(name: n.label ?? n.name, pool: nil, net: n, isThisMac: n.name == thisMacNet))
 	}
 	// This Mac first, then online ones, then by name.
 	return out.sorted {
@@ -2021,7 +2022,7 @@ struct ComputerPage: View {
 	var peer: NetPeer? { m.status?.peers.first { $0.ip == c.net?.ip } }
 
 	var body: some View {
-		PageLayout(title: c.name, subtitle: subtitle, rename: c.pool == nil ? nil : { renaming = true }) {
+		PageLayout(title: c.name, subtitle: subtitle, rename: c.pool == nil && c.net == nil ? nil : { renaming = true }) {
 			SectionedPage(nav: nav) { t in
 				switch t {
 				case .overview: overview
@@ -2036,7 +2037,7 @@ struct ComputerPage: View {
 			}
 		}
 		.id(c.id)  // a different computer starts on Overview
-		.sheet(isPresented: $renaming) { RenameSheet(m: m, computeID: c.pool?.compute_id ?? "", current: c.name, shown: $renaming) }
+		.sheet(isPresented: $renaming) { RenameSheet(m: m, computeID: c.pool?.compute_id ?? "", netIP: c.net?.ip ?? "", current: c.name, shown: $renaming) }
 	}
 
 	@ViewBuilder var overview: some View {
@@ -3729,6 +3730,7 @@ struct PoolNameSheet: View {
 struct RenameSheet: View {
 	@ObservedObject var m: Model
 	let computeID: String
+	var netIP: String = ""   // a device that's only on your network (Access Only)
 	let current: String
 	@Binding var shown: Bool
 	@State private var name = ""
@@ -3758,8 +3760,14 @@ struct RenameSheet: View {
 		if n == current { shown = false; return }
 		saving = true
 		Task {
-			let body = try? JSONSerialization.data(withJSONObject: ["label": n])
-			let ok = await gatewayRequest("PATCH", "/v2/computes/" + computeID, body: body) != nil
+			let ok: Bool
+			if computeID.isEmpty {
+				let body = try? JSONSerialization.data(withJSONObject: ["name": n])
+				ok = await gatewayRequest("PUT", "/v2/net/nodes/\(netIP)/name", body: body) != nil
+			} else {
+				let body = try? JSONSerialization.data(withJSONObject: ["label": n])
+				ok = await gatewayRequest("PATCH", "/v2/computes/" + computeID, body: body) != nil
+			}
 			saving = false
 			if ok { shown = false; m.refreshPool(force: true) } else { failed = true }
 		}
