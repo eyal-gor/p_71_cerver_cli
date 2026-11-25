@@ -4454,9 +4454,13 @@ struct FocusRule: Codable, Equatable, Identifiable {
 
 	/// Status of one computer: (text, color).
 	func status(_ n: NetNodeAddons, thisMac: Bool) -> (String, Color) {
-		if (n.os ?? "darwin") != "darwin" { return ("Macs only for now", .secondary) }
-		if !n.online { return ("Offline · applies when it's back", .secondary) }
-		guard let a = n.addons_applied else { return ("Needs a Cerver update (automatic, within the hour)", .orange) }
+		let android = n.os == "android"
+		if (n.os ?? "darwin") != "darwin" && !android { return ("Macs only for now", .secondary) }
+		if !n.online { return (android ? "Phone app off · applies when it's on" : "Offline · applies when it's back", .secondary) }
+		guard let a = n.addons_applied else { return (android ? "Update the phone app (1.1.3)" : "Needs a Cerver update (automatic, within the hour)", .orange) }
+		if android { // Safety only on phones
+			return (a.level == level(n) ? "In effect" : "Applying…", a.level == level(n) ? .green : .orange)
+		}
 		if let w = n.addons {
 			let want = rules(n).map { "\($0.name ?? "")|\($0.policy)|\(Set($0.sites).sorted())" }
 			let got = (a.focus?.rules ?? []).map { "\($0.name ?? "")|\($0.policy)|\(Set($0.sites).sorted())" }
@@ -4550,7 +4554,7 @@ struct SafetyPage: View {
 					}
 					.pickerStyle(.segmented).labelsHidden()
 					.padding(.horizontal, 16)
-					.disabled((n.os ?? "darwin") != "darwin")
+					.disabled((n.os ?? "darwin") != "darwin" && n.os != "android")
 					Text(levels.first { $0.0 == a.level(n) }?.2 ?? "")
 						.font(.callout).foregroundStyle(.secondary)
 						.padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 14)

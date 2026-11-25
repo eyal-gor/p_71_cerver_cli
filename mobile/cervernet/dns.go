@@ -22,7 +22,37 @@ import (
 // DNSAddr is the name server's address, on every phone.
 var DNSAddr = netip.MustParseAddr("100.100.100.100")
 
-var upstreams = []string{"1.1.1.1:53", "8.8.8.8:53"}
+// Safety levels (the same as the Mac's, cmd/addons.go): where lookups for
+// everything that isn't one of your devices go.
+var safety = map[string][]string{
+	"off":     {"1.1.1.1:53", "8.8.8.8:53"},
+	"malware": {"1.1.1.2:53", "1.0.0.2:53"},
+	"adult":   {"1.1.1.3:53", "1.0.0.3:53"},
+	"kids":    {"185.228.168.168:53", "185.228.169.168:53"},
+}
+
+var (
+	upMu      sync.RWMutex
+	level     = "off"
+	upstreams = safety["off"]
+)
+
+// setLevel picks the safety level chosen in the app (unknown: off).
+func setLevel(l string) {
+	ups, ok := safety[l]
+	if !ok {
+		l, ups = "off", safety["off"]
+	}
+	upMu.Lock()
+	level, upstreams = l, ups
+	upMu.Unlock()
+}
+
+func currentLevel() (string, []string) {
+	upMu.RLock()
+	defer upMu.RUnlock()
+	return level, upstreams
+}
 
 type names struct {
 	mu sync.RWMutex
@@ -160,7 +190,8 @@ func (t *dnsTUN) resolve(query []byte) []byte {
 }
 
 func forward(query []byte) []byte {
-	for _, up := range upstreams {
+	_, ups := currentLevel()
+	for _, up := range ups {
 		c, err := net.DialTimeout("udp", up, 3*time.Second)
 		if err != nil {
 			continue

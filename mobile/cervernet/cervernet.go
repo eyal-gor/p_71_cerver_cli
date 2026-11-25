@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/netip"
+	"strings"
 	"sync"
 	"time"
 
@@ -92,8 +93,18 @@ func Start(fd int32, privB64, gatewayURL, token, name string) error {
 		Port: k.StablePort(), Dev: dev, Bind: bind, Key: k, Name: name, OS: "android", Relay: true,
 		Log: func(string, ...any) {},
 		CheckIn: func(ctx context.Context, r wgnet.CheckInRequest) (*wgnet.CheckInAnswer, error) {
+			r.AddonsApplied = applied()
 			var ans wgnet.CheckInAnswer
-			return &ans, gw.Do(ctx, "POST", "/v2/net/nodes", r, &ans)
+			err := gw.Do(ctx, "POST", "/v2/net/nodes", r, &ans)
+			if err == nil {
+				var want struct {
+					Level string `json:"level"`
+				}
+				if json.Unmarshal(ans.Addons, &want) == nil && want.Level != "" {
+					setLevel(want.Level) // Safety, as chosen for this phone in the Mac app
+				}
+			}
+			return &ans, err
 		},
 	}
 	if err := node.Start(); err != nil {
@@ -152,6 +163,19 @@ func nameMap(a *wgnet.CheckInAnswer) map[string]netip.Addr {
 		}
 	}
 	return m
+}
+
+// applied tells the owner's app which Safety level this phone uses now.
+func applied() json.RawMessage {
+	l, ups := currentLevel()
+	dns := []string{}
+	if l != "off" {
+		for _, u := range ups {
+			dns = append(dns, strings.TrimSuffix(u, ":53"))
+		}
+	}
+	b, _ := json.Marshal(map[string]any{"level": l, "dns": dns, "at": time.Now().Unix()})
+	return b
 }
 
 // Stop ends the engine and closes the tunnel.

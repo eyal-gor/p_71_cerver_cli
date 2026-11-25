@@ -60,6 +60,17 @@ func TestNames(t *testing.T) {
 	}
 }
 
+func TestSafetyLevels(t *testing.T) {
+	setLevel("adult")
+	if l, ups := currentLevel(); l != "adult" || ups[0] != "1.1.1.3:53" {
+		t.Fatal(l, ups)
+	}
+	setLevel("nonsense")
+	if l, _ := currentLevel(); l != "off" {
+		t.Fatal(l)
+	}
+}
+
 func TestDNSQueryPacket(t *testing.T) {
 	p := make([]byte, 40)
 	p[0], p[9] = 0x45, 17
