@@ -1851,11 +1851,19 @@ struct PoolPage: View {
 		Card {
 			ForEach(Array(m.shown.enumerated()), id: \.element.id) { n, c in
 				if n > 0 { Divider().padding(.leading, 16) }
-				Row(label: c.name + (c.isThisMac ? "  (this Mac)" : ""), note: vmNote(c.spec?.provisioning?.vm)) {
+				Row(label: c.name + (c.isThisMac ? "  (this Mac)" : ""), note: vmNote(c.spec?.provisioning?.vm) + "\n" + modelsNote(c.spec?.provisioning?.models)) {
 					Button("Open") { open(c.isThisMac ? .thisMac : .computer(c.id)) }.buttonStyle(.link)
 				}
 			}
 		}
+	}
+
+	func modelsNote(_ s: ModelsSummary?) -> String {
+		guard let s = s, s.ollama_installed != nil else { return "Local models: not reported yet" }
+		if s.ollama_installed != true { return "Local models: Ollama not installed" }
+		if s.ollama_running != true { return "Local models: Ollama not running" }
+		let n = s.models ?? []
+		return n.isEmpty ? "Local models: none yet" : "Local models: " + n.joined(separator: ", ")
 	}
 
 	func vmNote(_ v: VMState?) -> String {
@@ -1934,6 +1942,7 @@ struct ThisMacPage: View {
 				case .network: network
 				case .software:
 					VMSection(vm: vm, reported: nil, computer: me?.name ?? m.relayName, isThisMac: true)
+					if let id = me?.pool?.compute_id { ModelsSection(computeID: id, computer: me?.name ?? m.relayName, isThisMac: true, online: true) }
 					SoftwareSection(spec: me?.spec)
 				case .hardware, .settings: SpecSection(spec: me?.spec, showTitle: false)
 				}
@@ -2073,6 +2082,7 @@ struct ComputerPage: View {
 				case .network: network
 				case .software:
 					VMSection(vm: nil, reported: c.spec?.provisioning?.vm, computer: c.name, isThisMac: false, online: c.pool?.online == true)
+					if let id = c.pool?.compute_id { ModelsSection(computeID: id, computer: c.name, isThisMac: false, online: c.pool?.online == true) }
 					SoftwareSection(spec: c.spec)
 				case .hardware, .settings: SpecSection(spec: c.spec, showTitle: false)
 				}
@@ -3900,7 +3910,7 @@ struct SecurityRules {
 
 // MARK: - Provisioning: the local VM (cerver vm, Apple's container tool)
 
-struct Provisioning: Decodable { let vm: VMState? }
+struct Provisioning: Decodable { let vm: VMState?; var models: ModelsSummary? = nil }
 
 struct VMState: Decodable {
 	var supported = false
@@ -5335,5 +5345,170 @@ struct AgentsPage: View {
 			Text(j.status == "running" ? dur(Date().timeIntervalSince1970 - j.at) : (j.seconds.map(dur) ?? "")).font(.system(size: 12)).foregroundStyle(.secondary)
 		}
 		.padding(.horizontal, 16).padding(.vertical, 10)
+	}
+}
+
+// MARK: - Provisioning: local models (Ollama), on any of your computers
+//
+// The same section on every computer's page. It talks to that computer
+// through the gateway (GET/POST /v2/computes/:id/models), so you can set up
+// the MacBook from the Mac mini and back. The computer's relay does the
+// work and refuses models that wouldn't fit its memory or free disk.
+
+struct ModelsSummary: Decodable { var ollama_installed: Bool? = nil; var ollama_running: Bool? = nil; var models: [String]? = nil }
+
+struct ModelsState: Decodable {
+	struct Model: Decodable { let name: String; let size_gb: Double? }
+	struct Entry: Decodable { let name: String; let label: String; let good_for: String; let size_gb: Double; let min_ram_gb: Double; let installed: Bool; let why_not: String? }
+	struct Pull: Decodable { let name: String; let completed: Double?; let total: Double?; let error: String?; let done: Bool?; let finished_at: Double?; let step: String? }
+	var supported = true
+	var ollama_installed = false
+	var ollama_running = false
+	var models: [Model] = []
+	var ram_gb: Double? = nil
+	var disk_free_gb: Double? = nil
+	var catalog: [Entry] = []
+	var recommended: String? = nil
+	var pulling: Pull? = nil
+	var pullingNow: Bool { pulling != nil && pulling?.finished_at == nil }
+}
+
+/// Like gatewayRequest, but keeps the status and the gateway's error text.
+func gatewayCall(_ method: String, _ path: String, body: Data? = nil, timeout: Double = 15) async -> (Int, Data?) {
+	let envPath = NSHomeDirectory() + "/.cerver/cerver.env"
+	guard let text = try? String(contentsOfFile: envPath, encoding: .utf8) else { return (0, nil) }
+	var env: [String: String] = [:]
+	for line in text.split(separator: "\n") {
+		let parts = line.split(separator: "=", maxSplits: 1).map { String($0).trimmingCharacters(in: .whitespaces) }
+		if parts.count == 2 { env[parts[0]] = parts[1].trimmingCharacters(in: CharacterSet(charactersIn: "\"'")) }
+	}
+	guard let key = env["CERVER_API_KEY"], !key.isEmpty else { return (0, nil) }
+	let base = env["CERVER_GATEWAY_URL"].flatMap { $0.isEmpty ? nil : $0 } ?? "https://gateway.cerver.ai"
+	guard let url = URL(string: base + path) else { return (0, nil) }
+	var req = URLRequest(url: url, timeoutInterval: timeout)
+	req.httpMethod = method
+	req.setValue("Bearer " + key, forHTTPHeaderField: "Authorization")
+	if let b = body { req.httpBody = b; req.setValue("application/json", forHTTPHeaderField: "Content-Type") }
+	guard let (data, resp) = try? await URLSession.shared.data(for: req) else { return (0, nil) }
+	return ((resp as? HTTPURLResponse)?.statusCode ?? 0, data)
+}
+
+func gatewayError(_ data: Data?) -> String? {
+	guard let d = data, let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any] else { return nil }
+	return o["error"] as? String
+}
+
+@MainActor final class ModelsModel: ObservableObject {
+	@Published var state: ModelsState?
+	@Published var busy: String?
+	@Published var problem: String?
+	let computeID: String
+	init(computeID: String) { self.computeID = computeID }
+
+	func load() async {
+		let (code, data) = await gatewayCall("GET", "/v2/computes/\(computeID)/models")
+		if code == 200, let d = data, let s = try? JSONDecoder().decode(ModelsState.self, from: d) {
+			state = s
+			if busy == nil { problem = s.pulling?.error.map { "Download failed: \($0)" } }
+		} else if state == nil {
+			problem = gatewayError(data) ?? "Couldn't reach this computer."
+		}
+	}
+
+	func act(_ action: String, _ name: String? = nil, saying: String) {
+		busy = saying; problem = nil
+		Task {
+			var body: [String: String] = ["action": action]
+			if let n = name { body["name"] = n }
+			let (code, data) = await gatewayCall("POST", "/v2/computes/\(computeID)/models", body: try? JSONSerialization.data(withJSONObject: body), timeout: 900)
+			busy = nil
+			if code != 200 { problem = gatewayError(data) ?? "That didn't work (\(code))." }
+			await load()
+		}
+	}
+}
+
+struct ModelsSection: View {
+	let computeID: String
+	var computer = ""
+	var isThisMac = false
+	var online = true
+	@StateObject private var mm: ModelsModel
+	@State private var removing: String?
+
+	init(computeID: String, computer: String, isThisMac: Bool, online: Bool) {
+		self.computeID = computeID; self.computer = computer; self.isThisMac = isThisMac; self.online = online
+		_mm = StateObject(wrappedValue: ModelsModel(computeID: computeID))
+	}
+
+	var here: String { isThisMac ? "this Mac" : computer }
+
+	var body: some View {
+		VStack(alignment: .leading, spacing: 8) {
+			Text("Local models").font(.system(size: 15, weight: .semibold)).padding(.top, 10)
+			Text("Open AI models that run on \(here): free, and prompts never leave your computers. Apps you connect use them as local/<name>.")
+				.font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+			Card { content }
+			if let b = mm.busy { HStack(spacing: 8) { ProgressView().controlSize(.small); Text(b).font(.callout).foregroundStyle(.secondary) } }
+			if let p = mm.problem { Text(p).font(.callout).foregroundStyle(.red).fixedSize(horizontal: false, vertical: true) }
+			if let s = mm.state, s.ram_gb != nil || s.disk_free_gb != nil {
+				Text([s.ram_gb.map { "Memory \(Int($0)) GB" }, s.disk_free_gb.map { "free disk \(Int($0)) GB" }].compactMap { $0 }.joined(separator: " · "))
+					.font(.caption).foregroundStyle(.secondary)
+			}
+		}
+		.task(id: computeID) {
+			while !Task.isCancelled {
+				if online { await mm.load() }
+				try? await Task.sleep(nanoseconds: (mm.state?.pullingNow == true ? 2 : 20) * 1_000_000_000)
+			}
+		}
+		.alert("Remove \(removing ?? "") from \(here)?", isPresented: Binding(get: { removing != nil }, set: { if !$0 { removing = nil } })) {
+			Button("Remove", role: .destructive) { if let n = removing { mm.act("remove", n, saying: "Removing \(n)…") }; removing = nil }
+			Button("Cancel", role: .cancel) { removing = nil }
+		} message: { Text("Apps that ask for local/\(removing ?? "") will use another computer that has it, or get an error.") }
+	}
+
+	@ViewBuilder var content: some View {
+		if !online {
+			Row(label: "\(computer) is offline", note: "Turn it on to see and change its models.") { EmptyView() }
+		} else if let s = mm.state {
+			if !s.supported {
+				Row(label: "Not on this computer", note: "Local models need macOS or Linux.") { EmptyView() }
+			} else {
+				Row(label: "Ollama", note: s.ollama_running ? "Running" : s.ollama_installed ? "Installed, not running" : "Runs the models. Free, from ollama.com") {
+					if !s.ollama_installed {
+						Button("Install") { mm.act("install_ollama", saying: "Installing Ollama on \(here)…") }.disabled(mm.busy != nil)
+					} else if !s.ollama_running {
+						Button("Start") { mm.act("start_ollama", saying: "Starting Ollama…") }.disabled(mm.busy != nil)
+					} else {
+						Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+					}
+				}
+				if s.ollama_running {
+					ForEach(s.models, id: \.name) { md in
+						Divider().padding(.leading, 16)
+						Row(label: md.name, note: (md.size_gb.map { "\($0.formatted()) GB · " } ?? "") + "installed") {
+							Button("Remove") { removing = md.name }.disabled(mm.busy != nil || s.pullingNow)
+						}
+					}
+					if let p = s.pulling, s.pullingNow {
+						Divider().padding(.leading, 16)
+						Row(label: "Downloading \(p.name)", note: p.step) {
+							ProgressView(value: min(1, (p.completed ?? 0) / max(1, p.total ?? 1))).frame(width: 140)
+						}
+					}
+					ForEach(s.catalog.filter { !$0.installed && $0.name != (s.pullingNow ? s.pulling?.name : nil) }, id: \.name) { e in
+						Divider().padding(.leading, 16)
+						Row(label: "\(e.label) · \(e.size_gb.formatted()) GB" + (e.name == s.recommended ? "  · best fit" : ""),
+						    note: e.why_not ?? e.good_for) {
+							Button("Install") { mm.act("pull", e.name, saying: "Starting the download of \(e.label)…") }
+								.disabled(e.why_not != nil || mm.busy != nil || s.pullingNow)
+						}
+					}
+				}
+			}
+		} else {
+			Row(label: "Checking \(here)…", note: nil) { ProgressView().controlSize(.small) }
+		}
 	}
 }
