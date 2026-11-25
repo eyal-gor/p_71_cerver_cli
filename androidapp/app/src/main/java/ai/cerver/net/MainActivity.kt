@@ -154,27 +154,28 @@ class MainActivity : ComponentActivity() {
         s.computers.forEach { c ->
             Row(
                 Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surface)
-                    .clickable { copy(c.ip) }.padding(14.dp),
+                    .clickable { copy(if (s.connected) c.host else c.ip) }.padding(14.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                Box(Modifier.size(10.dp).clip(CircleShape).background(if (c.online) green else Color.Gray))
+                Box(Modifier.size(10.dp).clip(CircleShape).background(if (c.connected || (!s.connected && c.online)) green else Color.Gray))
                 Spacer(Modifier.size(12.dp))
                 Column(Modifier.weight(1f)) {
                     Text(c.name, fontSize = 16.sp, fontWeight = FontWeight.SemiBold)
                     Text(
                         when {
+                            s.connected && c.connected -> "connected · ${c.via}"
+                            s.connected && c.online -> "connecting…"
                             !c.online -> "offline"
-                            !c.reachable -> "online, but no address this phone can use"
                             else -> "online"
                         },
                         fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
                     )
                 }
-                Text(c.ip, fontFamily = FontFamily.Monospace, fontSize = 15.sp)
+                Text(c.host.ifEmpty { c.ip }, fontFamily = FontFamily.Monospace, fontSize = 14.sp)
             }
         }
         Text(
-            "Tap a computer to copy its address. Works best on the same Wi-Fi as your computers; away from home it works when your home router lets the connection in.",
+            "Tap a computer to copy its name. Open it in the browser as http://${s.computers.firstOrNull()?.host ?: "mac-mini"}:3000, or use it in any app, at home or away.",
             fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {

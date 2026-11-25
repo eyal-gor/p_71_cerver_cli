@@ -11,8 +11,8 @@ android {
         applicationId = "ai.cerver.net"
         minSdk = 26
         targetSdk = 35
-        versionCode = 2
-        versionName = "1.0.1"
+        versionCode = 3
+        versionName = "1.1"
     }
     buildTypes {
         release {
@@ -30,7 +30,8 @@ android {
 }
 
 dependencies {
-    implementation("com.wireguard.android:tunnel:1.0.20230706")
+    // Cerver's network engine (mobile/cervernet, built with gomobile bind; see BUILD.md)
+    implementation(files("libs/cervernet.aar"))
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation(platform("androidx.compose:compose-bom:2024.10.01"))

@@ -1,19 +1,10 @@
 package ai.cerver.net
 
+import ai.cerver.cervernet.Cervernet
 import android.app.Application
 import android.content.Context
-import android.net.ConnectivityManager
-import android.net.NetworkCapabilities
+import android.content.Intent
 import android.os.Build
-import com.wireguard.android.backend.GoBackend
-import com.wireguard.android.backend.Tunnel
-import com.wireguard.config.Config
-import com.wireguard.config.InetEndpoint
-import com.wireguard.config.InetNetwork
-import com.wireguard.config.Interface
-import com.wireguard.config.Peer
-import com.wireguard.crypto.Key
-import com.wireguard.crypto.KeyPair
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -26,14 +17,11 @@ import kotlinx.coroutines.launch
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
-import java.net.InetAddress
 import java.net.URL
 
-// The phone joins your Cerver network the same way `cerver net phone` does:
-// it makes its own WireGuard key, checks in with the gateway, and gets an
-// address plus your computers' keys and addresses. Unlike a QR code, the app
-// keeps checking in, so it follows computers whose addresses change and picks
-// the home address on Wi-Fi and the public one on mobile data.
+// The phone joins your Cerver network with Cerver's own engine (CerverVpn +
+// the Go library): direct connections, the backup route when direct fails,
+// and names (mac-mini, mac-mini.cerver) answered inside the app.
 
 class App : Application() {
     override fun onCreate() {
@@ -42,7 +30,10 @@ class App : Application() {
     }
 }
 
-data class Computer(val name: String, val ip: String, val online: Boolean, val reachable: Boolean)
+data class Computer(
+    val name: String, val host: String, val ip: String,
+    val online: Boolean, val connected: Boolean, val via: String,
+)
 
 data class UiState(
     val signedIn: Boolean = false,
@@ -59,10 +50,8 @@ data class UiState(
 private class ApiError(msg: String) : Exception(msg)
 
 private object Api {
-    const val BASE = "https://gateway.cerver.ai"
-
     fun call(method: String, path: String, key: String?, body: JSONObject? = null): JSONObject {
-        val conn = URL(BASE + path).openConnection() as HttpURLConnection
+        val conn = URL(Net.GATEWAY + path).openConnection() as HttpURLConnection
         conn.requestMethod = method
         conn.connectTimeout = 15_000
         conn.readTimeout = 20_000
@@ -86,26 +75,17 @@ private object Api {
 }
 
 object Net {
+    const val GATEWAY = "https://gateway.cerver.ai"
     private lateinit var app: Context
-    private lateinit var backend: GoBackend
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     private val _state = MutableStateFlow(UiState())
     val state: StateFlow<UiState> = _state
     private var loop: Job? = null
-    private var lastConfig: String? = null
 
     private val prefs by lazy { app.getSharedPreferences("cerver", Context.MODE_PRIVATE) }
 
-    private object CerverTunnel : Tunnel {
-        override fun getName() = "cerver"
-        override fun onStateChange(newState: Tunnel.State) {
-            _state.update { it.copy(connected = newState == Tunnel.State.UP) }
-        }
-    }
-
     fun init(context: Context) {
         app = context.applicationContext
-        backend = GoBackend(app)
         val name = prefs.getString("name", null) ?: deviceName().also { prefs.edit().putString("name", it).apply() }
         _state.value = UiState(signedIn = prefs.getString("api_key", null) != null, name = name)
         if (_state.value.signedIn) startLoop()
@@ -157,71 +137,50 @@ object Net {
 
     // ---- the network ----
 
-    private fun keyPair(): KeyPair {
-        val saved = prefs.getString("private_key", null)
-        if (saved != null) return KeyPair(Key.fromBase64(saved))
-        val kp = KeyPair()
-        prefs.edit().putString("private_key", kp.privateKey.toBase64()).apply()
-        return kp
-    }
+    private fun privateKey(): String =
+        prefs.getString("private_key", null) ?: Cervernet.newPrivateKey().also { prefs.edit().putString("private_key", it).apply() }
 
-    private fun onWifi(): Boolean {
-        val cm = app.getSystemService(ConnectivityManager::class.java)
-        val caps = cm.getNetworkCapabilities(cm.activeNetwork) ?: return false
-        return caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) || caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
-    }
+    private fun isComputer(os: String) = os != "phone" && os != "android" && os != "ios"
 
-    private fun isPrivate(host: String): Boolean = runCatching {
-        val a = InetAddress.getByName(host)
-        a.isSiteLocalAddress && !host.startsWith("100.")
-    }.getOrDefault(false)
-
-    // On Wi-Fi try the computer's home-network address first (works when the
-    // phone is home); otherwise its public one.
-    private fun pickEndpoint(eps: JSONArray): String? {
-        var lan: String? = null
-        var public: String? = null
-        for (i in 0 until eps.length()) {
-            val e = eps.optString(i)
-            val host = e.substringBeforeLast(':')
-            if (host.contains(':') || host.isEmpty()) continue // IPv6: skip for now
-            if (isPrivate(host)) { if (lan == null) lan = e } else if (public == null) public = e
-        }
-        return if (onWifi()) lan ?: public else public ?: lan
-    }
-
-    /** Check in with the gateway; returns the tunnel config for the current network. */
-    private fun checkIn(): Config {
+    /** While off: check in (no addresses to share) to get this phone's address and list your computers. */
+    private fun checkIn(): String {
         val key = prefs.getString("api_key", null) ?: throw ApiError("Sign in first.")
-        val kp = keyPair()
         val ans = Api.call(
             "POST", "/v2/net/nodes", key,
-            JSONObject().put("public_key", kp.publicKey.toBase64()).put("name", _state.value.name)
-                .put("endpoints", JSONArray()).put("os", "phone"),
+            JSONObject().put("public_key", Cervernet.publicKey(privateKey())).put("name", _state.value.name)
+                .put("endpoints", JSONArray()).put("os", "android"),
         )
-        val ip = ans.getString("ip")
         prefs.edit().putString("node_id", ans.optString("node_id")).apply()
-        val cfg = Config.Builder().setInterface(
-            Interface.Builder().addAddress(InetNetwork.parse("$ip/32")).setKeyPair(kp).build(),
-        )
-        val computers = mutableListOf<Computer>()
+        val list = mutableListOf<Computer>()
         val peers = ans.optJSONArray("peers") ?: JSONArray()
         for (i in 0 until peers.length()) {
             val p = peers.getJSONObject(i)
-            if (p.optString("os") == "phone") continue // phones can't reach each other
-            val ep = pickEndpoint(p.optJSONArray("endpoints") ?: JSONArray())
-            val pip = p.getString("ip")
-            computers += Computer(p.optString("name"), pip, p.optBoolean("online"), ep != null)
-            if (ep == null) continue
-            cfg.addPeer(
-                Peer.Builder().parsePublicKey(p.getString("public_key"))
-                    .addAllowedIp(InetNetwork.parse("$pip/32"))
-                    .setEndpoint(InetEndpoint.parse(ep))
-                    .setPersistentKeepalive(25).build(),
+            if (!isComputer(p.optString("os"))) continue
+            val name = p.optString("name")
+            list += Computer(p.optString("label").ifEmpty { name }, hostName(name), p.getString("ip"), p.optBoolean("online"), false, "")
+        }
+        val ip = ans.getString("ip")
+        _state.update { it.copy(ip = ip, computers = list, error = null) }
+        return ip
+    }
+
+    private fun hostName(n: String) = n.lowercase().replace("'", "").replace(Regex("[^a-z0-9]+"), "-").trim('-')
+
+    /** While on: the engine's own view (who's connected, direct or backup route). */
+    private fun readEngine() {
+        val s = JSONObject(Cervernet.status())
+        if (!s.optBoolean("running")) return
+        val list = mutableListOf<Computer>()
+        val peers = s.optJSONArray("peers") ?: JSONArray()
+        for (i in 0 until peers.length()) {
+            val p = peers.getJSONObject(i)
+            if (!isComputer(p.optString("os"))) continue
+            list += Computer(
+                p.optString("label").ifEmpty { p.optString("name") }, p.optString("host"), p.optString("ip"),
+                p.optBoolean("online"), p.optBoolean("connected"), p.optString("via"),
             )
         }
-        _state.update { it.copy(ip = ip, computers = computers, error = null) }
-        return cfg.build()
+        _state.update { it.copy(ip = s.optString("ip"), computers = list) }
     }
 
     private fun startLoop() {
@@ -229,61 +188,50 @@ object Net {
         loop = scope.launch {
             while (true) {
                 try {
-                    val cfg = checkIn()
-                    val text = cfg.toWgQuickString()
-                    if (_state.value.connected && text != lastConfig) {
-                        backend.setState(CerverTunnel, Tunnel.State.UP, cfg)
-                    }
-                    lastConfig = text
+                    if (_state.value.connected) readEngine() else checkIn()
                 } catch (e: Exception) {
                     _state.update { it.copy(error = e.message) }
                 }
-                delay(if (_state.value.connected) 30_000 else 60_000)
+                delay(if (_state.value.connected) 3_000 else 30_000)
             }
         }
     }
 
-    /** Call after the system VPN permission was granted. */
+    /** Call after Android's VPN permission was granted. */
     fun connect() {
         scope.launch {
             _state.update { it.copy(busy = true, error = null) }
             try {
-                val cfg = checkIn()
-                lastConfig = cfg.toWgQuickString()
-                backend.setState(CerverTunnel, Tunnel.State.UP, cfg)
-                _state.update { it.copy(connected = true) }
+                val ip = checkIn()
+                val i = Intent(app, CerverVpn::class.java)
+                    .putExtra("ip", ip).putExtra("key", privateKey())
+                    .putExtra("token", prefs.getString("api_key", null)).putExtra("name", _state.value.name)
+                app.startService(i)
             } catch (e: Exception) {
-                _state.update { it.copy(error = e.message ?: "Couldn't connect") }
-            } finally {
-                _state.update { it.copy(busy = false) }
+                _state.update { it.copy(busy = false, error = e.message ?: "Couldn't connect") }
             }
         }
     }
 
     fun disconnect() {
-        scope.launch {
-            runCatching { backend.setState(CerverTunnel, Tunnel.State.DOWN, null) }
-            _state.update { it.copy(connected = false) }
-        }
+        app.startService(Intent(app, CerverVpn::class.java).setAction(CerverVpn.STOP))
     }
+
+    internal fun engineStarted() = _state.update { it.copy(connected = true, busy = false, error = null) }
+    internal fun engineFailed(msg: String) = _state.update { it.copy(connected = false, busy = false, error = msg) }
+    internal fun engineStopped() = _state.update { it.copy(connected = false, busy = false) }
 
     fun refresh() {
         scope.launch {
-            try {
-                val cfg = checkIn()
-                if (_state.value.connected) backend.setState(CerverTunnel, Tunnel.State.UP, cfg)
-                lastConfig = cfg.toWgQuickString()
-            } catch (e: Exception) {
-                _state.update { it.copy(error = e.message) }
-            }
+            try { if (_state.value.connected) readEngine() else checkIn() } catch (e: Exception) { _state.update { it.copy(error = e.message) } }
         }
     }
 
     /** Removes this phone from the network and signs out. */
     fun signOut() {
+        disconnect()
         scope.launch {
             loop?.cancel()
-            runCatching { backend.setState(CerverTunnel, Tunnel.State.DOWN, null) }
             val key = prefs.getString("api_key", null)
             val node = prefs.getString("node_id", null)
             if (key != null) {

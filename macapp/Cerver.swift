@@ -635,7 +635,7 @@ struct Computer: Identifiable {
 	let isThisMac: Bool
 	var spec: Spec? = nil
 	var id: String { pool?.compute_id ?? "net:" + (net?.ip ?? name) }
-	var isPhone: Bool { net?.os == "phone" }
+	var isPhone: Bool { ["phone", "android", "ios"].contains(net?.os ?? "") }
 	/// "Compute": your agents can run on it. Everything else on your network is "Access Only".
 	var canRun: Bool { isThisMac || (pool != nil && !isPhone) }
 	var icon: String { isThisMac ? "laptopcomputer" : (isPhone ? "iphone" : "desktopcomputer") }

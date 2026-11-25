@@ -83,6 +83,7 @@ type Peer struct {
 	Endpoints []string `json:"endpoints"`
 	Online    bool     `json:"online"`
 	OS        string   `json:"os"`
+	Label     string   `json:"label"` // the name its owner gave it in the app
 }
 
 // CheckInRequest and CheckInAnswer are POST /v2/net/nodes.
