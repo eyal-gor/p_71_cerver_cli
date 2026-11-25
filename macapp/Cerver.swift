@@ -729,8 +729,35 @@ func gatewayGET(_ path: String) async -> Data? { await gatewayRequest("GET", pat
 /// Right-click a device → Remove from Network. Its key stops working on your
 /// network at once; if it tries to come back, it waits for your approval.
 @ViewBuilder func removeMenu(_ c: Computer, _ m: Model) -> some View {
+	if c.pool?.compute_id != nil, !c.isThisMac {
+		Button("Remove \(c.name) from Pool…", role: .destructive) { confirmRemoveFromPool(c, m) }
+	}
 	if let n = c.net, !c.isThisMac {
 		Button("Remove \(n.label ?? n.name) from Network…", role: .destructive) { confirmRemove(c, m) }
+	}
+}
+
+/// Remove a computer from your pool: it stops its relay (now if it's on,
+/// or the next time it starts) and stays out until you add it again.
+@MainActor func confirmRemoveFromPool(_ c: Computer, _ m: Model) {
+	guard let id = c.pool?.compute_id else { return }
+	let a = NSAlert()
+	a.messageText = "Remove \(c.name) from your pool?"
+	a.informativeText = "Agents stop running on it, and it stops its Cerver relay. To add it back later, open the Cerver app on it and add it to your pool again. Its place on your network is separate."
+	a.alertStyle = .warning
+	a.addButton(withTitle: "Remove")
+	a.addButton(withTitle: "Cancel")
+	guard a.runModal() == .alertFirstButtonReturn else { return }
+	Task {
+		let (code, data) = await gatewayCall("POST", "/v2/computes/\(id)/remove", timeout: 30)
+		await MainActor.run {
+			if code == 200 { m.refreshPool(force: true) } else {
+				let e = NSAlert()
+				e.messageText = "Couldn't remove \(c.name)"
+				e.informativeText = gatewayError(data) ?? "Check your connection and try again."
+				e.runModal()
+			}
+		}
 	}
 }
 
