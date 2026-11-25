@@ -11,8 +11,8 @@ android {
         applicationId = "ai.cerver.net"
         minSdk = 26
         targetSdk = 35
-        versionCode = 4
-        versionName = "1.1.1"
+        versionCode = 5
+        versionName = "1.1.2"
         // The network engine (Go) is built for 64-bit ARM phones only.
         ndk { abiFilters += "arm64-v8a" }
     }

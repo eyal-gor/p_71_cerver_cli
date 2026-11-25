@@ -225,7 +225,7 @@ class MainActivity : ComponentActivity() {
             fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
         )
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            TextButton(onClick = { Net.refresh() }) { Text("Refresh") }
+            TextButton(onClick = { Net.refresh(); Updater.check(quiet = false) }) { Text("Refresh") }
             TextButton(
                 onClick = { Net.signOut() },
                 colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
