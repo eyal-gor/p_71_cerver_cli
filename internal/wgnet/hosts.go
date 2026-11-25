@@ -38,21 +38,37 @@ func HostName(name string) string {
 // HostsBlock renders the managed block for these name→address pairs.
 // Two devices with the same name: the first (lowest address) keeps the short name.
 func HostsBlock(devices map[string]string) string {
-	type d struct{ name, ip string }
-	var list []d
+	m := map[string][]string{}
 	for ip, name := range devices {
-		list = append(list, d{HostName(name), ip})
+		m[ip] = []string{name}
 	}
-	sort.Slice(list, func(i, j int) bool { return ipLess(list[i].ip, list[j].ip) })
+	return HostsBlockNames(m)
+}
+
+// HostsBlockNames is HostsBlock with several names per address: the name you
+// gave a device in the app, then its network name. Both work.
+func HostsBlockNames(devices map[string][]string) string {
+	var ips []string
+	for ip := range devices {
+		ips = append(ips, ip)
+	}
+	sort.Slice(ips, func(i, j int) bool { return ipLess(ips[i], ips[j]) })
 	seen := map[string]bool{}
 	var b strings.Builder
 	b.WriteString(hostsBegin + "\n")
-	for _, x := range list {
-		if x.name == "" || seen[x.name] {
-			continue
+	for _, ip := range ips {
+		var line []string
+		for _, n := range devices[ip] {
+			h := HostName(n)
+			if h == "" || seen[h] {
+				continue
+			}
+			seen[h] = true
+			line = append(line, h, h+".cerver")
 		}
-		seen[x.name] = true
-		b.WriteString(x.ip + "\t" + x.name + " " + x.name + ".cerver\n")
+		if len(line) > 0 {
+			b.WriteString(ip + "\t" + strings.Join(line, " ") + "\n")
+		}
 	}
 	b.WriteString(hostsEnd + "\n")
 	return b.String()

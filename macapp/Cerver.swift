@@ -1605,7 +1605,7 @@ struct PoolPage: View {
 										}
 										if let n = c.net {
 											// The address to reach it at, from any device on the network.
-											let addr = c.isPhone ? n.ip : "\(n.name).cerver"
+											let addr = c.isPhone ? n.ip : "\(cleanName(n.label ?? n.name)).cerver"  // the name you gave it; the network name works too
 											Button { m.copy(addr) } label: {
 												Text(m.copied == addr ? "Copied" : (c.isPhone ? addr : "\(addr) · \(n.ip)"))
 													.font(.system(size: 11, design: .monospaced)).foregroundStyle(Color.accentColor).lineLimit(1)
@@ -1685,16 +1685,17 @@ struct PoolPage: View {
 
 	/// How to reach a computer by its address, with lines to copy.
 	func reachCard(_ n: NetNode) -> some View {
-		let host = "\(n.name).cerver"
+		let short = cleanName(n.label ?? n.name)
+		let host = "\(short).cerver"
 		let lines: [(String, String, String)] = [
 			("See its screen", "vnc://\(host)", "Paste in Safari, or use View screen on its page."),
 			("Terminal", "ssh \(NSUserName())@\(host)", "Needs Remote Login on in its Sharing settings."),
 			("An app it runs", "http://\(host):3000", "Any port. The app must listen on all addresses, not only localhost."),
-			("From a phone", "\(n.ip)", "Phones use the number instead of the name."),
+			("From a phone", "http://\(short):3000", "In the Cerver phone app, names work without .cerver."),
 		]
 		return VStack(alignment: .leading, spacing: 10) {
 			Text("How to reach your computers").font(.system(size: 15, weight: .semibold))
-			Text("From any of your devices on the network, use a computer's address. Its address is under its name above; click to copy. Example: \(n.name).")
+			Text("From any of your devices on the network, use a computer's address. Its address is under its name above; click to copy. Example: \(n.label ?? n.name).")
 				.font(.callout).foregroundStyle(.secondary)
 			Card {
 				ForEach(Array(lines.enumerated()), id: \.offset) { i, l in

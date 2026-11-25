@@ -204,7 +204,11 @@ func Status() string {
 					via = "backup route"
 				}
 			}
-			out.Peers = append(out.Peers, peer{p.Name, p.Label, p.IP, p.OS, p.Online, s.Connected, via, wgnet.HostName(p.Name)})
+			host := wgnet.HostName(p.Label) // the name you gave it, if any; the network name works too
+			if host == "" {
+				host = wgnet.HostName(p.Name)
+			}
+			out.Peers = append(out.Peers, peer{p.Name, p.Label, p.IP, p.OS, p.Online, s.Connected, via, host})
 		}
 	}
 	b, _ := json.Marshal(out)

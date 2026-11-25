@@ -367,12 +367,12 @@ func updateNames(self string, node *wgnet.Node) {
 	if node.Answer == nil {
 		return
 	}
-	devices := map[string]string{node.Answer.IP: self}
+	devices := map[string][]string{node.Answer.IP: {self}}
 	for _, p := range node.Answer.Peers {
-		devices[p.IP] = p.Name
+		devices[p.IP] = []string{p.Label, p.Name} // the name you gave it first; both work
 	}
 	before, _ := os.ReadFile(hostsFile)
-	if err := wgnet.WriteHosts(hostsFile, wgnet.HostsBlock(devices)); err != nil {
+	if err := wgnet.WriteHosts(hostsFile, wgnet.HostsBlockNames(devices)); err != nil {
 		fmt.Printf("Couldn't update device names: %v\n", err)
 		return
 	}

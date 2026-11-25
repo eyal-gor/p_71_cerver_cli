@@ -157,7 +157,8 @@ object Net {
             val p = peers.getJSONObject(i)
             if (!isComputer(p.optString("os"))) continue
             val name = p.optString("name")
-            list += Computer(p.optString("label").ifEmpty { name }, hostName(name), p.getString("ip"), p.optBoolean("online"), false, "")
+            val label = p.optString("label")
+            list += Computer(label.ifEmpty { name }, hostName(label.ifEmpty { name }), p.getString("ip"), p.optBoolean("online"), false, "")
         }
         val ip = ans.getString("ip")
         _state.update { it.copy(ip = ip, computers = list, error = null) }
