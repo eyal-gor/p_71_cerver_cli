@@ -635,6 +635,8 @@ struct Computer: Identifiable {
 	var spec: Spec? = nil
 	var id: String { pool?.compute_id ?? "net:" + (net?.ip ?? name) }
 	var isPhone: Bool { net?.os == "phone" }
+	/// "Compute": your agents can run on it. Everything else on your network is "Access Only".
+	var canRun: Bool { isThisMac || (pool != nil && !isPhone) }
 	var icon: String { isThisMac ? "laptopcomputer" : (isPhone ? "iphone" : "desktopcomputer") }
 }
 
@@ -961,7 +963,8 @@ struct MainWindow: View {
 					Label("Ask Compute Pool", systemImage: "bubble.left.and.text.bubble.right")
 						.padding(.leading, 14)
 						.tag(Page.session)
-					ForEach(m.shown.filter { !$0.isPhone }) { c in
+					groupLabel("Compute")
+					ForEach(m.shown.filter(\.canRun)) { c in
 						sidebarRow(name: c.name, dot: c.isThisMac ? thisMacDot : computerDot(c), icon: c.icon, you: c.isThisMac)
 							.padding(.leading, 14)
 							.tag(c.isThisMac ? Page.thisMac : Page.computer(c.id))
@@ -971,6 +974,14 @@ struct MainWindow: View {
 						sidebarRow(name: m.relayName, dot: thisMacDot, icon: "laptopcomputer", you: true)
 							.padding(.leading, 14)
 							.tag(Page.thisMac)
+					}
+					if m.shown.contains(where: { !$0.canRun }) {
+						groupLabel("Access Only")
+						ForEach(m.shown.filter { !$0.canRun }) { c in
+							sidebarRow(name: c.name, dot: computerDot(c), icon: c.icon)
+								.padding(.leading, 14)
+								.tag(Page.computer(c.id))
+						}
 					}
 					Label("Add Compute", systemImage: "plus")
 						.foregroundStyle(.secondary)
@@ -1128,6 +1139,13 @@ struct MainWindow: View {
 		if m.busy || m.relay == .starting { return .orange }
 		if m.isOn || relayOn { return .green }
 		return Color.secondary.opacity(0.4)
+	}
+
+	/// A small heading inside the pool: "Compute" (runs your agents) or
+	/// "Access Only" (reaches your computers, runs nothing).
+	func groupLabel(_ t: String) -> some View {
+		Text(t).font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+			.padding(.leading, 14).padding(.top, 4)
 	}
 
 	func sidebarRow(name: String, dot: Color, icon: String, you: Bool = false) -> some View {
@@ -1564,7 +1582,16 @@ struct PoolPage: View {
 							header("Network")
 						}
 						.padding(.horizontal, 16).padding(.vertical, 10)
-						ForEach(m.shown) { c in
+						ForEach(m.shown.filter(\.canRun) + m.shown.filter { !$0.canRun }) { c in
+							if c.id == m.shown.first(where: \.canRun)?.id || c.id == m.shown.first(where: { !$0.canRun })?.id {
+								Divider().gridCellColumns(3)
+								GridRow {
+									Text(c.canRun ? "Compute" : "Access Only")
+										.font(.system(size: 11, weight: .semibold)).foregroundStyle(.secondary)
+										.gridCellColumns(3)
+								}
+								.padding(.horizontal, 16).padding(.top, 8).padding(.bottom, 2)
+							}
 							Divider().gridCellColumns(3)
 							GridRow {
 								HStack(spacing: 8) {
