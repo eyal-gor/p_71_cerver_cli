@@ -726,6 +726,37 @@ func openWeb(_ path: String) {
 /// GET from the Cerver gateway with your key from ~/.cerver/cerver.env.
 func gatewayGET(_ path: String) async -> Data? { await gatewayRequest("GET", path) }
 
+/// Right-click a device → Remove from Network. Its key stops working on your
+/// network at once; if it tries to come back, it waits for your approval.
+@ViewBuilder func removeMenu(_ c: Computer, _ m: Model) -> some View {
+	if let n = c.net, !c.isThisMac {
+		Button("Remove \(n.label ?? n.name) from Network…", role: .destructive) { confirmRemove(c, m) }
+	}
+}
+
+@MainActor func confirmRemove(_ c: Computer, _ m: Model) {
+	guard let n = c.net else { return }
+	let name = n.label ?? n.name
+	let a = NSAlert()
+	a.messageText = "Remove \(name) from your network?"
+	a.informativeText = "It loses its connection to your other devices within seconds. If it tries to join again, it has to wait for your approval by email."
+	a.alertStyle = .warning
+	a.addButton(withTitle: "Remove")
+	a.addButton(withTitle: "Cancel")
+	guard a.runModal() == .alertFirstButtonReturn else { return }
+	Task {
+		let ok = await gatewayRequest("DELETE", "/v2/net/nodes/\(n.ip)") != nil
+		await MainActor.run {
+			if ok { m.refreshPool(force: true) } else {
+				let e = NSAlert()
+				e.messageText = "Couldn't remove \(name)"
+				e.informativeText = "Check your connection and try again."
+				e.runModal()
+			}
+		}
+	}
+}
+
 func gatewayRequest(_ method: String, _ path: String, body: Data? = nil) async -> Data? {
 	let envPath = NSHomeDirectory() + "/.cerver/cerver.env"
 	guard let text = try? String(contentsOfFile: envPath, encoding: .utf8) else { return nil }
@@ -970,6 +1001,7 @@ struct MainWindow: View {
 					ForEach(m.shown.filter(\.canRun)) { c in
 						sidebarRow(name: c.name, dot: c.isThisMac ? thisMacDot : computerDot(c), icon: c.icon, you: c.isThisMac)
 							.padding(.leading, 14)
+							.contextMenu { removeMenu(c, m) }
 							.tag(c.isThisMac ? Page.thisMac : Page.computer(c.id))
 						if page == (c.isThisMac ? Page.thisMac : Page.computer(c.id)) { sectionRows }
 					}
@@ -983,6 +1015,7 @@ struct MainWindow: View {
 						ForEach(m.shown.filter { !$0.canRun }) { c in
 							sidebarRow(name: c.name, dot: computerDot(c), icon: c.icon)
 								.padding(.leading, 14)
+								.contextMenu { removeMenu(c, m) }
 								.tag(Page.computer(c.id))
 						}
 					}
@@ -1632,6 +1665,7 @@ struct PoolPage: View {
 							.padding(.horizontal, 16).padding(.vertical, 9)
 							.contentShape(Rectangle())
 							.onTapGesture { open(c.isThisMac ? .thisMac : .computer(c.id)) }
+							.contextMenu { removeMenu(c, m) }
 						}
 					}
 				}
