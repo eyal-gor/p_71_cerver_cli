@@ -104,6 +104,11 @@ type CheckInAnswer struct {
 	// link; until then it has no peers. ApproveEmail is the masked inbox.
 	Pending      bool   `json:"pending"`
 	ApproveEmail string `json:"approve_email"`
+	// Who may connect to this device (nil from an older gateway = everyone).
+	Inbound *struct {
+		Open  bool         `json:"open"`
+		Rules []AccessRule `json:"rules"`
+	} `json:"inbound"`
 	// Add-ons the owner chose for this device (null: none chosen from the app).
 	Addons json.RawMessage `json:"addons,omitempty"`
 	// Exit node: Offer = let your other devices send their internet through

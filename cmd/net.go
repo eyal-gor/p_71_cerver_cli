@@ -50,13 +50,15 @@ func Net(args []string) error {
 		return netUninstall()
 	case "phone":
 		return netPhone(args)
+	case "access":
+		return netAccess(args)
 	case "rm", "remove":
 		if len(args) != 1 {
 			return fmt.Errorf("usage: cerver net rm <name|address>")
 		}
 		return netRemove(args[0])
 	default:
-		return fmt.Errorf("unknown: cerver net %s (try: up, install, uninstall, status, phone, rm)", sub)
+		return fmt.Errorf("unknown: cerver net %s (try: up, install, uninstall, status, phone, access, rm)", sub)
 	}
 }
 
@@ -166,6 +168,8 @@ func netUp(args []string) error {
 	}
 	ifname, _ := tdev.Name()
 	self := wgnet.NewSelfTUN(tdev)
+	filter := wgnet.NewFilter() // who may connect to this device; open until told otherwise
+	self.Filter = filter
 	bind := wgnet.NewBind()
 	dev := device.NewDevice(self, bind, device.NewLogger(device.LogLevelError, "wireguard: "))
 	defer dev.Close()
@@ -195,6 +199,10 @@ func netUp(args []string) error {
 	}
 	ip := node.Answer.IP
 	self.SetSelf(ip)
+	applyInbound(filter, node.Answer)
+	if !filter.Open() {
+		fmt.Println("Only the devices you chose can connect to this one (cerver net access).")
+	}
 	go relay.Run(ctx) // after the first check-in: the relay only admits registered devices
 	if err := configureInterface(ifname, ip, node.Answer.Prefix); err != nil {
 		return err
@@ -240,6 +248,7 @@ func netUp(args []string) error {
 					fmt.Println("Approved. This device is now on your network.")
 				}
 				pending = node.Answer.Pending
+				applyInbound(filter, node.Answer)
 				updateNames(*name, node)
 				// The gateway can change how often to check in (5 s since add-ons).
 				if p := time.Duration(max(5, node.Answer.PollSeconds)) * time.Second; p != poll {

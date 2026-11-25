@@ -626,6 +626,7 @@ struct NetNode: Decodable {
 	let online: Bool
 	var os: String? = nil
 	var label: String? = nil   // the name you gave it in the app; name stays its network name
+	var pending: Bool? = nil   // new device waiting for your approval (email link); blocked until then
 }
 
 /// One of your computers: its place in the pool and/or on the network.
@@ -1377,6 +1378,7 @@ struct CommandBox: View {
 // MARK: Computer status words (shared by the list and each computer's page)
 
 func agentsStatus(_ c: Computer) -> (String, Color) {
+	if c.net?.pending == true { return ("Waiting for approval", .orange) }
 	if c.isPhone { return ("Phone", .gray) }
 	guard let p = c.pool else { return ("Not in pool", .gray) }
 	if !p.online { return ("Offline", .gray) }
@@ -1386,6 +1388,7 @@ func agentsStatus(_ c: Computer) -> (String, Color) {
 
 func networkStatus(_ c: Computer, peer: NetPeer?) -> (String, Color) {
 	guard let n = c.net else { return ("Off", .gray) }
+	if n.pending == true { return ("Blocked", .orange) }
 	if c.isThisMac { return n.online ? ("On", .green) : ("Off", .gray) }
 	if let p = peer, p.connected { return p.via == "relay" ? ("On, via relay", .orange) : ("On, direct", .green) }
 	return n.online ? ("On", .green) : ("Off", .gray)
@@ -1721,6 +1724,8 @@ struct PoolPage: View {
 		let route = peer(c).flatMap { $0.connected ? ($0.via == "direct" ? "direct" : "via backup") : nil }
 		if c.isThisMac {
 			Text("this Mac").font(.system(size: 11)).foregroundStyle(.secondary)
+		} else if c.net?.pending == true {
+			Text("approve it from your email").font(.system(size: 11)).foregroundStyle(.secondary)
 		} else if let ip = c.net?.ip, let ms = pings[ip] {
 			if ms < 0 {
 				Text(c.isPhone ? "app off or away" : "no reply").font(.system(size: 11)).foregroundStyle(c.isPhone ? Color.secondary : Color.red)
