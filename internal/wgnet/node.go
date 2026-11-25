@@ -100,6 +100,10 @@ type CheckInAnswer struct {
 	Prefix      string `json:"prefix"`
 	PollSeconds int    `json:"poll_seconds"`
 	Peers       []Peer `json:"peers"`
+	// Pending: this device waits for its owner to approve it from an email
+	// link; until then it has no peers. ApproveEmail is the masked inbox.
+	Pending      bool   `json:"pending"`
+	ApproveEmail string `json:"approve_email"`
 	// Add-ons the owner chose for this device (null: none chosen from the app).
 	Addons json.RawMessage `json:"addons,omitempty"`
 	// Exit node: Offer = let your other devices send their internet through

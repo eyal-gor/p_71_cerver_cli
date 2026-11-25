@@ -204,10 +204,13 @@ func netUp(args []string) error {
 	defer func() { exits.stopUsing(""); exits.stopOffering() }()
 	exits.update(node)
 	defer wgnet.WriteHosts(hostsFile, "")
-	writeNetStatus(*name, ip, false, node.Status())
+	writeNetStatus(*name, ip, false, node.Status(), node.Answer.Pending)
 	defer os.Remove(netStatusFile)
 	fmt.Printf("%s is on your Cerver network at %s (interface %s). Ctrl-C to leave.\n", *name, ip, ifname)
-	if len(node.Answer.Peers) == 0 {
+	pending := node.Answer.Pending
+	if pending {
+		sayPending(node.Answer.ApproveEmail)
+	} else if len(node.Answer.Peers) == 0 {
 		fmt.Println("No other devices yet. Run `sudo cerver net up` on another one.")
 	}
 
@@ -233,6 +236,10 @@ func netUp(args []string) error {
 			if err := node.Tick(ctx); err != nil && ctx.Err() == nil {
 				fmt.Printf("Couldn't reach Cerver (%v); keeping current peers.\n", err)
 			} else {
+				if pending && !node.Answer.Pending {
+					fmt.Println("Approved. This device is now on your network.")
+				}
+				pending = node.Answer.Pending
 				updateNames(*name, node)
 				// The gateway can change how often to check in (5 s since add-ons).
 				if p := time.Duration(max(5, node.Answer.PollSeconds)) * time.Second; p != poll {
@@ -255,7 +262,7 @@ func netUp(args []string) error {
 				node.Tick(ctx) // tell Cerver at once whether to share our addresses
 			}
 			node.Retry()
-			writeNetStatus(*name, ip, relay.Connected(), node.Status())
+			writeNetStatus(*name, ip, relay.Connected(), node.Status(), pending)
 			applyFocus()       // Add-ons → Focus: block distracting sites by its schedule
 			exits.update(node) // exit nodes: offer this one, or use another
 		case <-selfUpdate.C:
@@ -334,7 +341,16 @@ func netSelfUpdate(ctx context.Context) bool {
 	return true
 }
 
-func writeNetStatus(name, ip string, relayUp bool, peers []wgnet.PeerStatus) {
+// sayPending tells the person where to approve this device.
+func sayPending(email string) {
+	where := "your email"
+	if email != "" {
+		where = email
+	}
+	fmt.Printf("Waiting for approval: we sent a link to %s. Open it and choose Approve to let this device in.\n", where)
+}
+
+func writeNetStatus(name, ip string, relayUp bool, peers []wgnet.PeerStatus, pending bool) {
 	st := struct {
 		Name    string          `json:"name"`
 		IP      string          `json:"ip"`
@@ -343,7 +359,8 @@ func writeNetStatus(name, ip string, relayUp bool, peers []wgnet.PeerStatus) {
 		Version string          `json:"version"`
 		Peers   []netStatusPeer `json:"peers"`
 		Direct  bool            `json:"direct"`
-	}{Name: name, IP: ip, Relay: relayUp, Updated: time.Now().Unix(), Version: version.Version, Peers: []netStatusPeer{}, Direct: !netDirectOff()}
+		Pending bool            `json:"pending"` // waiting for the owner's approval (email link)
+	}{Name: name, IP: ip, Relay: relayUp, Updated: time.Now().Unix(), Version: version.Version, Peers: []netStatusPeer{}, Direct: !netDirectOff(), Pending: pending}
 	for _, p := range peers {
 		via := ""
 		if p.Connected {

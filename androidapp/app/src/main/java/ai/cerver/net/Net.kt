@@ -161,7 +161,10 @@ object Net {
             list += Computer(label.ifEmpty { name }, hostName(label.ifEmpty { name }), p.getString("ip"), p.optBoolean("online"), false, "")
         }
         val ip = ans.getString("ip")
-        _state.update { it.copy(ip = ip, computers = list, error = null) }
+        // New devices wait until the owner approves them from an email link.
+        val waiting = if (ans.optBoolean("pending"))
+            "Waiting for approval: open the link we emailed to ${ans.optString("approve_email").ifEmpty { "you" }}." else null
+        _state.update { it.copy(ip = ip, computers = list, error = waiting) }
         return ip
     }
 

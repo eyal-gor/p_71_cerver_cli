@@ -42,19 +42,64 @@ func netPhone(args []string) error {
 	if err != nil {
 		return err
 	}
+	type phonePeer struct {
+		Name      string   `json:"name"`
+		IP        string   `json:"ip"`
+		PublicKey string   `json:"public_key"`
+		Endpoints []string `json:"endpoints"`
+		OS        string   `json:"os"`
+		Pending   bool     `json:"pending"`
+	}
 	var ans struct {
-		IP    string `json:"ip"`
-		Peers []struct {
-			Name      string   `json:"name"`
-			IP        string   `json:"ip"`
-			PublicKey string   `json:"public_key"`
-			Endpoints []string `json:"endpoints"`
-			OS        string   `json:"os"`
-		} `json:"peers"`
+		IP           string      `json:"ip"`
+		Peers        []phonePeer `json:"peers"`
+		Pending      bool        `json:"pending"`
+		ApproveEmail string      `json:"approve_email"`
+		NodeID       string      `json:"node_id"`
 	}
 	body := map[string]any{"public_key": key.PublicB64(), "name": cleanDeviceName(*name), "endpoints": []string{}, "os": "phone"}
 	if err := gw.Do(ctx, "POST", "/v2/net/nodes", body, &ans); err != nil {
 		return err
+	}
+	if ans.Pending {
+		// New devices wait for the owner's OK from an email link. The phone's
+		// key lives only in this run, so wait here instead of starting over.
+		sayPending(ans.ApproveEmail)
+		fmt.Println("Waiting here for up to 10 minutes…")
+		wctx, wcancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer wcancel()
+		for ans.Pending {
+			select {
+			case <-wctx.Done():
+				gw.Do(context.Background(), "DELETE", "/v2/net/nodes/"+ans.NodeID, nil, nil)
+				return fmt.Errorf("not approved within 10 minutes; run this again when you can open the email")
+			case <-time.After(4 * time.Second):
+			}
+			var st struct {
+				Nodes []phonePeer `json:"nodes"`
+			}
+			if gw.Do(wctx, "GET", "/v2/net", nil, &st) != nil {
+				continue
+			}
+			found := false
+			for _, n := range st.Nodes {
+				if n.PublicKey == key.PublicB64() {
+					found, ans.Pending = true, n.Pending
+				}
+			}
+			if !found {
+				return fmt.Errorf("the phone was denied")
+			}
+			if !ans.Pending {
+				ans.Peers = ans.Peers[:0]
+				for _, n := range st.Nodes {
+					if n.PublicKey != key.PublicB64() && !n.Pending {
+						ans.Peers = append(ans.Peers, n)
+					}
+				}
+				fmt.Println("Approved.")
+			}
+		}
 	}
 
 	var c strings.Builder

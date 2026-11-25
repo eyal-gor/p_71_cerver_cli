@@ -68,6 +68,7 @@ struct NetStatus: Decodable {
 	let updated: Double
 	let peers: [NetPeer]
 	var direct: Bool? = nil   // nil: an older network service
+	var pending: Bool? = nil  // waiting for the owner's approval from the email link
 }
 
 /// Direct connections on/off, read by the network service every few seconds
@@ -1125,6 +1126,7 @@ struct MainWindow: View {
 	/// "Network: direct to 2 · 1 via backup"
 	var networkLine: String {
 		guard m.isOn, let s = m.status else { return "Network: off" }
+		if s.pending == true { return "Network: waiting for approval, check your email" }
 		let direct = s.peers.filter { $0.connected && $0.via == "direct" }.count
 		let relayed = s.peers.filter { $0.connected && $0.via == "relay" }.count
 		var parts: [String] = []
@@ -2969,7 +2971,9 @@ struct MenuView: View {
 		case .on:
 			if let s = m.status {
 				Text("This Mac: \(s.name) · \(s.ip)")
-				if s.peers.isEmpty {
+				if s.pending == true {
+					Text("Waiting for approval: open the link we emailed you")
+				} else if s.peers.isEmpty {
 					Text("No other computers yet")
 				}
 				ForEach(s.peers) { p in
