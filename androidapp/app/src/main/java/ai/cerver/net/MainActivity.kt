@@ -177,6 +177,12 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun size(b: Long): String = when {
+        b >= 1_000_000 -> "%.1f MB".format(b / 1_000_000.0)
+        b >= 1_000 -> "${b / 1_000} KB"
+        else -> "$b B"
+    }
+
     @Composable
     private fun AskCards(s: UiState) {
         val a by Asks.state.collectAsState()
@@ -192,6 +198,22 @@ class MainActivity : ComponentActivity() {
                 Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(amber.copy(alpha = 0.14f)).padding(18.dp),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
+                if (ask.isSend) {
+                    val n = ask.files.size
+                    Text("${ask.from} wants to send $n file${if (n == 1) "" else "s"}", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                    Text("\u201C${ask.reason}\u201D", fontSize = 16.sp)
+                    ask.files.take(8).forEach { f -> Text("${f.name}  ·  ${size(f.size)}", fontFamily = FontFamily.Monospace, fontSize = 13.sp) }
+                    if (n > 8) Text("and ${n - 8} more", fontSize = 13.sp)
+                    Text("Saved to Downloads/Cerver, straight from ${ask.from} over your network.", fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f))
+                    if (!s.connected) Text("Turn Cerver on below to receive.", fontSize = 13.sp, color = amber)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Button(onClick = { Net.acceptSend(ask) }, enabled = s.connected && a.sending == null) {
+                            Text(if (a.sending == ask.id) "Receiving…" else "Accept")
+                        }
+                        TextButton(onClick = { Net.denyAsk(ask) }, enabled = a.sending == null) { Text("Decline") }
+                    }
+                    return@Column
+                }
                 Text("${ask.from} asks for ${ask.kind}", fontSize = 20.sp, fontWeight = FontWeight.Bold)
                 Text("\u201C${ask.reason}\u201D", fontSize = 16.sp)
                 Text(

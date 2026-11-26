@@ -19,3 +19,10 @@ func TestSaveNameStaysInsideAndUnique(t *testing.T) {
 		t.Fatalf("not unique: %s", p)
 	}
 }
+
+func TestSplitFlagsAnyOrder(t *testing.T) {
+	f, r := splitFlags([]string{"a.pdf", "--reason", "x y", "b.jpg", "--json"}, map[string]bool{"reason": true})
+	if len(r) != 2 || r[0] != "a.pdf" || r[1] != "b.jpg" || len(f) != 3 || f[1] != "x y" {
+		t.Fatalf("flags %v rest %v", f, r)
+	}
+}

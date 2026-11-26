@@ -96,6 +96,11 @@ object Net {
 
     fun denyAsk(a: Ask) { val key = prefs.getString("api_key", null) ?: return; scope.launch { Asks.deny(key, a) } }
 
+    fun acceptSend(a: Ask) {
+        val key = prefs.getString("api_key", null) ?: return
+        scope.launch { Asks.receive(app, key, a); pollAsks() }
+    }
+
     fun sendAsk(a: Ask, uris: List<android.net.Uri>) {
         val key = prefs.getString("api_key", null) ?: return
         scope.launch { Asks.send(app, key, a, uris); pollAsks() }
