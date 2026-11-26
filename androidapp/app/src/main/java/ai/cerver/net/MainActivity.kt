@@ -59,6 +59,29 @@ class MainActivity : ComponentActivity() {
         else Toast.makeText(this, "Android needs your OK to connect", Toast.LENGTH_SHORT).show()
     }
 
+    // Phone asks: the picker for the ask being answered.
+    private var answering: Ask? = null
+    private val pickMedia = registerForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(50)) { uris ->
+        answering?.let { a -> if (uris.isNotEmpty()) Net.sendAsk(a, uris.take(a.max)) }
+    }
+    private val pickOneMedia = registerForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        answering?.let { a -> if (uri != null) Net.sendAsk(a, listOf(uri)) }
+    }
+    private val pickFiles = registerForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        answering?.let { a -> if (uris.isNotEmpty()) Net.sendAsk(a, uris.take(a.max)) }
+    }
+    private val askNotify = registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
+    private fun choose(a: Ask) {
+        answering = a
+        val media = ActivityResultContracts.PickVisualMedia.ImageAndVideo
+        when {
+            a.kind == "files" -> pickFiles.launch(arrayOf("*/*"))
+            a.max <= 1 -> pickOneMedia.launch(androidx.activity.result.PickVisualMediaRequest(media))
+            else -> pickMedia.launch(androidx.activity.result.PickVisualMediaRequest(media))
+        }
+    }
+
     private fun turnOn() {
         val ask = VpnService.prepare(this)
         if (ask != null) askVpn.launch(ask) else Net.connect()
@@ -80,6 +103,9 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        if (android.os.Build.VERSION.SDK_INT >= 33 &&
+            checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED
+        ) askNotify.launch(android.Manifest.permission.POST_NOTIFICATIONS)
         setContent {
             val dark = isSystemInDarkTheme()
             MaterialTheme(
@@ -97,7 +123,7 @@ class MainActivity : ComponentActivity() {
                         when {
                             !s.signedIn && s.userCode != null -> Waiting(s)
                             !s.signedIn -> SignedOut(s)
-                            else -> SignedIn(s)
+                            else -> { AskCards(s); SignedIn(s) }
                         }
                         s.error?.let { Text(it, color = MaterialTheme.colorScheme.error, fontSize = 14.sp) }
                         UpdateFooter()
@@ -148,6 +174,38 @@ class MainActivity : ComponentActivity() {
         Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
             Button(onClick = { s.verifyUrl?.let(::open) }) { Text("Open the browser again") }
             TextButton(onClick = { Net.cancelSignIn() }) { Text("Cancel") }
+        }
+    }
+
+    @Composable
+    private fun AskCards(s: UiState) {
+        val a by Asks.state.collectAsState()
+        val amber = Color(0xFFE0A040)
+        a.note?.let { note ->
+            Row(Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(MaterialTheme.colorScheme.surface).padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(note, fontSize = 15.sp, modifier = Modifier.weight(1f))
+                TextButton(onClick = { Asks.clearNote() }) { Text("OK") }
+            }
+        }
+        a.asks.forEach { ask ->
+            Column(
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(amber.copy(alpha = 0.14f)).padding(18.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp),
+            ) {
+                Text("${ask.from} asks for ${ask.kind}", fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                Text("\u201C${ask.reason}\u201D", fontSize = 16.sp)
+                Text(
+                    "Up to ${ask.max}. Only what you pick is sent, straight to ${ask.from} over your network.",
+                    fontSize = 13.sp, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.65f),
+                )
+                if (!s.connected) Text("Turn Cerver on below to send.", fontSize = 13.sp, color = amber)
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(onClick = { choose(ask) }, enabled = s.connected && a.sending == null) {
+                        Text(if (a.sending == ask.id) "Sending…" else if (ask.kind == "files") "Choose files" else "Choose photos")
+                    }
+                    TextButton(onClick = { Net.denyAsk(ask) }, enabled = a.sending == null) { Text("Deny") }
+                }
+            }
         }
     }
 

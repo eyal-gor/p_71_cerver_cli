@@ -47,9 +47,9 @@ data class UiState(
     val error: String? = null,
 )
 
-private class ApiError(msg: String) : Exception(msg)
+internal class ApiError(msg: String) : Exception(msg)
 
-private object Api {
+internal object Api {
     fun call(method: String, path: String, key: String?, body: JSONObject? = null): JSONObject {
         val conn = URL(Net.GATEWAY + path).openConnection() as HttpURLConnection
         conn.requestMethod = method
@@ -83,6 +83,23 @@ object Net {
     private var loop: Job? = null
 
     private val prefs by lazy { app.getSharedPreferences("cerver", Context.MODE_PRIVATE) }
+
+    internal fun api(method: String, path: String, key: String?, body: JSONObject? = null) = Api.call(method, path, key, body)
+
+    // ---- phone asks: requests from your computers (see Asks.kt) ----
+
+    private fun pollAsks() {
+        val key = prefs.getString("api_key", null) ?: return
+        val node = prefs.getString("node_id", null) ?: return
+        runCatching { Asks.update(app, Api.call("GET", "/v2/net/asks?device=$node", key)) }
+    }
+
+    fun denyAsk(a: Ask) { val key = prefs.getString("api_key", null) ?: return; scope.launch { Asks.deny(key, a) } }
+
+    fun sendAsk(a: Ask, uris: List<android.net.Uri>) {
+        val key = prefs.getString("api_key", null) ?: return
+        scope.launch { Asks.send(app, key, a, uris); pollAsks() }
+    }
 
     fun init(context: Context) {
         app = context.applicationContext
@@ -196,7 +213,8 @@ object Net {
                 } catch (e: Exception) {
                     _state.update { it.copy(error = e.message) }
                 }
-                delay(if (_state.value.connected) 3_000 else 30_000)
+                pollAsks()
+                delay(if (_state.value.connected) 3_000 else 15_000)
             }
         }
     }
@@ -228,6 +246,7 @@ object Net {
     fun refresh() {
         scope.launch {
             try { if (_state.value.connected) readEngine() else checkIn() } catch (e: Exception) { _state.update { it.copy(error = e.message) } }
+            pollAsks()
         }
     }
 

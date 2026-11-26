@@ -250,6 +250,8 @@ func main() {
 		err = cmd.Forward(args)
 	case "net":
 		err = cmd.Net(args)
+	case "phone":
+		err = cmd.Phone(args)
 	case "vm":
 		err = cmd.VM(args)
 	case "access":
