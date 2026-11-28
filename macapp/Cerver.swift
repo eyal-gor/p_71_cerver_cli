@@ -3453,6 +3453,15 @@ struct ConnectedApp: Identifiable {
 	let removable: Bool   // Kompany manages its own keys
 }
 
+/// An app that signed in with Cerver (OAuth), like ChatGPT or Codex.
+/// The gateway names it by a hash of its key; the key never reaches this Mac.
+struct SignedInApp: Decodable, Identifiable {
+	let id: String
+	let name: String
+	let access: String          // "run", "look", or "full" (connected before access levels)
+	let last_used_at: String?
+}
+
 /// What this Mac remembers about the keys it made: the key's start and end, never
 /// the key (the gateway shows only 6 characters, too few to revoke by safely).
 struct SavedConnector: Codable { let prefix: String; let last4: String }
@@ -3491,8 +3500,36 @@ final class AppsModel: ObservableObject {
 	@Published var error: String?
 	/// A key and the line to paste, shown once, for apps the Mac can't set up itself.
 	@Published var paste: (name: String, text: String)?
+	/// Apps that signed in with Cerver from their own side (ChatGPT, Codex…).
+	@Published var signedIn: [SignedInApp] = []
+
+	func refreshSignedIn() async {
+		guard let d = await gatewayGET("/v2/connected-apps"),
+			let rows = (try? JSONDecoder().decode([String: [SignedInApp]].self, from: d))?["apps"] else { return }
+		signedIn = rows
+	}
+
+	func setAccess(_ app: SignedInApp, _ access: String) async {
+		busy = app.id; error = nil
+		defer { busy = nil }
+		let body = try? JSONSerialization.data(withJSONObject: ["access": access])
+		if await gatewayRequest("PATCH", "/v2/connected-apps/" + app.id, body: body) == nil {
+			error = "Couldn't change what \(app.name) can do. Try again."
+		}
+		await refreshSignedIn()
+	}
+
+	func disconnect(_ app: SignedInApp) async {
+		busy = app.id; error = nil
+		defer { busy = nil }
+		if await gatewayRequest("DELETE", "/v2/connected-apps/" + app.id) == nil {
+			error = "Couldn't disconnect \(app.name). Try again."
+		}
+		await refreshSignedIn()
+	}
 
 	func refresh() async {
+		await refreshSignedIn()
 		guard let d = await gatewayGET("/v2/auth/keys"),
 			let rows = (try? JSONDecoder().decode([String: [KeyRow]].self, from: d))?["keys"] else { loaded = true; return }
 		var out: [ConnectedApp] = []
@@ -3543,6 +3580,15 @@ final class AppsModel: ObservableObject {
 		saveConnectors(s)
 		await Task.detached { tearDownApp(a.id) }.value
 		await refresh()
+	}
+}
+
+/// How the Connectors page describes a signed-in app's access.
+func accessText(_ access: String) -> String {
+	switch access {
+	case "look": return "Look only: sees computers, reads answers"
+	case "run": return "Can run work on your computers"
+	default: return "Full access (connected before limits; pick a level)"
 	}
 }
 
@@ -3650,6 +3696,38 @@ struct ConnectorsPage: View {
 						}
 					}
 					.padding(.horizontal, 16).padding(.vertical, 12)
+				}
+			}
+
+			if !a.signedIn.isEmpty {
+				Text("Signed in with Cerver").font(.system(size: 17, weight: .semibold)).padding(.top, 6)
+				Text("Apps that connected from their side, like ChatGPT. Choose what each can do, or disconnect it. Changes apply within a minute.")
+					.font(.callout).foregroundStyle(.secondary)
+				Card {
+					ForEach(Array(a.signedIn.enumerated()), id: \.element.id) { i, app in
+						if i > 0 { Divider().padding(.leading, 16) }
+						HStack(spacing: 12) {
+							Image(systemName: app.access == "look" ? "eye" : "bolt.horizontal").frame(width: 22).foregroundStyle(.secondary)
+							VStack(alignment: .leading, spacing: 2) {
+								Text(app.name).font(.system(size: 14))
+								Text(accessText(app.access) + " · " + agoText(parseISO(app.last_used_at)))
+									.font(.system(size: 11.5)).foregroundStyle(app.access == "full" ? .orange : .secondary)
+							}
+							Spacer()
+							if a.busy == app.id { ProgressView().controlSize(.small) }
+							Picker("", selection: Binding(
+								get: { app.access },
+								set: { v in if v != app.access { Task { await a.setAccess(app, v) } } }
+							)) {
+								Text("Can run work").tag("run")
+								Text("Look only").tag("look")
+								if app.access == "full" { Text("Full access").tag("full") }
+							}
+							.labelsHidden().frame(width: 140).disabled(a.busy != nil)
+							Button("Disconnect") { Task { await a.disconnect(app) } }.disabled(a.busy != nil)
+						}
+						.padding(.horizontal, 16).padding(.vertical, 12)
+					}
 				}
 			}
 
